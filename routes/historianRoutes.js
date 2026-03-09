@@ -9,6 +9,34 @@ const router = express.Router()
  */
 
 /**
+ * GET /api/historian/search?q=keyword&limit=100
+ * Search for tags whose FQN contains the query string.
+ * Queries the Historian Tags entity directly.
+ */
+router.get('/search', async (req, res) => {
+  try {
+    const historian = req.app.locals.historian
+    const q = req.query.q
+    const limit = parseInt(req.query.limit) || 100
+    if (!q) return res.status(400).json({ error: 'Provide a q query param' })
+
+    const filter = `contains(FQN, '${q}')`
+    const url = `${historian.baseUrl}/Tags?$filter=${encodeURIComponent(filter)}&$top=${limit}&$orderby=FQN`
+    const data = await historian._get(url)
+    const tags = (data.value || []).map(t => ({
+      fqn: t.FQN,
+      tagType: t.TagType,
+      description: t.Description,
+      engUnit: t.EngUnit,
+    }))
+    res.json({ query: q, count: tags.length, tags })
+  } catch (err) {
+    console.error(`[HistorianRoutes] Tag search error:`, err.message)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+/**
  * GET /api/historian/tag/:fqn
  * Get the current value of a single tag.
  * Example: /api/historian/tag/ColdMilkSeparator1.CurrentWO
