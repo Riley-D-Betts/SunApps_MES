@@ -4,10 +4,14 @@ const config = require('./config')
 const { createProvider } = require('./historian')
 const separationJob = require('./jobs/separationJob')
 const bulkMilkJob = require('./jobs/bulkMilkJob')
+const historianRoutes = require('./routes/historianRoutes')
 
 const app = express()
 const historian = createProvider()
 const startTime = Date.now()
+
+// Make historian available to route handlers
+app.locals.historian = historian
 
 // Health endpoint
 app.get('/health', (req, res) => {
@@ -19,6 +23,9 @@ app.get('/health', (req, res) => {
     lastBulkMilkPoll: bulkMilkJob.getLastPollTime().toISOString(),
   })
 })
+
+// Query API — gateway for SunApps_API to pull Historian data on demand
+app.use('/api/historian', historianRoutes)
 
 // Schedule jobs
 cron.schedule(config.SEPARATION_CRON, () => separationJob.run(historian))

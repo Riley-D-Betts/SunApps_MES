@@ -4,7 +4,7 @@ const dotenv = require('dotenv')
 dotenv.config({ path: path.resolve(__dirname, '../.env') })
 
 module.exports = {
-  PORT: process.env.PORT || 4100,
+  PORT: process.env.PORT || 4300,
   SUNAPPS_API_URL: process.env.SUNAPPS_API_URL || 'http://localhost:4000',
   HISTORIAN_PROVIDER: process.env.HISTORIAN_PROVIDER || 'mock',
   SEPARATION_CRON: process.env.SEPARATION_CRON || '*/5 * * * *',
