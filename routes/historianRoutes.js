@@ -1,5 +1,6 @@
 const express = require('express')
 const router = express.Router()
+const pollStore = require('../services/pollStore')
 
 /**
  * Historian query API — lets SunApps_API (or any client) pull data
@@ -17,19 +18,26 @@ router.get('/search', async (req, res) => {
   try {
     const historian = req.app.locals.historian
     const q = req.query.q
-    const limit = parseInt(req.query.limit) || 100
+    const limit = Math.min(parseInt(req.query.limit) || 100, 10000)
     if (!q) return res.status(400).json({ error: 'Provide a q query param' })
 
     const filter = `contains(FQN, '${q}')`
-    const url = `${historian.baseUrl}/Tags?$filter=${encodeURIComponent(filter)}&$top=${limit}&$orderby=FQN`
-    const data = await historian._get(url)
-    const tags = (data.value || []).map(t => ({
-      fqn: t.FQN,
-      tagType: t.TagType,
-      description: t.Description,
-      engUnit: t.EngUnit,
-    }))
-    res.json({ query: q, count: tags.length, tags })
+    let url = `${historian.baseUrl}/Tags?$filter=${encodeURIComponent(filter)}&$top=${limit}&$orderby=FQN`
+
+    const allTags = []
+    while (url && allTags.length < limit) {
+      const data = await historian._get(url)
+      const page = (data.value || []).map(t => ({
+        fqn: t.FQN,
+        tagType: t.TagType,
+        description: t.Description,
+        engUnit: t.EngUnit,
+      }))
+      allTags.push(...page)
+      url = allTags.length < limit ? (data['@odata.nextLink'] || null) : null
+    }
+
+    res.json({ query: q, count: allTags.length, tags: allTags })
   } catch (err) {
     console.error(`[HistorianRoutes] Tag search error:`, err.message)
     res.status(500).json({ error: err.message })
@@ -71,6 +79,10 @@ router.get('/tags', async (req, res) => {
         return { fqn, value }
       })
     )
+
+    // Record into poll store so callers can query this data as history later
+    pollStore.record(results)
+
     res.json({ tags: results })
   } catch (err) {
     console.error(`[HistorianRoutes] Multi-tag read error:`, err.message)
@@ -79,8 +91,11 @@ router.get('/tags', async (req, res) => {
 })
 
 /**
- * GET /api/historian/history/:fqn?since=ISO&until=ISO
+ * GET /api/historian/history/:fqn?since=ISO&until=ISO&resolution=raw|minutely|hourly|daily
  * Get historical values for a tag within a time range.
+ *
+ * For non-raw resolutions, tries AnalogSummary first (native Historian aggregation).
+ * Falls back to ProcessValues + server-side step resampling if AnalogSummary fails.
  */
 router.get('/history/:fqn', async (req, res) => {
   try {
@@ -88,9 +103,107 @@ router.get('/history/:fqn', async (req, res) => {
     const fqn = req.params.fqn
     const since = req.query.since ? new Date(req.query.since) : undefined
     const until = req.query.until ? new Date(req.query.until) : undefined
+    const resolution = req.query.resolution || 'raw' // raw | minutely | hourly | daily
 
-    const values = await historian._queryProcessValues(fqn, since, until)
-    res.json({ fqn, count: values.length, values })
+    const INTERVAL_MS = { minutely: 60_000, hourly: 3_600_000, daily: 86_400_000 }
+    const _debug = { resolution, pages: [] }
+
+    // ── Non-raw: try AnalogSummary first ─────────────────────────────────────
+    if (resolution in INTERVAL_MS && since) {
+      const intervalMs = INTERVAL_MS[resolution]
+      const endTime = until || new Date()
+      const summaryFilter = `FQN eq '${fqn}' and StartDateTime ge ${since.toISOString()} and EndDateTime le ${endTime.toISOString()}`
+      const summaryUrl = `${historian.baseUrl}/AnalogSummary?$filter=${encodeURIComponent(summaryFilter)}&Resolution=${intervalMs}`
+
+      _debug.entity = 'AnalogSummary'
+      _debug.summaryUrl = summaryUrl
+
+      try {
+        const allSummary = []
+        let url = summaryUrl
+        while (url && allSummary.length < 100000) {
+          const data = await historian._get(url)
+          const page = data.value || []
+          _debug.pages.push({ url, recordsReturned: page.length, nextLink: data['@odata.nextLink'] || null })
+          allSummary.push(...page)
+          url = data['@odata.nextLink'] || null
+        }
+
+        if (allSummary.length > 0) {
+          // Normalize AnalogSummary rows to the same shape as ProcessValues rows
+          const values = allSummary.map(r => ({
+            DateTime: r.StartDateTime,
+            EndDateTime: r.EndDateTime,
+            Value: r.Average ?? r.Last ?? null,
+            Average: r.Average,
+            Minimum: r.Minimum,
+            Maximum: r.Maximum,
+            Count: r.Count,
+            OpcQuality: r.OPCQuality,
+            FQN: fqn,
+            _summary: true,
+          }))
+          _debug.summaryCount = values.length
+          return res.json({ fqn, resolution, source: 'AnalogSummary', count: values.length, values, _debug })
+        }
+
+        _debug.summaryEmpty = true
+        console.log(`[HistorianRoutes] AnalogSummary returned 0 rows for ${fqn}, falling back to ProcessValues`)
+      } catch (summaryErr) {
+        _debug.summaryError = summaryErr.message
+        console.warn(`[HistorianRoutes] AnalogSummary failed for ${fqn}: ${summaryErr.message} — falling back to ProcessValues`)
+      }
+    }
+
+    // ── Raw or AnalogSummary fallback: fetch ProcessValues ───────────────────
+    _debug.entity = 'ProcessValues'
+    let filter = `FQN eq '${fqn}'`
+    if (since) filter += ` and DateTime ge ${since.toISOString()}`
+    if (until) filter += ` and DateTime le ${until.toISOString()}`
+    let url = `${historian.baseUrl}/ProcessValues?$filter=${encodeURIComponent(filter)}&$orderby=DateTime`
+
+    const allRaw = []
+    while (url && allRaw.length < 100000) {
+      const data = await historian._get(url)
+      const page = data.value || []
+      _debug.pages.push({ url, recordsReturned: page.length, nextLink: data['@odata.nextLink'] || null })
+      allRaw.push(...page)
+      url = data['@odata.nextLink'] || null
+    }
+
+    // Step-function resample for non-raw resolutions
+    let values = allRaw
+    if (resolution in INTERVAL_MS && allRaw.length > 0 && since) {
+      const intervalMs = INTERVAL_MS[resolution]
+      const end = until || new Date()
+      const resampled = []
+      let t = new Date(since)
+      let rawIdx = 0
+      let lastKnown = null
+
+      while (t <= end) {
+        while (rawIdx < allRaw.length && new Date(allRaw[rawIdx].DateTime) <= t) {
+          lastKnown = allRaw[rawIdx]
+          rawIdx++
+        }
+        if (lastKnown !== null) {
+          resampled.push({
+            DateTime: t.toISOString(),
+            Value: lastKnown.Value,
+            Text: lastKnown.Text,
+            FQN: lastKnown.FQN,
+            OpcQuality: lastKnown.OpcQuality,
+            interpolated: true,
+          })
+        }
+        t = new Date(t.getTime() + intervalMs)
+      }
+      values = resampled
+      _debug.rawCount = allRaw.length
+      _debug.resampledCount = resampled.length
+    }
+
+    res.json({ fqn, resolution, source: 'ProcessValues', count: values.length, values, _debug })
   } catch (err) {
     console.error(`[HistorianRoutes] History read error:`, err.message)
     res.status(500).json({ error: err.message })
@@ -115,6 +228,33 @@ router.get('/batches', async (req, res) => {
     console.error(`[HistorianRoutes] Batches read error:`, err.message)
     res.status(500).json({ error: err.message })
   }
+})
+
+/**
+ * GET /api/historian/polled-history/:fqn?since=ISO&until=ISO
+ * Return tag values that were captured by live polling (via /tags endpoint).
+ * This is a supplement to the Historian archive for tags with low archive frequency.
+ */
+router.get('/polled-history/:fqn', (req, res) => {
+  try {
+    const fqn = req.params.fqn
+    const since = req.query.since ? new Date(req.query.since) : undefined
+    const until = req.query.until ? new Date(req.query.until) : undefined
+
+    const values = pollStore.query(fqn, since, until)
+    res.json({ fqn, source: 'poll-store', count: values.length, values })
+  } catch (err) {
+    console.error(`[HistorianRoutes] Poll store query error:`, err.message)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+/**
+ * GET /api/historian/poll-store/stats
+ * Return current poll store statistics (FQN → point count).
+ */
+router.get('/poll-store/stats', (req, res) => {
+  res.json({ fqns: pollStore.listFqns(), counts: pollStore.stats() })
 })
 
 module.exports = router

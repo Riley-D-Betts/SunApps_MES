@@ -86,6 +86,7 @@ class RestProvider extends BaseProvider {
    * NTLM-authenticated GET returning parsed JSON.
    */
   _get(url) {
+    console.log(`[RestProvider] --> GET ${url}`)
     return new Promise((resolve, reject) => {
       httpntlm.get({
         url,
@@ -94,14 +95,21 @@ class RestProvider extends BaseProvider {
         password: this.password,
         headers: { 'Accept': 'application/json' },
       }, (err, res) => {
-        if (err) return reject(err)
+        if (err) {
+          console.error(`[RestProvider] <-- ERROR:`, err.message)
+          return reject(err)
+        }
+        console.log(`[RestProvider] <-- HTTP ${res.statusCode}, body length: ${res.body?.length ?? 0} chars`)
+        console.log(`[RestProvider] <-- RAW BODY (first 500 chars): ${res.body?.slice(0, 500)}`)
         if (res.statusCode !== 200) {
           return reject(new Error(`Historian API ${res.statusCode}: ${res.body?.slice(0, 300)}`))
         }
         try {
           // Historian sometimes prepends a BOM
           const body = res.body.replace(/^\uFEFF/, '')
-          resolve(JSON.parse(body))
+          const parsed = JSON.parse(body)
+          console.log(`[RestProvider] <-- PARSED: keys=${Object.keys(parsed).join(', ')}, value.length=${parsed.value?.length ?? 'N/A'}, nextLink=${parsed['@odata.nextLink'] ?? 'none'}`)
+          resolve(parsed)
         } catch (e) {
           reject(new Error(`Invalid JSON from Historian: ${res.body?.slice(0, 300)}`))
         }
@@ -111,15 +119,27 @@ class RestProvider extends BaseProvider {
 
   /**
    * Query ProcessValues for one tag, optionally filtered by time range.
+   * Follows @odata.nextLink to collect all pages (server caps each page).
    * AVEVA on-prem uses bare ISO datetimes (NOT datetimeoffset'...' wrapper).
    */
-  async _queryProcessValues(fqn, since, until) {
+  async _queryProcessValues(fqn, since, until, { maxRecords = 50000 } = {}) {
+    console.log(`[RestProvider] _queryProcessValues: fqn=${fqn}, since=${since?.toISOString() ?? 'none'}, until=${until?.toISOString() ?? 'none'}`)
     let filter = `FQN eq '${fqn}'`
     if (since) filter += ` and DateTime ge ${since.toISOString()}`
     if (until) filter += ` and DateTime le ${until.toISOString()}`
-    const url = `${this.baseUrl}/ProcessValues?$filter=${encodeURIComponent(filter)}`
-    const data = await this._get(url)
-    return data.value || []
+    let url = `${this.baseUrl}/ProcessValues?$filter=${encodeURIComponent(filter)}&$orderby=DateTime`
+
+    const all = []
+    let page = 0
+    while (url && all.length < maxRecords) {
+      page++
+      console.log(`[RestProvider] _queryProcessValues: fetching page ${page}, collected so far: ${all.length}`)
+      const data = await this._get(url)
+      all.push(...(data.value || []))
+      url = all.length < maxRecords ? (data['@odata.nextLink'] || null) : null
+    }
+    console.log(`[RestProvider] _queryProcessValues: done — ${all.length} total records across ${page} page(s)`)
+    return all
   }
 
   /**
