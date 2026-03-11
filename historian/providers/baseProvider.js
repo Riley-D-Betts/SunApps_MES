@@ -32,6 +32,34 @@ class BaseProvider {
   async getBulkMilkFlowData(since) {
     throw new Error('getBulkMilkFlowData() not implemented')
   }
+
+  /**
+   * Get blend tank work order status for all 4 tanks.
+   * @returns {Promise<Array<{
+   *   tankId: string,
+   *   currentWO: string,
+   *   currentItem: string,
+   *   currentWOState: string,
+   *   jobRunning: number,
+   *   batchSize: number,
+   *   fromEntName: string,
+   *   toEntName: string
+   * }>>}
+   */
+  async getBlendTankStatus() {
+    throw new Error('getBlendTankStatus() not implemented')
+  }
+
+  /**
+   * Get milk/cream line batch totalizer readings.
+   * @returns {Promise<Array<{
+   *   line: string,
+   *   totalizerLbs: number
+   * }>>}
+   */
+  async getMilkLineStatus() {
+    throw new Error('getMilkLineStatus() not implemented')
+  }
 }
 
 module.exports = BaseProvider

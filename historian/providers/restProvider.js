@@ -8,14 +8,20 @@ const httpntlm = require('httpntlm')
  *
  * Separation batches are detected via XFR (transfer) tags on the separator IO:
  *   - Ingr_Sep_CMSep1_IO.XFR.TransferCompleteS.0  — trigger when transfer finishes
- *   - Ingr_Sep_CMSep1_IO.XFR.QTYActual            — per-batch input volume (resets to 0)
+ *   - Ingr_Sep_CMSep1_IO.XFR.QTYActual            — per-batch input volume (resets to 0 between batches)
  *   - Ingr_Sep_CMSep1_IO.XFR.Source                — source silo (e.g. "MSilo1")
  *   - Ingr_Sep_CMSep1_IO.XFR.ItemID                — item ID
- *   - Ing_Sep_CMSep1_HIST.Cream_Flow_Totalized     — per-batch cream (resets between batches)
- *   - Ing_Sep_CMSep1_HIST.Skim_Flow_Totalized      — per-batch skim (resets between batches)
+ *   - Ing_Sep_CMSep1_HIST.Cream_Flow_Totalized     — per-batch cream (resets to 0 between batches)
+ *   - Ing_Sep_CMSep1_HIST.Skim_Flow_Totalized      — per-batch skim (resets to 0 between batches)
  *
- * Bulk milk flow is computed as deltas on the cream/skim flow counters between polls.
+ * All volume tags reset to 0 between batches, so the value at TransferComplete
+ * IS the per-batch total.
  */
+
+// Density constants (PPG — pounds per gallon)
+// Flow totalizers record gallons; multiply by these to get LBS
+const CREAM_DENSITY_PPG = 8.3
+const SKIM_DENSITY_PPG = 8.63
 
 // Tag name constants
 const TAGS = {
@@ -31,6 +37,23 @@ const TAGS = {
   // Flow totals (per-batch, reset between batches)
   CREAM_FLOW_TOTAL: 'Ing_Sep_CMSep1_HIST.Cream_Flow_Totalized',
   SKIM_FLOW_TOTAL:  'Ing_Sep_CMSep1_HIST.Skim_Flow_Totalized',
+
+  // Blend tank MES tags (per-tank prefix substituted at query time)
+  BT_CURRENT_WO:    '.CurrentWO',
+  BT_CURRENT_ITEM:  '.CurrentItem',
+  BT_WO_STATE:      '.CurrentWOState',
+  BT_JOB_RUNNING:   '.JobRunning',
+  BT_BATCH_SIZE:    '.BatchSize',
+  BT_FROM_ENT:      '.FromEntName',
+  BT_TO_ENT:        '.ToEntName',
+
+  // Milk line batch totalizers (already in LBS, reset per batch)
+  ML1_TOTALIZER: 'ML1.BATCHTOTALIZER',
+  ML2_TOTALIZER: 'ML2.BATCHTOTALIZER',
+  ML3_TOTALIZER: 'ML3.BATCHTOTALIZER',
+  ML4_TOTALIZER: 'ML4.BATCHTOTALIZER',
+  CL1_TOTALIZER: 'CL1.BATCHTOTALIZER',
+  CL2_TOTALIZER: 'CL2.BATCHTOTALIZER',
 
   // MES work order tags (from ColdMilkSeparator1)
   WO_CURRENT:    'ColdMilkSeparator1.CurrentWO',
@@ -108,12 +131,12 @@ class RestProvider extends BaseProvider {
   }
 
   /**
-   * Get the historical value of a tag at or just before a specific timestamp.
-   * Queries a small window ending at the target time and returns the last value.
+   * Get the value of a tag at or just before a specific timestamp.
+   * Queries a 30-minute window and returns the last recorded value.
    */
   async _getValueAt(fqn, timestamp) {
-    const from = new Date(timestamp.getTime() - 1000)
-    const values = await this._queryProcessValues(fqn, from, timestamp)
+    const windowStart = new Date(timestamp.getTime() - 30 * 60 * 1000)
+    const values = await this._queryProcessValues(fqn, windowStart, timestamp)
     return values.length > 0 ? values[values.length - 1] : null
   }
 
@@ -132,22 +155,16 @@ class RestProvider extends BaseProvider {
 
   /**
    * Detect completed separation batches by watching the XFR TransferComplete
-   * trigger on the separator IO. This fires when the physical transfer finishes
-   * and is the most reliable moment to read per-batch quantities, since:
-   *   - XFR.QTYActual holds the batch input volume (resets to 0 after)
-   *   - Cream/Skim_Flow_Totalized hold per-batch cream/skim (reset after)
-   *   - XFR.Source holds the source silo name
-   *   - The MES work order tags still hold the active WO info
+   * trigger. All volume tags (QTYActual, Cream/Skim_Flow_Totalized) reset
+   * to 0 between batches, so the value at TransferComplete is the per-batch total.
    */
   async getSeparatorBatches(since) {
     const now = new Date()
 
-    // Look for TransferComplete trigger events since last poll
     const xfrEvents = await this._queryProcessValues(
       TAGS.SEP_XFR_TRANSFER_COMPLETE, since, now
     )
 
-    // Filter to only "fired" events (value = 1)
     const completedEvents = xfrEvents.filter(e => e.Value === 1)
 
     if (completedEvents.length === 0) return []
@@ -169,24 +186,18 @@ class RestProvider extends BaseProvider {
   }
 
   /**
-   * Read all batch-related tags at the TransferComplete timestamp and
-   * assemble the batch object. At this moment:
-   *   - XFR.QTYActual = total input volume for this batch
-   *   - Cream_Flow_Totalized = total cream produced this batch
-   *   - Skim_Flow_Totalized = total skim produced this batch
-   *   - WO tags = active work order info (clears ~5s later at EndJob)
+   * Read all batch-related tags at the TransferComplete timestamp.
+   * Volume tags reset to 0 between batches, so the value at this moment
+   * is the per-batch total.
    */
   async _buildBatchFromTransfer(transferTime) {
     const tagMap = await this._getValuesAt([
-      // XFR transfer data (per-batch quantities)
       TAGS.SEP_XFR_QTY_ACTUAL,
       TAGS.SEP_XFR_SOURCE,
       TAGS.SEP_XFR_ITEM_ID,
       TAGS.SEP_XFR_EU,
-      // Flow totals (per-batch, reset between batches)
       TAGS.CREAM_FLOW_TOTAL,
       TAGS.SKIM_FLOW_TOTAL,
-      // MES work order context
       TAGS.WO_CURRENT,
       TAGS.WO_FROM_ENT,
       TAGS.WO_TO_ENT,
@@ -204,27 +215,30 @@ class RestProvider extends BaseProvider {
     const workOrder = txt(TAGS.WO_CURRENT)
     const xfrSource = txt(TAGS.SEP_XFR_SOURCE)
 
-    // Need at least a work order or source to identify the batch
     if (!workOrder && !xfrSource) {
       console.log(`[RestProvider] No WO or source at ${transferTime.toISOString()}, skipping`)
       return null
     }
 
-    // Use work order as batchId; fall back to timestamp-based ID
     const batchId = workOrder || `XFR-${transferTime.getTime()}`
+    const inputVolume = val(TAGS.SEP_XFR_QTY_ACTUAL) // already in LBS
+    const creamGallons = val(TAGS.CREAM_FLOW_TOTAL)
+    const skimGallons = val(TAGS.SKIM_FLOW_TOTAL)
+    const creamVolume = creamGallons * CREAM_DENSITY_PPG  // gallons → LBS
+    const skimVolume = skimGallons * SKIM_DENSITY_PPG     // gallons → LBS
+
+    console.log(`[RestProvider] Batch ${batchId}: input=${inputVolume.toFixed(1)} LBS, cream=${creamGallons.toFixed(1)} gal (${creamVolume.toFixed(1)} LBS), skim=${skimGallons.toFixed(1)} gal (${skimVolume.toFixed(1)} LBS)`)
 
     return {
       batchId,
       sourceSilo: xfrSource || txt(TAGS.WO_FROM_ENT),
-      inputVolume: val(TAGS.SEP_XFR_QTY_ACTUAL),
-      creamVolume: val(TAGS.CREAM_FLOW_TOTAL),
-      skimVolume: val(TAGS.SKIM_FLOW_TOTAL),
-      batchStart: new Date(transferTime.getTime() - 30 * 60 * 1000), // approximate
+      inputVolume,
+      creamVolume,
+      skimVolume,
+      batchStart: new Date(transferTime.getTime() - 30 * 60 * 1000),
       batchEnd: transferTime,
-      // XFR metadata
       xfrItemId: txt(TAGS.SEP_XFR_ITEM_ID),
       xfrUnit: txt(TAGS.SEP_XFR_EU),
-      // MES work order context
       workOrder,
       destinationEntity: txt(TAGS.WO_TO_ENT),
       prodItem: txt(TAGS.WO_PROD_ITEM),
@@ -283,6 +297,62 @@ class RestProvider extends BaseProvider {
       creamTotal,
       skimTotal,
     }]
+  }
+  // ── Blend tank status ─────────────────────────────────────────────
+
+  /**
+   * Read current MES work order tags for all 4 blend tanks.
+   */
+  async getBlendTankStatus() {
+    const tanks = ['BlendTank1A', 'BlendTank1B', 'BlendTank2A', 'BlendTank2B']
+    const suffixes = [
+      TAGS.BT_CURRENT_WO, TAGS.BT_CURRENT_ITEM, TAGS.BT_WO_STATE,
+      TAGS.BT_JOB_RUNNING, TAGS.BT_BATCH_SIZE, TAGS.BT_FROM_ENT, TAGS.BT_TO_ENT,
+    ]
+
+    const results = await Promise.all(tanks.map(async (tankId) => {
+      const fqns = suffixes.map(s => `${tankId}${s}`)
+      const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn)))
+      const val = (i) => values[i]?.Value ?? 0
+      const txt = (i) => values[i]?.Text ?? ''
+
+      return {
+        tankId,
+        currentWO: txt(0),
+        currentItem: txt(1),
+        currentWOState: txt(2),
+        jobRunning: val(3),
+        batchSize: val(4),
+        fromEntName: txt(5),
+        toEntName: txt(6),
+      }
+    }))
+
+    return results
+  }
+
+  // ── Milk/cream line totalizers ──────────────────────────────────────
+
+  /**
+   * Read current batch totalizer values for all milk and cream lines.
+   * Totalizers are already in LBS and reset to 0 per batch.
+   */
+  async getMilkLineStatus() {
+    const lines = [
+      { line: 'ML1', fqn: TAGS.ML1_TOTALIZER },
+      { line: 'ML2', fqn: TAGS.ML2_TOTALIZER },
+      { line: 'ML3', fqn: TAGS.ML3_TOTALIZER },
+      { line: 'ML4', fqn: TAGS.ML4_TOTALIZER },
+      { line: 'CL1', fqn: TAGS.CL1_TOTALIZER },
+      { line: 'CL2', fqn: TAGS.CL2_TOTALIZER },
+    ]
+
+    const values = await Promise.all(lines.map(l => this._getCurrentValue(l.fqn)))
+
+    return lines.map((l, i) => ({
+      line: l.line,
+      totalizerLbs: values[i]?.Value ?? 0,
+    }))
   }
 }
 
