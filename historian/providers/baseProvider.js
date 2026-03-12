@@ -34,13 +34,12 @@ class BaseProvider {
   }
 
   /**
-   * Get blend tank work order status for all 4 tanks.
+   * Get blend tank status for all 4 tanks.
+   * Uses NOTE_STRING (product name from Atlas) for batch detection.
    * @returns {Promise<Array<{
    *   tankId: string,
-   *   currentWO: string,
-   *   currentItem: string,
-   *   currentWOState: string,
-   *   jobRunning: number,
+   *   productName: string,
+   *   weightLbs: number,
    *   batchSize: number,
    *   fromEntName: string,
    *   toEntName: string

@@ -38,14 +38,15 @@ const TAGS = {
   CREAM_FLOW_TOTAL: 'Ing_Sep_CMSep1_HIST.Cream_Flow_Totalized',
   SKIM_FLOW_TOTAL:  'Ing_Sep_CMSep1_HIST.Skim_Flow_Totalized',
 
-  // Blend tank MES tags (per-tank prefix substituted at query time)
-  BT_CURRENT_WO:    '.CurrentWO',
-  BT_CURRENT_ITEM:  '.CurrentItem',
-  BT_WO_STATE:      '.CurrentWOState',
-  BT_JOB_RUNNING:   '.JobRunning',
+  // Blend tank tags (per-tank prefix substituted at query time)
+  // NOTE: MES WO tags (CurrentWO, JobRunning, etc.) are stale — plant uses Atlas, not MES.
+  // NOTE_STRING is the live product name written by Atlas via PLC.
+  BT_NOTE_STRING:   '.NOTE_STRING',
+  BT_WEIGHT_LBS:    '.100LT.SCL_LBS',
   BT_BATCH_SIZE:    '.BatchSize',
   BT_FROM_ENT:      '.FromEntName',
   BT_TO_ENT:        '.ToEntName',
+
 
   // Milk line batch totalizers (already in LBS, reset per batch)
   ML1_TOTALIZER: 'ML1.BATCHTOTALIZER',
@@ -54,6 +55,14 @@ const TAGS = {
   ML4_TOTALIZER: 'ML4.BATCHTOTALIZER',
   CL1_TOTALIZER: 'CL1.BATCHTOTALIZER',
   CL2_TOTALIZER: 'CL2.BATCHTOTALIZER',
+
+  // Milk/cream line product names (from SCADA batching screen)
+  ML1_PRODUCT: 'ML1.CURRENTSILOPRODUCTNAME',
+  ML2_PRODUCT: 'ML2.CURRENTSILOPRODUCTNAME',
+  ML3_PRODUCT: 'ML3.CURRENTSILOPRODUCTNAME',
+  ML4_PRODUCT: 'ML4.CURRENTSILOPRODUCTNAME',
+  CL1_PRODUCT: 'CL1.CURRENTSILOPRODUCTNAME',
+  CL2_PRODUCT: 'CL2.CURRENTSILOPRODUCTNAME',
 
   // MES work order tags (from ColdMilkSeparator1)
   WO_CURRENT:    'ColdMilkSeparator1.CurrentWO',
@@ -84,9 +93,11 @@ class RestProvider extends BaseProvider {
 
   /**
    * NTLM-authenticated GET returning parsed JSON.
+   * @param {string} url
+   * @param {{ verbose?: boolean }} opts - verbose=true logs request/response details (default: false)
    */
-  _get(url) {
-    console.log(`[RestProvider] --> GET ${url}`)
+  _get(url, { verbose = true } = {}) {
+    if (verbose) console.log(`[RestProvider] --> GET ${url}`)
     return new Promise((resolve, reject) => {
       httpntlm.get({
         url,
@@ -99,8 +110,10 @@ class RestProvider extends BaseProvider {
           console.error(`[RestProvider] <-- ERROR:`, err.message)
           return reject(err)
         }
-        console.log(`[RestProvider] <-- HTTP ${res.statusCode}, body length: ${res.body?.length ?? 0} chars`)
-        console.log(`[RestProvider] <-- RAW BODY (first 500 chars): ${res.body?.slice(0, 500)}`)
+        if (verbose) {
+          console.log(`[RestProvider] <-- HTTP ${res.statusCode}, body length: ${res.body?.length ?? 0} chars`)
+          console.log(`[RestProvider] <-- RAW BODY (first 500 chars): ${res.body?.slice(0, 500)}`)
+        }
         if (res.statusCode !== 200) {
           return reject(new Error(`Historian API ${res.statusCode}: ${res.body?.slice(0, 300)}`))
         }
@@ -108,7 +121,7 @@ class RestProvider extends BaseProvider {
           // Historian sometimes prepends a BOM
           const body = res.body.replace(/^\uFEFF/, '')
           const parsed = JSON.parse(body)
-          console.log(`[RestProvider] <-- PARSED: keys=${Object.keys(parsed).join(', ')}, value.length=${parsed.value?.length ?? 'N/A'}, nextLink=${parsed['@odata.nextLink'] ?? 'none'}`)
+          if (verbose) console.log(`[RestProvider] <-- PARSED: keys=${Object.keys(parsed).join(', ')}, value.length=${parsed.value?.length ?? 'N/A'}, nextLink=${parsed['@odata.nextLink'] ?? 'none'}`)
           resolve(parsed)
         } catch (e) {
           reject(new Error(`Invalid JSON from Historian: ${res.body?.slice(0, 300)}`))
@@ -122,8 +135,8 @@ class RestProvider extends BaseProvider {
    * Follows @odata.nextLink to collect all pages (server caps each page).
    * AVEVA on-prem uses bare ISO datetimes (NOT datetimeoffset'...' wrapper).
    */
-  async _queryProcessValues(fqn, since, until, { maxRecords = 50000 } = {}) {
-    console.log(`[RestProvider] _queryProcessValues: fqn=${fqn}, since=${since?.toISOString() ?? 'none'}, until=${until?.toISOString() ?? 'none'}`)
+  async _queryProcessValues(fqn, since, until, { maxRecords = 50000, verbose = true } = {}) {
+    if (verbose) console.log(`[RestProvider] _queryProcessValues: fqn=${fqn}, since=${since?.toISOString() ?? 'none'}, until=${until?.toISOString() ?? 'none'}`)
     let filter = `FQN eq '${fqn}'`
     if (since) filter += ` and DateTime ge ${since.toISOString()}`
     if (until) filter += ` and DateTime le ${until.toISOString()}`
@@ -133,21 +146,24 @@ class RestProvider extends BaseProvider {
     let page = 0
     while (url && all.length < maxRecords) {
       page++
-      console.log(`[RestProvider] _queryProcessValues: fetching page ${page}, collected so far: ${all.length}`)
-      const data = await this._get(url)
+      if (verbose) console.log(`[RestProvider] _queryProcessValues: fetching page ${page}, collected so far: ${all.length}`)
+      const data = await this._get(url, { verbose })
       all.push(...(data.value || []))
       url = all.length < maxRecords ? (data['@odata.nextLink'] || null) : null
     }
-    console.log(`[RestProvider] _queryProcessValues: done — ${all.length} total records across ${page} page(s)`)
+    if (verbose) console.log(`[RestProvider] _queryProcessValues: done — ${all.length} total records across ${page} page(s)`)
     return all
   }
 
   /**
    * Get the latest (current) value of a single tag.
+   * Uses Tags('fqn')/Raw endpoint which returns real-time data with correct timestamps.
+   * The ProcessValues endpoint is cached/delayed (~1h behind due to Historian DST skew).
    */
-  async _getCurrentValue(fqn) {
-    const values = await this._queryProcessValues(fqn)
-    return values[0] || null
+  async _getCurrentValue(fqn, { verbose = true } = {}) {
+    const url = `${this.baseUrl}/Tags('${encodeURIComponent(fqn)}')/Raw?$orderby=DateTime%20desc&$top=1`
+    const data = await this._get(url, { verbose })
+    return data.value?.[0] || null
   }
 
   /**
@@ -280,8 +296,8 @@ class RestProvider extends BaseProvider {
    */
   async getBulkMilkFlowData(since) {
     const [creamPv, skimPv] = await Promise.all([
-      this._getCurrentValue(TAGS.CREAM_FLOW_TOTAL),
-      this._getCurrentValue(TAGS.SKIM_FLOW_TOTAL),
+      this._getCurrentValue(TAGS.CREAM_FLOW_TOTAL, { verbose: false }),
+      this._getCurrentValue(TAGS.SKIM_FLOW_TOTAL, { verbose: false }),
     ])
 
     const creamTotal = creamPv?.Value ?? 0
@@ -321,30 +337,30 @@ class RestProvider extends BaseProvider {
   // ── Blend tank status ─────────────────────────────────────────────
 
   /**
-   * Read current MES work order tags for all 4 blend tanks.
+   * Read current blend tank status for all 4 tanks.
+   * Uses NOTE_STRING (product name from Atlas) + tank weight for activity detection.
+   * MES WO tags (CurrentWO, JobRunning) are stale and not used.
    */
   async getBlendTankStatus() {
     const tanks = ['BlendTank1A', 'BlendTank1B', 'BlendTank2A', 'BlendTank2B']
     const suffixes = [
-      TAGS.BT_CURRENT_WO, TAGS.BT_CURRENT_ITEM, TAGS.BT_WO_STATE,
-      TAGS.BT_JOB_RUNNING, TAGS.BT_BATCH_SIZE, TAGS.BT_FROM_ENT, TAGS.BT_TO_ENT,
+      TAGS.BT_NOTE_STRING, TAGS.BT_WEIGHT_LBS, TAGS.BT_BATCH_SIZE,
+      TAGS.BT_FROM_ENT, TAGS.BT_TO_ENT,
     ]
 
     const results = await Promise.all(tanks.map(async (tankId) => {
       const fqns = suffixes.map(s => `${tankId}${s}`)
-      const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn)))
+      const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
       const val = (i) => values[i]?.Value ?? 0
       const txt = (i) => values[i]?.Text ?? ''
 
       return {
         tankId,
-        currentWO: txt(0),
-        currentItem: txt(1),
-        currentWOState: txt(2),
-        jobRunning: val(3),
-        batchSize: val(4),
-        fromEntName: txt(5),
-        toEntName: txt(6),
+        productName: txt(0),       // NOTE_STRING — Atlas product name
+        weightLbs: val(1),          // 100LT.SCL_LBS — tank weight
+        batchSize: val(2),
+        fromEntName: txt(3),
+        toEntName: txt(4),
       }
     }))
 
@@ -359,19 +375,23 @@ class RestProvider extends BaseProvider {
    */
   async getMilkLineStatus() {
     const lines = [
-      { line: 'ML1', fqn: TAGS.ML1_TOTALIZER },
-      { line: 'ML2', fqn: TAGS.ML2_TOTALIZER },
-      { line: 'ML3', fqn: TAGS.ML3_TOTALIZER },
-      { line: 'ML4', fqn: TAGS.ML4_TOTALIZER },
-      { line: 'CL1', fqn: TAGS.CL1_TOTALIZER },
-      { line: 'CL2', fqn: TAGS.CL2_TOTALIZER },
+      { line: 'ML1', totFqn: TAGS.ML1_TOTALIZER, prodFqn: TAGS.ML1_PRODUCT },
+      { line: 'ML2', totFqn: TAGS.ML2_TOTALIZER, prodFqn: TAGS.ML2_PRODUCT },
+      { line: 'ML3', totFqn: TAGS.ML3_TOTALIZER, prodFqn: TAGS.ML3_PRODUCT },
+      { line: 'ML4', totFqn: TAGS.ML4_TOTALIZER, prodFqn: TAGS.ML4_PRODUCT },
+      { line: 'CL1', totFqn: TAGS.CL1_TOTALIZER, prodFqn: TAGS.CL1_PRODUCT },
+      { line: 'CL2', totFqn: TAGS.CL2_TOTALIZER, prodFqn: TAGS.CL2_PRODUCT },
     ]
 
-    const values = await Promise.all(lines.map(l => this._getCurrentValue(l.fqn)))
+    const values = await Promise.all(lines.flatMap(l => [
+      this._getCurrentValue(l.totFqn, { verbose: false }),
+      this._getCurrentValue(l.prodFqn, { verbose: false }),
+    ]))
 
     return lines.map((l, i) => ({
       line: l.line,
-      totalizerLbs: values[i]?.Value ?? 0,
+      totalizerLbs: values[i * 2]?.Value ?? 0,
+      productName: values[i * 2 + 1]?.Text ?? '',
     }))
   }
 }

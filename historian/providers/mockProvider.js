@@ -52,16 +52,15 @@ class MockProvider extends BaseProvider {
   async getBlendTankStatus() {
     this._blendTankCycle++
     const tanks = ['BlendTank1A', 'BlendTank1B', 'BlendTank2A', 'BlendTank2B']
+    const mockProducts = ['Marcels 1%', 'KS 2% org', 'Conv 3.25%', 'Horizon whole']
 
     return tanks.map((tankId, i) => {
-      // Simulate tank 1A running a job every ~10 cycles, others idle
+      // Simulate tank 1A with a product every ~10 cycles, others idle
       const isActive = i === 0 && this._blendTankCycle % 20 >= 5 && this._blendTankCycle % 20 <= 15
       return {
         tankId,
-        currentWO: isActive ? `BT-WO-${Math.floor(this._blendTankCycle / 20) + 100}` : '',
-        currentItem: isActive ? '400001' : '',
-        currentWOState: isActive ? 'Running' : '',
-        jobRunning: isActive ? 1 : 0,
+        productName: isActive ? mockProducts[this._blendTankCycle % mockProducts.length] : '',
+        weightLbs: isActive ? 20000 + Math.floor(Math.random() * 30000) : 0,
         batchSize: isActive ? 50000 : 0,
         fromEntName: isActive ? 'MSilo1' : '',
         toEntName: isActive ? 'UHT1' : '',
@@ -71,19 +70,23 @@ class MockProvider extends BaseProvider {
 
   async getMilkLineStatus() {
     const lines = ['ML1', 'ML2', 'ML3', 'ML4', 'CL1', 'CL2']
+    const mockProducts = {
+      ML1: 'Conventional Fat Free', ML2: 'Raw Conventional',
+      ML3: '', ML4: '',
+      CL1: 'Raw Conventional Cream', CL2: '',
+    }
 
     return lines.map(line => {
       // Simulate totalizer accumulation, occasional resets
       if (Math.random() < 0.05) {
-        // Reset — simulate batch boundary
         this._lineTotalizers[line] = 0
       } else {
-        // Accumulate
         this._lineTotalizers[line] += Math.floor(Math.random() * 500)
       }
       return {
         line,
         totalizerLbs: this._lineTotalizers[line],
+        productName: this._lineTotalizers[line] > 0 ? (mockProducts[line] || '') : '',
       }
     })
   }

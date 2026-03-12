@@ -9,7 +9,7 @@ module.exports = {
   HISTORIAN_PROVIDER: process.env.HISTORIAN_PROVIDER || 'mock',
   SEPARATION_CRON: process.env.SEPARATION_CRON || '*/5 * * * *',
   BULK_MILK_CRON: process.env.BULK_MILK_CRON || '*/1 * * * *',
-  BLEND_TANK_CRON: process.env.BLEND_TANK_CRON || '*/30 * * * * *',
+  BLEND_TANK_CRON: process.env.BLEND_TANK_CRON || '*/10 * * * * *',
   HISTORIAN_BASE_URL: process.env.HISTORIAN_BASE_URL,
   HISTORIAN_DOMAIN: process.env.HISTORIAN_DOMAIN || '',
   HISTORIAN_USERNAME: process.env.HISTORIAN_USERNAME,
