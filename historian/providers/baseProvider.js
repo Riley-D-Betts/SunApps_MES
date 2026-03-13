@@ -21,6 +21,26 @@ class BaseProvider {
   }
 
   /**
+   * Get current separator live status from SCADA + OEM XFR tags.
+   * @returns {Promise<{
+   *   feedPermit: number,
+   *   motorRpm: number,
+   *   creamFlowGpm: number,
+   *   skimFlowGpm: number,
+   *   feedTotalLbs: number,
+   *   source: string,
+   *   itemId: string,
+   *   transferName: string,
+   *   destinations: string[],
+   *   creamTotalLbs: number,
+   *   skimTotalLbs: number
+   * }>}
+   */
+  async getSeparatorStatus() {
+    throw new Error('getSeparatorStatus() not implemented')
+  }
+
+  /**
    * Get bulk milk flow data since the given timestamp.
    * @param {Date} since - Only return readings after this time
    * @returns {Promise<Array<{

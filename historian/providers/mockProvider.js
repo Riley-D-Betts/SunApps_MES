@@ -39,6 +39,23 @@ class MockProvider extends BaseProvider {
     }]
   }
 
+  async getSeparatorStatus() {
+    const running = Math.random() > 0.3
+    return {
+      feedPermit: running ? 1 : 0,
+      motorRpm: running ? 4200 + Math.floor(Math.random() * 100) : 0,
+      creamFlowGpm: running ? 5 + Math.random() * 3 : 0,
+      skimFlowGpm: running ? 40 + Math.random() * 10 : 0,
+      feedTotalLbs: running ? 100000 + Math.floor(Math.random() * 200000) : 313611,
+      source: 'MSilo1',
+      itemId: '300005',
+      transferName: 'Separation',
+      destinations: ['RawMilkSilo5', 'CSilo2'],
+      creamTotalLbs: running ? Math.floor(Math.random() * 30000) : 38975,
+      skimTotalLbs: running ? Math.floor(Math.random() * 250000) : 278675,
+    }
+  }
+
   async getBulkMilkFlowData(since) {
     // ~50% chance of generating a flow reading each poll
     if (Math.random() > 0.5) return []

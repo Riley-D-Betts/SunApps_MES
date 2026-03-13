@@ -34,9 +34,22 @@ const TAGS = {
   SEP_XFR_NAME:               'Ingr_Sep_CMSep1_IO.XFR.Name',
   SEP_XFR_EU:                 'Ingr_Sep_CMSep1_IO.XFR.EU',
 
+  // OEM destination slots (from separator control system)
+  SEP_XFR_DEST_0: 'Ingr_Sep_CMSep1_IO.XFR.Destination#.0',
+  SEP_XFR_DEST_1: 'Ingr_Sep_CMSep1_IO.XFR.Destination#.1',
+  SEP_XFR_DEST_2: 'Ingr_Sep_CMSep1_IO.XFR.Destination#.2',
+  SEP_XFR_DEST_3: 'Ingr_Sep_CMSep1_IO.XFR.Destination#.3',
+
   // Flow totals (per-batch, reset between batches)
   CREAM_FLOW_TOTAL: 'Ing_Sep_CMSep1_HIST.Cream_Flow_Totalized',
   SKIM_FLOW_TOTAL:  'Ing_Sep_CMSep1_HIST.Skim_Flow_Totalized',
+
+  // Live separator status (SEPSTAT — real-time from SCADA)
+  SEP_FEED_PERMIT:   'SEPSTAT.FEEDPERMIT',
+  SEP_CREAM_FLOW:    'SEPSTAT.CREAMFLOW',       // GPM
+  SEP_SKIM_FLOW:     'SEPSTAT.SKIMFLOW',         // GPM
+  SEP_MOTOR_RPM:     'SEPSTAT.MOTORSPEEDPROX',   // RPM
+  SEP_FEED_TOTAL:    'Product.SepFeedTotal',      // LBS — live separator feed totalizer
 
   // Blend tank tags (per-tank prefix substituted at query time)
   // NOTE: MES WO tags (CurrentWO, JobRunning, etc.) are stale — plant uses Atlas, not MES.
@@ -64,16 +77,6 @@ const TAGS = {
   CL1_PRODUCT: 'CL1.CURRENTSILOPRODUCTNAME',
   CL2_PRODUCT: 'CL2.CURRENTSILOPRODUCTNAME',
 
-  // MES work order tags (from ColdMilkSeparator1)
-  WO_CURRENT:    'ColdMilkSeparator1.CurrentWO',
-  WO_FROM_ENT:   'ColdMilkSeparator1.FromEntName',
-  WO_TO_ENT:     'ColdMilkSeparator1.ToEntName',
-  WO_PROD_ITEM:  'ColdMilkSeparator1.ProdItem',
-  WO_PROD_LOT:   'ColdMilkSeparator1.ProdLot',
-  WO_PROD_QTY:   'ColdMilkSeparator1.ProdQty',
-  WO_CONS_ITEM:  'ColdMilkSeparator1.ConsItem',
-  WO_CONS_LOT:   'ColdMilkSeparator1.ConsLot',
-  WO_CONS_QTY:   'ColdMilkSeparator1.ConsQty',
 }
 
 class RestProvider extends BaseProvider {
@@ -198,7 +201,7 @@ class RestProvider extends BaseProvider {
     const now = new Date()
 
     const xfrEvents = await this._queryProcessValues(
-      TAGS.SEP_XFR_TRANSFER_COMPLETE, since, now
+      TAGS.SEP_XFR_TRANSFER_COMPLETE, since, now, { verbose: false }
     )
 
     const completedEvents = xfrEvents.filter(e => e.Value === 1)
@@ -221,6 +224,48 @@ class RestProvider extends BaseProvider {
     return batches
   }
 
+  async getSeparatorStatus() {
+    const fqns = [
+      // Live SCADA status
+      TAGS.SEP_FEED_PERMIT, TAGS.SEP_MOTOR_RPM,
+      TAGS.SEP_CREAM_FLOW, TAGS.SEP_SKIM_FLOW,
+      TAGS.SEP_FEED_TOTAL,
+      // XFR config (source, destinations, item)
+      TAGS.SEP_XFR_SOURCE, TAGS.SEP_XFR_ITEM_ID, TAGS.SEP_XFR_NAME,
+      TAGS.SEP_XFR_DEST_0, TAGS.SEP_XFR_DEST_1, TAGS.SEP_XFR_DEST_2, TAGS.SEP_XFR_DEST_3,
+      // Batch totals
+      TAGS.CREAM_FLOW_TOTAL, TAGS.SKIM_FLOW_TOTAL,
+    ]
+    const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
+    const map = {}
+    fqns.forEach((fqn, i) => { map[fqn] = values[i] })
+
+    const txt = (tag) => map[tag]?.Text ?? ''
+    const val = (tag) => map[tag]?.Value ?? 0
+
+    const creamTotalGal = val(TAGS.CREAM_FLOW_TOTAL)
+    const skimTotalGal = val(TAGS.SKIM_FLOW_TOTAL)
+
+    const destinations = [
+      TAGS.SEP_XFR_DEST_0, TAGS.SEP_XFR_DEST_1,
+      TAGS.SEP_XFR_DEST_2, TAGS.SEP_XFR_DEST_3,
+    ].map(t => txt(t)).filter(Boolean)
+
+    return {
+      feedPermit: val(TAGS.SEP_FEED_PERMIT),
+      motorRpm: val(TAGS.SEP_MOTOR_RPM),
+      creamFlowGpm: val(TAGS.SEP_CREAM_FLOW),
+      skimFlowGpm: val(TAGS.SEP_SKIM_FLOW),
+      feedTotalLbs: val(TAGS.SEP_FEED_TOTAL),
+      source: txt(TAGS.SEP_XFR_SOURCE),
+      itemId: txt(TAGS.SEP_XFR_ITEM_ID),
+      transferName: txt(TAGS.SEP_XFR_NAME),
+      destinations,
+      creamTotalLbs: creamTotalGal * CREAM_DENSITY_PPG,
+      skimTotalLbs: skimTotalGal * SKIM_DENSITY_PPG,
+    }
+  }
+
   /**
    * Read all batch-related tags at the TransferComplete timestamp.
    * Volume tags reset to 0 between batches, so the value at this moment
@@ -229,60 +274,55 @@ class RestProvider extends BaseProvider {
   async _buildBatchFromTransfer(transferTime) {
     const tagMap = await this._getValuesAt([
       TAGS.SEP_XFR_QTY_ACTUAL,
+      TAGS.SEP_XFR_QTY_TARGET,
       TAGS.SEP_XFR_SOURCE,
       TAGS.SEP_XFR_ITEM_ID,
+      TAGS.SEP_XFR_NAME,
       TAGS.SEP_XFR_EU,
+      TAGS.SEP_XFR_DEST_0,
+      TAGS.SEP_XFR_DEST_1,
+      TAGS.SEP_XFR_DEST_2,
+      TAGS.SEP_XFR_DEST_3,
       TAGS.CREAM_FLOW_TOTAL,
       TAGS.SKIM_FLOW_TOTAL,
-      TAGS.WO_CURRENT,
-      TAGS.WO_FROM_ENT,
-      TAGS.WO_TO_ENT,
-      TAGS.WO_PROD_ITEM,
-      TAGS.WO_PROD_LOT,
-      TAGS.WO_PROD_QTY,
-      TAGS.WO_CONS_ITEM,
-      TAGS.WO_CONS_LOT,
-      TAGS.WO_CONS_QTY,
     ], transferTime)
 
     const val = (tag) => tagMap[tag]?.Value ?? 0
     const txt = (tag) => tagMap[tag]?.Text ?? ''
 
-    const workOrder = txt(TAGS.WO_CURRENT)
-    const xfrSource = txt(TAGS.SEP_XFR_SOURCE)
-
-    if (!workOrder && !xfrSource) {
-      console.log(`[RestProvider] No WO or source at ${transferTime.toISOString()}, skipping`)
+    const source = txt(TAGS.SEP_XFR_SOURCE)
+    if (!source) {
+      console.log(`[RestProvider] No source at ${transferTime.toISOString()}, skipping`)
       return null
     }
 
-    const batchId = workOrder || `XFR-${transferTime.getTime()}`
-    const inputVolume = val(TAGS.SEP_XFR_QTY_ACTUAL) // already in LBS
+    const batchId = `XFR-${transferTime.getTime()}`
+    const inputVolume = val(TAGS.SEP_XFR_QTY_ACTUAL)
     const creamGallons = val(TAGS.CREAM_FLOW_TOTAL)
     const skimGallons = val(TAGS.SKIM_FLOW_TOTAL)
-    const creamVolume = creamGallons * CREAM_DENSITY_PPG  // gallons → LBS
-    const skimVolume = skimGallons * SKIM_DENSITY_PPG     // gallons → LBS
+    const creamVolume = creamGallons * CREAM_DENSITY_PPG
+    const skimVolume = skimGallons * SKIM_DENSITY_PPG
 
-    console.log(`[RestProvider] Batch ${batchId}: input=${inputVolume.toFixed(1)} LBS, cream=${creamGallons.toFixed(1)} gal (${creamVolume.toFixed(1)} LBS), skim=${skimGallons.toFixed(1)} gal (${skimVolume.toFixed(1)} LBS)`)
+    const destinations = [
+      TAGS.SEP_XFR_DEST_0, TAGS.SEP_XFR_DEST_1,
+      TAGS.SEP_XFR_DEST_2, TAGS.SEP_XFR_DEST_3,
+    ].map(t => txt(t)).filter(Boolean)
+
+    console.log(`[RestProvider] Batch ${batchId}: ${source} → ${destinations.join(', ') || '?'}, input=${inputVolume.toFixed(1)} LBS, cream=${creamGallons.toFixed(1)} gal (${creamVolume.toFixed(1)} LBS), skim=${skimGallons.toFixed(1)} gal (${skimVolume.toFixed(1)} LBS)`)
 
     return {
       batchId,
-      sourceSilo: xfrSource || txt(TAGS.WO_FROM_ENT),
+      sourceSilo: source,
+      destinations,
       inputVolume,
       creamVolume,
       skimVolume,
       batchStart: new Date(transferTime.getTime() - 30 * 60 * 1000),
       batchEnd: transferTime,
-      xfrItemId: txt(TAGS.SEP_XFR_ITEM_ID),
-      xfrUnit: txt(TAGS.SEP_XFR_EU),
-      workOrder,
-      destinationEntity: txt(TAGS.WO_TO_ENT),
-      prodItem: txt(TAGS.WO_PROD_ITEM),
-      prodLot: txt(TAGS.WO_PROD_LOT),
-      prodQty: val(TAGS.WO_PROD_QTY),
-      consItem: txt(TAGS.WO_CONS_ITEM),
-      consLot: txt(TAGS.WO_CONS_LOT),
-      consQty: val(TAGS.WO_CONS_QTY),
+      itemId: txt(TAGS.SEP_XFR_ITEM_ID),
+      transferName: txt(TAGS.SEP_XFR_NAME),
+      unit: txt(TAGS.SEP_XFR_EU),
+      targetVolume: val(TAGS.SEP_XFR_QTY_TARGET),
     }
   }
 
