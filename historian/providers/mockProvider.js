@@ -92,6 +92,15 @@ class MockProvider extends BaseProvider {
       ML3: '', ML4: '',
       CL1: 'Raw Conventional Cream', CL2: '',
     }
+    const mockDests = {
+      ML1: 'BlendTank1A', ML2: 'BlendTank1B',
+      ML3: '', ML4: 'UHT1',
+      CL1: 'BlendTank1A', CL2: '',
+    }
+    const mockSilos = {
+      ML1: 'MSilo1', ML2: 'MSilo2', ML3: '', ML4: 'MSilo3',
+      CL1: 'CSilo1', CL2: '',
+    }
 
     return lines.map(line => {
       // Simulate totalizer accumulation, occasional resets
@@ -100,10 +109,20 @@ class MockProvider extends BaseProvider {
       } else {
         this._lineTotalizers[line] += Math.floor(Math.random() * 500)
       }
+      const active = this._lineTotalizers[line] > 0
       return {
         line,
         totalizerLbs: this._lineTotalizers[line],
-        productName: this._lineTotalizers[line] > 0 ? (mockProducts[line] || '') : '',
+        productName: active ? (mockProducts[line] || '') : '',
+        productCode: active ? '300015' : '',
+        siloName: active ? (mockSilos[line] || '') : '',
+        requestedBy: active ? (mockDests[line] || '') : '',
+        requestedTargetLbs: active ? 50000 : 0,
+        mode: active ? 'RUNNING' : 'NONE',
+        stepName: active ? 'TRANSFER' : 'OFF',
+        active,
+        targetComplete: false,
+        density: active ? 8.6 : 0,
       }
     })
   }

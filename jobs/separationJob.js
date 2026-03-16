@@ -50,7 +50,7 @@ function logStatusSummary(status, batchCount) {
   } = status
 
   const running = !!feedPermit
-  const state = running ? 'RUNNING' : 'idle'
+  const cip = running && (!feedTotalLbs || feedTotalLbs === 0)
   const from = source || '—'
   const destStr = destinations.length > 0 ? destinations.join(', ') : '—'
   const batchNote = batchCount > 0 ? `  ** ${batchCount} batch(es) completed **` : ''
@@ -61,6 +61,8 @@ function logStatusSummary(status, batchCount) {
   console.log(`\n[${ts}] ── Separator Status ──`)
   if (!running) {
     console.log(`  [idle]${batchNote}`)
+  } else if (cip) {
+    console.log(`  [CIP] ${Math.round(motorRpm).toLocaleString()} RPM${batchNote}`)
   } else {
     console.log(`  [RUNNING] ${from} → ${destStr}  (${transferName || itemId || '—'})  ${Math.round(motorRpm).toLocaleString()} RPM${batchNote}`)
     console.log(`  Feed: ${fmt(feedTotalLbs)}  Cream: ${fmtGpm(creamFlowGpm)} (${fmt(creamTotalLbs)})  Skim: ${fmtGpm(skimFlowGpm)} (${fmt(skimTotalLbs)})`)

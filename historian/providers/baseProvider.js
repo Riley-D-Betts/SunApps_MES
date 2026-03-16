@@ -70,10 +70,20 @@ class BaseProvider {
   }
 
   /**
-   * Get milk/cream line batch totalizer readings.
+   * Get milk/cream line status including totalizer, product info, source, destination.
    * @returns {Promise<Array<{
    *   line: string,
-   *   totalizerLbs: number
+   *   totalizerLbs: number,
+   *   productName: string,
+   *   productCode: string,
+   *   siloName: string,
+   *   requestedBy: string,
+   *   requestedTargetLbs: number,
+   *   mode: string,
+   *   stepName: string,
+   *   active: boolean,
+   *   targetComplete: boolean,
+   *   density: number
    * }>>}
    */
   async getMilkLineStatus() {

@@ -61,21 +61,23 @@ const TAGS = {
   BT_TO_ENT:        '.ToEntName',
 
 
-  // Milk line batch totalizers (already in LBS, reset per batch)
-  ML1_TOTALIZER: 'ML1.BATCHTOTALIZER',
-  ML2_TOTALIZER: 'ML2.BATCHTOTALIZER',
-  ML3_TOTALIZER: 'ML3.BATCHTOTALIZER',
-  ML4_TOTALIZER: 'ML4.BATCHTOTALIZER',
-  CL1_TOTALIZER: 'CL1.BATCHTOTALIZER',
-  CL2_TOTALIZER: 'CL2.BATCHTOTALIZER',
-
-  // Milk/cream line product names (from SCADA batching screen)
-  ML1_PRODUCT: 'ML1.CURRENTSILOPRODUCTNAME',
-  ML2_PRODUCT: 'ML2.CURRENTSILOPRODUCTNAME',
-  ML3_PRODUCT: 'ML3.CURRENTSILOPRODUCTNAME',
-  ML4_PRODUCT: 'ML4.CURRENTSILOPRODUCTNAME',
-  CL1_PRODUCT: 'CL1.CURRENTSILOPRODUCTNAME',
-  CL2_PRODUCT: 'CL2.CURRENTSILOPRODUCTNAME',
+  // Milk/cream line tag suffixes (per-line, identical structure across ML1-4 and CL1-2)
+  // Prefixed with line name at query time (e.g. 'ML1.BATCHTOTALIZER')
+  LINE_TOTALIZER:       '.BATCHTOTALIZER',
+  LINE_PRODUCT_NAME:    '.CURRENTSILOPRODUCTNAME',
+  LINE_PRODUCT_CODE:    '.CURRENTSILOPRODUCTCODE',
+  LINE_SILO_NAME:       '.CURRENTSILONAME',
+  LINE_SILO_INDEX:      '.CURRENTSILOINDEX',
+  LINE_DENSITY:         '.CURRENTSILOPRODUCTDENSITY',
+  LINE_REQUESTED_BY:    '.REQUESTEDBY',          // destination vessel (e.g. "BlendTank1A" or "UHT1")
+  LINE_REQUESTED_TARGET:'.REQUESTEDTARGETSP',    // LBS requested
+  LINE_MODE:            '.MODESTRING',
+  LINE_STEP_NAME:       '.STEPNAME',
+  LINE_STEP_NUM:        '.STEPNUM',
+  LINE_ACTIVE:          '.STAT_ACTIVE',
+  LINE_TARGET_COMPLETE: '.STAT_TARGETCOMPLETE',
+  LINE_INHIBITED:       '.STAT_INHIBITED',
+  LINE_MEM_TOTALIZER:   '.MEMBATCHTOTALIZER',    // previous batch totalizer
 
 }
 
@@ -410,29 +412,50 @@ class RestProvider extends BaseProvider {
   // ── Milk/cream line totalizers ──────────────────────────────────────
 
   /**
-   * Read current batch totalizer values for all milk and cream lines.
-   * Totalizers are already in LBS and reset to 0 per batch.
+   * Read current status for all milk and cream lines.
+   * Includes totalizer, product info, source silo, destination, mode, and status flags.
    */
   async getMilkLineStatus() {
-    const lines = [
-      { line: 'ML1', totFqn: TAGS.ML1_TOTALIZER, prodFqn: TAGS.ML1_PRODUCT },
-      { line: 'ML2', totFqn: TAGS.ML2_TOTALIZER, prodFqn: TAGS.ML2_PRODUCT },
-      { line: 'ML3', totFqn: TAGS.ML3_TOTALIZER, prodFqn: TAGS.ML3_PRODUCT },
-      { line: 'ML4', totFqn: TAGS.ML4_TOTALIZER, prodFqn: TAGS.ML4_PRODUCT },
-      { line: 'CL1', totFqn: TAGS.CL1_TOTALIZER, prodFqn: TAGS.CL1_PRODUCT },
-      { line: 'CL2', totFqn: TAGS.CL2_TOTALIZER, prodFqn: TAGS.CL2_PRODUCT },
+    const lineNames = ['ML1', 'ML2', 'ML3', 'ML4', 'CL1', 'CL2']
+    const suffixes = [
+      TAGS.LINE_TOTALIZER,        // 0  - batch totalizer (LBS)
+      TAGS.LINE_PRODUCT_NAME,     // 1  - product name from silo
+      TAGS.LINE_PRODUCT_CODE,     // 2  - product code
+      TAGS.LINE_SILO_NAME,        // 3  - source silo name
+      TAGS.LINE_REQUESTED_BY,     // 4  - destination vessel
+      TAGS.LINE_REQUESTED_TARGET, // 5  - LBS requested
+      TAGS.LINE_MODE,             // 6  - mode string
+      TAGS.LINE_STEP_NAME,        // 7  - batch step name
+      TAGS.LINE_ACTIVE,           // 8  - is active
+      TAGS.LINE_TARGET_COMPLETE,  // 9  - target complete flag
+      TAGS.LINE_DENSITY,          // 10 - product density PPG
     ]
 
-    const values = await Promise.all(lines.flatMap(l => [
-      this._getCurrentValue(l.totFqn, { verbose: false }),
-      this._getCurrentValue(l.prodFqn, { verbose: false }),
-    ]))
+    // Build all FQNs and fetch in parallel
+    const fqns = lineNames.flatMap(ln => suffixes.map(s => `${ln}${s}`))
+    const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
 
-    return lines.map((l, i) => ({
-      line: l.line,
-      totalizerLbs: values[i * 2]?.Value ?? 0,
-      productName: values[i * 2 + 1]?.Text ?? '',
-    }))
+    const perLine = suffixes.length
+    return lineNames.map((line, i) => {
+      const offset = i * perLine
+      const val = (idx) => values[offset + idx]?.Value ?? 0
+      const txt = (idx) => values[offset + idx]?.Text ?? ''
+
+      return {
+        line,
+        totalizerLbs: val(0),
+        productName: txt(1),
+        productCode: txt(2),
+        siloName: txt(3),
+        requestedBy: txt(4),       // destination vessel (e.g. "BlendTank1A", "UHT1")
+        requestedTargetLbs: val(5),
+        mode: txt(6),
+        stepName: txt(7),
+        active: !!val(8),
+        targetComplete: !!val(9),
+        density: val(10),
+      }
+    })
   }
 }
 

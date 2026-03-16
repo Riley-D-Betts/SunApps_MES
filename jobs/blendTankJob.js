@@ -22,17 +22,18 @@ const tankState = {
 
 
 /**
- * In-memory state per milk/cream line totalizer.
- * Tracks previous value to detect resets (reset = batch total for that line).
- * Also tracks productName from SCADA CURRENTSILOPRODUCTNAME tag.
+ * In-memory state per milk/cream line.
+ * Tracks product name and totalizer to detect batch completion.
+ * Product name clears before totalizer resets, so we capture the total
+ * when the product name transitions from set → cleared.
  */
 const lineState = {
-  ML1: { prevValue: null, productName: '' },
-  ML2: { prevValue: null, productName: '' },
-  ML3: { prevValue: null, productName: '' },
-  ML4: { prevValue: null, productName: '' },
-  CL1: { prevValue: null, productName: '' },
-  CL2: { prevValue: null, productName: '' },
+  ML1: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
+  ML2: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
+  ML3: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
+  ML4: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
+  CL1: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
+  CL2: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
 }
 
 let lastPollTime = new Date()
@@ -173,31 +174,39 @@ async function run(historian) {
     const lineReadings = await historian.getMilkLineStatus()
 
     for (const reading of lineReadings) {
-      const { line, totalizerLbs, productName } = reading
+      const { line, totalizerLbs, productName, siloName, requestedBy, requestedTargetLbs, active } = reading
       const prev = lineState[line]
       if (!prev) continue
-
-      // Always track the latest product name from SCADA
-      if (productName) prev.productName = productName
 
       // First poll — seed baseline
       if (prev.prevValue === null) {
         prev.prevValue = totalizerLbs
+        if (productName) prev.productName = productName
+        if (siloName) prev.siloName = siloName
+        if (requestedBy) prev.requestedBy = requestedBy
         continue
       }
 
-      // Totalizer reset detected (current < previous by significant amount)
-      // The previous value IS the batch total for that line
-      if (totalizerLbs < prev.prevValue - 10) {
-        const batchTotalLbs = prev.prevValue
-        const lineProductName = prev.productName || ''
-        console.log(`[BlendTankJob] Line ${line} totalizer reset: batch total = ${batchTotalLbs.toFixed(1)} LBS, product = "${lineProductName}"`)
+      // Detect batch complete: product name cleared while totalizer still holds a value.
+      // The current totalizer value IS the batch total — capture it now before the later reset.
+      const hadProduct = !!prev.productName
+      const hasProduct = !!productName
+
+      if (hadProduct && !hasProduct && totalizerLbs > 10) {
+        const batchTotalLbs = totalizerLbs
+        const lineProductName = prev.productName
+        const source = prev.siloName || ''
+        const destination = prev.requestedBy || ''
+        console.log(`[BlendTankJob] Line ${line} batch complete: ${batchTotalLbs.toFixed(1)} LBS of "${lineProductName}" (${source} → ${destination})`)
 
         try {
           const result = await apiClient.post('/api/mes/milk/blend-tank/line-flow', {
             line,
             totalLbs: batchTotalLbs,
             lineProductName,
+            siloName: source,
+            destination,
+            requestedTargetLbs: prev.requestedTargetLbs || 0,
             resetTime: new Date().toISOString(),
           })
           console.log(`[BlendTankJob] Forwarded line flow ${line}: ${result.success ? 'OK' : 'FAIL'}`)
@@ -205,14 +214,16 @@ async function run(historian) {
           console.error(`[BlendTankJob] Failed to forward line flow for ${line}:`, err.message)
           await notifyService.sendAlert(
             'MES_Service: Line Flow Forward Failed',
-            `Line ${line} totalizer reset (${batchTotalLbs.toFixed(1)} LBS) could not be sent: ${err.message}`
+            `Line ${line} batch complete (${batchTotalLbs.toFixed(1)} LBS) could not be sent: ${err.message}`
           )
         }
-
-        // Clear product name after reset (new batch may have different product)
-        prev.productName = ''
       }
 
+      // Track state — update when present, clear when cleared
+      prev.productName = productName || ''
+      prev.siloName = siloName || (hasProduct ? prev.siloName : '')
+      prev.requestedBy = requestedBy || (hasProduct ? prev.requestedBy : '')
+      prev.requestedTargetLbs = requestedTargetLbs || (hasProduct ? prev.requestedTargetLbs : 0)
       prev.prevValue = totalizerLbs
     }
 
@@ -243,10 +254,16 @@ function logStatusSummary(statuses, lineReadings) {
   })
 
   const activeLines = lineReadings
-    .filter(r => r.totalizerLbs > 0)
+    .filter(r => r.totalizerLbs > 0 || r.active)
     .map(r => {
-      const product = r.productName ? ` (${r.productName})` : ''
-      return `${r.line}=${Math.round(r.totalizerLbs).toLocaleString()} lb${product}`
+      const parts = [`${r.line}=${Math.round(r.totalizerLbs).toLocaleString()} lb`]
+      if (r.siloName && r.requestedBy) {
+        parts.push(`${r.siloName}→${r.requestedBy}`)
+      } else if (r.requestedBy) {
+        parts.push(`→${r.requestedBy}`)
+      }
+      if (r.productName) parts.push(r.productName)
+      return parts.join(' ')
     })
   const lineSummary = activeLines.length > 0 ? activeLines.join(', ') : 'all idle'
 
