@@ -112,7 +112,7 @@ class RestProvider extends BaseProvider {
         headers: { 'Accept': 'application/json' },
       }, (err, res) => {
         if (err) {
-          console.error(`[RestProvider] <-- ERROR:`, err.message)
+          if (verbose) console.error(`[RestProvider] <-- ERROR:`, err.message)
           return reject(err)
         }
         if (verbose) {
