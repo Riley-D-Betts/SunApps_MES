@@ -13,12 +13,13 @@ const notifyService = require('../services/notifyService')
 const WEIGHT_THRESHOLD_LBS = 500
 const EMPTY_THRESHOLD_LBS = 100
 const LINE_RESET_THRESHOLD_LBS = 100
+const BATCH_COOLDOWN_MS = 5 * 60 * 1000 // 5 minutes — minimum time between batch starts per tank
 
 const tankState = {
-  BlendTank1A: { productName: null, batchActive: false, seeded: false },
-  BlendTank1B: { productName: null, batchActive: false, seeded: false },
-  BlendTank2A: { productName: null, batchActive: false, seeded: false },
-  BlendTank2B: { productName: null, batchActive: false, seeded: false },
+  BlendTank1A: { productName: null, batchActive: false, seeded: false, lastBatchStart: 0 },
+  BlendTank1B: { productName: null, batchActive: false, seeded: false, lastBatchStart: 0 },
+  BlendTank2A: { productName: null, batchActive: false, seeded: false, lastBatchStart: 0 },
+  BlendTank2B: { productName: null, batchActive: false, seeded: false, lastBatchStart: 0 },
 }
 
 
@@ -140,29 +141,41 @@ async function run(historian) {
         }, `batch end (emptied) ${tankId} "${prev.productName}"`)
       }
 
+      // Cooldown check: prevent rapid-fire batch creation if tags are cycling
+      const now = Date.now()
+      const cooldownActive = (now - prev.lastBatchStart) < BATCH_COOLDOWN_MS
+
       // Detect new batch: NOTE_STRING changed to a new non-empty value
       if (hasProduct && productName !== prev.productName) {
         // If previous batch was active, end it first
         if (prev.batchActive && prev.productName) {
-          console.log(`[BlendTankJob] BATCH END (product change) on ${tankId}: "${prev.productName}"`)
-          prev.batchActive = false
-          await forward('/api/mes/milk/blend-tank/wo-end', {
-            tankId,
-            productName: prev.productName,
-            detectedAt: new Date().toISOString(),
-          }, `batch end (product change) ${tankId} "${prev.productName}"`)
+          if (cooldownActive) {
+            // Tag is cycling rapidly — suppress the end/start churn
+            console.warn(`[BlendTankJob] COOLDOWN: Suppressing product change on ${tankId} "${prev.productName}" → "${productName}" (last start ${Math.round((now - prev.lastBatchStart) / 1000)}s ago)`)
+          } else {
+            console.log(`[BlendTankJob] BATCH END (product change) on ${tankId}: "${prev.productName}"`)
+            prev.batchActive = false
+            await forward('/api/mes/milk/blend-tank/wo-end', {
+              tankId,
+              productName: prev.productName,
+              detectedAt: new Date().toISOString(),
+            }, `batch end (product change) ${tankId} "${prev.productName}"`)
+          }
         }
 
-        console.log(`[BlendTankJob] BATCH START detected on ${tankId}: "${productName}"`)
-        prev.batchActive = true
-        await forward('/api/mes/milk/blend-tank/wo-start', {
-          tankId,
-          productName,
-          batchSize,
-          fromEntName,
-          toEntName,
-          detectedAt: new Date().toISOString(),
-        }, `batch start ${tankId} "${productName}"`)
+        if (!cooldownActive) {
+          console.log(`[BlendTankJob] BATCH START detected on ${tankId}: "${productName}"`)
+          prev.batchActive = true
+          prev.lastBatchStart = now
+          await forward('/api/mes/milk/blend-tank/wo-start', {
+            tankId,
+            productName,
+            batchSize,
+            fromEntName,
+            toEntName,
+            detectedAt: new Date().toISOString(),
+          }, `batch start ${tankId} "${productName}"`)
+        }
       }
 
       // Detect batch start from seeded state: product was already set when service started,
@@ -170,6 +183,7 @@ async function run(historian) {
       if (hasProduct && !prev.batchActive && productName === prev.productName && weightLbs >= WEIGHT_THRESHOLD_LBS) {
         console.log(`[BlendTankJob] BATCH START (weight confirmed) on ${tankId}: "${productName}" (${Math.round(weightLbs).toLocaleString()} lb)`)
         prev.batchActive = true
+        prev.lastBatchStart = now
         await forward('/api/mes/milk/blend-tank/wo-start', {
           tankId,
           productName,
