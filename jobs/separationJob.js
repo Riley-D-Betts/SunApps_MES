@@ -9,11 +9,15 @@ let lastPollTime = new Date()
  */
 async function run(historian) {
   try {
-    const batches = await historian.getSeparatorBatches(lastPollTime)
+    const [batches, status] = await Promise.all([
+      historian.getSeparatorBatches(lastPollTime),
+      historian.getSeparatorStatus(),
+    ])
+
+    // Always log separator status
+    logStatusSummary(status, batches.length)
 
     if (batches.length === 0) return
-
-    console.log(`[SeparationJob] Found ${batches.length} batch(es) since ${lastPollTime.toISOString()}`)
 
     for (const batch of batches) {
       try {
@@ -35,6 +39,33 @@ async function run(historian) {
       'MES_Service: Historian Poll Failed',
       `Separation job could not poll Historian: ${err.message}`
     )
+  }
+}
+
+function logStatusSummary(status, batchCount) {
+  const ts = new Date().toLocaleTimeString()
+  const {
+    feedPermit, motorRpm, creamFlowGpm, skimFlowGpm, feedTotalLbs,
+    source, itemId, transferName, destinations, creamTotalLbs, skimTotalLbs,
+  } = status
+
+  const running = !!feedPermit
+  const cip = running && (!feedTotalLbs || feedTotalLbs === 0)
+  const from = source || '—'
+  const destStr = destinations.length > 0 ? destinations.join(', ') : '—'
+  const batchNote = batchCount > 0 ? `  ** ${batchCount} batch(es) completed **` : ''
+
+  const fmt = (lbs) => lbs ? `${Math.round(lbs).toLocaleString()} lb` : '0 lb'
+  const fmtGpm = (gpm) => `${Math.max(0, gpm).toFixed(1)} GPM`
+
+  console.log(`\n[${ts}] ── Separator Status ──`)
+  if (!running) {
+    console.log(`  [idle]${batchNote}`)
+  } else if (cip) {
+    console.log(`  [CIP] ${Math.round(motorRpm).toLocaleString()} RPM${batchNote}`)
+  } else {
+    console.log(`  [RUNNING] ${from} → ${destStr}  (${transferName || itemId || '—'})  ${Math.round(motorRpm).toLocaleString()} RPM${batchNote}`)
+    console.log(`  Feed: ${fmt(feedTotalLbs)}  Cream: ${fmtGpm(creamFlowGpm)} (${fmt(creamTotalLbs)})  Skim: ${fmtGpm(skimFlowGpm)} (${fmt(skimTotalLbs)})`)
   }
 }
 

@@ -21,6 +21,26 @@ class BaseProvider {
   }
 
   /**
+   * Get current separator live status from SCADA + OEM XFR tags.
+   * @returns {Promise<{
+   *   feedPermit: number,
+   *   motorRpm: number,
+   *   creamFlowGpm: number,
+   *   skimFlowGpm: number,
+   *   feedTotalLbs: number,
+   *   source: string,
+   *   itemId: string,
+   *   transferName: string,
+   *   destinations: string[],
+   *   creamTotalLbs: number,
+   *   skimTotalLbs: number
+   * }>}
+   */
+  async getSeparatorStatus() {
+    throw new Error('getSeparatorStatus() not implemented')
+  }
+
+  /**
    * Get bulk milk flow data since the given timestamp.
    * @param {Date} since - Only return readings after this time
    * @returns {Promise<Array<{
@@ -31,6 +51,43 @@ class BaseProvider {
    */
   async getBulkMilkFlowData(since) {
     throw new Error('getBulkMilkFlowData() not implemented')
+  }
+
+  /**
+   * Get blend tank status for all 4 tanks.
+   * Uses NOTE_STRING (product name from Atlas) for batch detection.
+   * @returns {Promise<Array<{
+   *   tankId: string,
+   *   productName: string,
+   *   weightLbs: number,
+   *   batchSize: number,
+   *   fromEntName: string,
+   *   toEntName: string
+   * }>>}
+   */
+  async getBlendTankStatus() {
+    throw new Error('getBlendTankStatus() not implemented')
+  }
+
+  /**
+   * Get milk/cream line status including totalizer, product info, source, destination.
+   * @returns {Promise<Array<{
+   *   line: string,
+   *   totalizerLbs: number,
+   *   productName: string,
+   *   productCode: string,
+   *   siloName: string,
+   *   requestedBy: string,
+   *   requestedTargetLbs: number,
+   *   mode: string,
+   *   stepName: string,
+   *   active: boolean,
+   *   targetComplete: boolean,
+   *   density: number
+   * }>>}
+   */
+  async getMilkLineStatus() {
+    throw new Error('getMilkLineStatus() not implemented')
   }
 }
 

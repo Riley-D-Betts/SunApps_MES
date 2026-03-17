@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:docs.aveva.com)",
+      "WebSearch",
+      "WebFetch(domain:knowledge.insourcess.com)",
+      "Bash(curl:*)",
+      "Bash(node:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(npx vue-tsc:*)",
+      "Bash(npx vite:*)",
+      "Bash(ls *.log 2>/dev/null; tasklist 2>/dev/null | grep -i node)"
+    ]
+  }
+}

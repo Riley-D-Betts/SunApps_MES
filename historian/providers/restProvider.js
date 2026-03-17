@@ -6,9 +6,81 @@ const httpntlm = require('httpntlm')
  * REST provider for the on-premise AVEVA Historian OData v2 API.
  * Uses NTLM auth against the MES domain.
  *
- * Separation batches are detected by watching ColdMilkSeparator1.EndJob triggers.
- * Bulk milk flow is computed as deltas on the totalized cream/skim flow counters.
+ * Separation batches are detected via XFR (transfer) tags on the separator IO:
+ *   - Ingr_Sep_CMSep1_IO.XFR.TransferCompleteS.0  — trigger when transfer finishes
+ *   - Ingr_Sep_CMSep1_IO.XFR.QTYActual            — per-batch input volume (resets to 0 between batches)
+ *   - Ingr_Sep_CMSep1_IO.XFR.Source                — source silo (e.g. "MSilo1")
+ *   - Ingr_Sep_CMSep1_IO.XFR.ItemID                — item ID
+ *   - Ing_Sep_CMSep1_HIST.Cream_Flow_Totalized     — per-batch cream (resets to 0 between batches)
+ *   - Ing_Sep_CMSep1_HIST.Skim_Flow_Totalized      — per-batch skim (resets to 0 between batches)
+ *
+ * All volume tags reset to 0 between batches, so the value at TransferComplete
+ * IS the per-batch total.
  */
+
+// Density constants (PPG — pounds per gallon)
+// Flow totalizers record gallons; multiply by these to get LBS
+const CREAM_DENSITY_PPG = 8.3
+const SKIM_DENSITY_PPG = 8.63
+
+// Tag name constants
+const TAGS = {
+  // XFR transfer tags (per-batch, reset between batches)
+  SEP_XFR_TRANSFER_COMPLETE: 'Ingr_Sep_CMSep1_IO.XFR.TransferCompleteS.0',
+  SEP_XFR_QTY_ACTUAL:        'Ingr_Sep_CMSep1_IO.XFR.QTYActual',
+  SEP_XFR_QTY_TARGET:        'Ingr_Sep_CMSep1_IO.XFR.QTYTarget',
+  SEP_XFR_SOURCE:             'Ingr_Sep_CMSep1_IO.XFR.Source',
+  SEP_XFR_ITEM_ID:            'Ingr_Sep_CMSep1_IO.XFR.ItemID',
+  SEP_XFR_NAME:               'Ingr_Sep_CMSep1_IO.XFR.Name',
+  SEP_XFR_EU:                 'Ingr_Sep_CMSep1_IO.XFR.EU',
+
+  // OEM destination slots (from separator control system)
+  SEP_XFR_DEST_0: 'Ingr_Sep_CMSep1_IO.XFR.Destination#.0',
+  SEP_XFR_DEST_1: 'Ingr_Sep_CMSep1_IO.XFR.Destination#.1',
+  SEP_XFR_DEST_2: 'Ingr_Sep_CMSep1_IO.XFR.Destination#.2',
+  SEP_XFR_DEST_3: 'Ingr_Sep_CMSep1_IO.XFR.Destination#.3',
+
+  // Flow totals (per-batch, reset between batches)
+  CREAM_FLOW_TOTAL: 'Ing_Sep_CMSep1_HIST.Cream_Flow_Totalized',
+  SKIM_FLOW_TOTAL:  'Ing_Sep_CMSep1_HIST.Skim_Flow_Totalized',
+
+  // Live separator status (SEPSTAT — real-time from SCADA)
+  SEP_FEED_PERMIT:   'SEPSTAT.FEEDPERMIT',
+  SEP_CREAM_FLOW:    'SEPSTAT.CREAMFLOW',       // GPM
+  SEP_SKIM_FLOW:     'SEPSTAT.SKIMFLOW',         // GPM
+  SEP_MOTOR_RPM:     'SEPSTAT.MOTORSPEEDPROX',   // RPM
+  SEP_FEED_TOTAL:    'Product.SepFeedTotal',      // LBS — live separator feed totalizer
+
+  // Blend tank tags (per-tank prefix substituted at query time)
+  // NOTE: MES WO tags (CurrentWO, JobRunning, etc.) are stale — plant uses Atlas, not MES.
+  // NOTE_STRING is the live product name written by Atlas via PLC.
+  BT_NOTE_STRING:   '.NOTE_STRING',
+  BT_WEIGHT_LBS:    '.100LT.SCL_LBS',
+  BT_BATCH_SIZE:    '.BatchSize',
+  BT_FROM_ENT:      '.FromEntName',
+  BT_TO_ENT:        '.ToEntName',
+
+
+  // Milk/cream line tag suffixes (per-line, identical structure across ML1-4 and CL1-2)
+  // Prefixed with line name at query time (e.g. 'ML1.BATCHTOTALIZER')
+  LINE_TOTALIZER:       '.BATCHTOTALIZER',
+  LINE_PRODUCT_NAME:    '.CURRENTSILOPRODUCTNAME',
+  LINE_PRODUCT_CODE:    '.CURRENTSILOPRODUCTCODE',
+  LINE_SILO_NAME:       '.CURRENTSILONAME',
+  LINE_SILO_INDEX:      '.CURRENTSILOINDEX',
+  LINE_DENSITY:         '.CURRENTSILOPRODUCTDENSITY',
+  LINE_REQUESTED_BY:    '.REQUESTEDBY',          // destination vessel (e.g. "BlendTank1A" or "UHT1")
+  LINE_REQUESTED_TARGET:'.REQUESTEDTARGETSP',    // LBS requested
+  LINE_MODE:            '.MODESTRING',
+  LINE_STEP_NAME:       '.STEPNAME',
+  LINE_STEP_NUM:        '.STEPNUM',
+  LINE_ACTIVE:          '.STAT_ACTIVE',
+  LINE_TARGET_COMPLETE: '.STAT_TARGETCOMPLETE',
+  LINE_INHIBITED:       '.STAT_INHIBITED',
+  LINE_MEM_TOTALIZER:   '.MEMBATCHTOTALIZER',    // previous batch totalizer
+
+}
+
 class RestProvider extends BaseProvider {
   constructor() {
     super()
@@ -17,7 +89,7 @@ class RestProvider extends BaseProvider {
     this.username = config.HISTORIAN_USERNAME
     this.password = config.HISTORIAN_PASSWORD
 
-    // Track previous totalized flow readings for delta calculation
+    // Track previous totalized flow readings for delta calculation (bulk milk)
     this._prevCreamTotal = null
     this._prevSkimTotal = null
   }
@@ -26,8 +98,11 @@ class RestProvider extends BaseProvider {
 
   /**
    * NTLM-authenticated GET returning parsed JSON.
+   * @param {string} url
+   * @param {{ verbose?: boolean }} opts - verbose=true logs request/response details (default: false)
    */
-  _get(url) {
+  _get(url, { verbose = true } = {}) {
+    if (verbose) console.log(`[RestProvider] --> GET ${url}`)
     return new Promise((resolve, reject) => {
       httpntlm.get({
         url,
@@ -36,14 +111,23 @@ class RestProvider extends BaseProvider {
         password: this.password,
         headers: { 'Accept': 'application/json' },
       }, (err, res) => {
-        if (err) return reject(err)
+        if (err) {
+          if (verbose) console.error(`[RestProvider] <-- ERROR:`, err.message)
+          return reject(err)
+        }
+        if (verbose) {
+          console.log(`[RestProvider] <-- HTTP ${res.statusCode}, body length: ${res.body?.length ?? 0} chars`)
+          console.log(`[RestProvider] <-- RAW BODY (first 500 chars): ${res.body?.slice(0, 500)}`)
+        }
         if (res.statusCode !== 200) {
           return reject(new Error(`Historian API ${res.statusCode}: ${res.body?.slice(0, 300)}`))
         }
         try {
           // Historian sometimes prepends a BOM
           const body = res.body.replace(/^\uFEFF/, '')
-          resolve(JSON.parse(body))
+          const parsed = JSON.parse(body)
+          if (verbose) console.log(`[RestProvider] <-- PARSED: keys=${Object.keys(parsed).join(', ')}, value.length=${parsed.value?.length ?? 'N/A'}, nextLink=${parsed['@odata.nextLink'] ?? 'none'}`)
+          resolve(parsed)
         } catch (e) {
           reject(new Error(`Invalid JSON from Historian: ${res.body?.slice(0, 300)}`))
         }
@@ -53,152 +137,209 @@ class RestProvider extends BaseProvider {
 
   /**
    * Query ProcessValues for one tag, optionally filtered by time range.
+   * Follows @odata.nextLink to collect all pages (server caps each page).
    * AVEVA on-prem uses bare ISO datetimes (NOT datetimeoffset'...' wrapper).
    */
-  async _queryProcessValues(fqn, since, until) {
+  async _queryProcessValues(fqn, since, until, { maxRecords = 50000, verbose = true } = {}) {
+    if (verbose) console.log(`[RestProvider] _queryProcessValues: fqn=${fqn}, since=${since?.toISOString() ?? 'none'}, until=${until?.toISOString() ?? 'none'}`)
     let filter = `FQN eq '${fqn}'`
     if (since) filter += ` and DateTime ge ${since.toISOString()}`
     if (until) filter += ` and DateTime le ${until.toISOString()}`
-    const url = `${this.baseUrl}/ProcessValues?$filter=${encodeURIComponent(filter)}`
-    const data = await this._get(url)
-    return data.value || []
+    let url = `${this.baseUrl}/ProcessValues?$filter=${encodeURIComponent(filter)}&$orderby=DateTime`
+
+    const all = []
+    let page = 0
+    while (url && all.length < maxRecords) {
+      page++
+      if (verbose) console.log(`[RestProvider] _queryProcessValues: fetching page ${page}, collected so far: ${all.length}`)
+      const data = await this._get(url, { verbose })
+      all.push(...(data.value || []))
+      url = all.length < maxRecords ? (data['@odata.nextLink'] || null) : null
+    }
+    if (verbose) console.log(`[RestProvider] _queryProcessValues: done — ${all.length} total records across ${page} page(s)`)
+    return all
   }
 
   /**
    * Get the latest (current) value of a single tag.
+   * Uses Tags('fqn')/Raw endpoint which returns real-time data with correct timestamps.
+   * The ProcessValues endpoint is cached/delayed (~1h behind due to Historian DST skew).
    */
-  async _getCurrentValue(fqn) {
-    const values = await this._queryProcessValues(fqn)
-    return values[0] || null
+  async _getCurrentValue(fqn, { verbose = true } = {}) {
+    const url = `${this.baseUrl}/Tags('${encodeURIComponent(fqn)}')/Raw?$orderby=DateTime%20desc&$top=1`
+    const data = await this._get(url, { verbose })
+    return data.value?.[0] || null
   }
 
   /**
-   * Get current values for multiple tags in parallel.
+   * Get the value of a tag at or just before a specific timestamp.
+   * Queries a 30-minute window and returns the last recorded value.
+   */
+  async _getValueAt(fqn, timestamp) {
+    const windowStart = new Date(timestamp.getTime() - 30 * 60 * 1000)
+    const values = await this._queryProcessValues(fqn, windowStart, timestamp)
+    return values.length > 0 ? values[values.length - 1] : null
+  }
+
+  /**
+   * Get historical values for multiple tags at a timestamp in parallel.
    * Returns a map of FQN → ProcessValue.
    */
-  async _getCurrentValues(fqns) {
-    const results = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn)))
+  async _getValuesAt(fqns, timestamp) {
+    const results = await Promise.all(fqns.map(fqn => this._getValueAt(fqn, timestamp)))
     const map = {}
     fqns.forEach((fqn, i) => { map[fqn] = results[i] })
     return map
   }
 
-  /**
-   * Get the historical value of a tag at or just before a specific timestamp.
-   * Queries a small window ending at the target time and returns the last value.
-   */
-  async _getValueAt(fqn, timestamp) {
-    // Query a 1-second window ending at the timestamp
-    const from = new Date(timestamp.getTime() - 1000)
-    const values = await this._queryProcessValues(fqn, from, timestamp)
-    return values.length > 0 ? values[values.length - 1] : null
-  }
-
   // ── Separation batches ─────────────────────────────────────────────
 
   /**
-   * Detect completed separation batches by watching ColdMilkSeparator1.EndJob.
-   *
-   * Strategy: query EndJob trigger values since the last poll. Each value=1
-   * event represents a completed batch. For each, read the batch tags at
-   * that timestamp (before the WO clears).
+   * Detect completed separation batches by watching the XFR TransferComplete
+   * trigger. All volume tags (QTYActual, Cream/Skim_Flow_Totalized) reset
+   * to 0 between batches, so the value at TransferComplete is the per-batch total.
    */
   async getSeparatorBatches(since) {
     const now = new Date()
 
-    // Look for EndJob trigger events since last poll
-    const endJobEvents = await this._queryProcessValues(
-      'ColdMilkSeparator1.EndJob', since, now
+    const xfrEvents = await this._queryProcessValues(
+      TAGS.SEP_XFR_TRANSFER_COMPLETE, since, now, { verbose: false }
     )
 
-    // Filter to only "fired" events (value = 1 / true)
-    const completedEvents = endJobEvents.filter(e => e.Value === 1)
+    const completedEvents = xfrEvents.filter(e => e.Value === 1)
 
     if (completedEvents.length === 0) return []
 
-    // For each completed batch, read the state AT the end-job timestamp.
-    // The WO and quantities are valid at the moment EndJob fires; they
-    // get cleared shortly after.
+    console.log(`[RestProvider] Found ${completedEvents.length} transfer complete event(s)`)
+
     const batches = []
     for (const event of completedEvents) {
-      const endTime = new Date(event.DateTime)
+      const transferTime = new Date(event.DateTime)
       try {
-        const batch = await this._buildBatchFromTimestamp(endTime)
+        const batch = await this._buildBatchFromTransfer(transferTime)
         if (batch) batches.push(batch)
       } catch (err) {
-        console.error(`[RestProvider] Failed to read batch at ${endTime.toISOString()}:`, err.message)
+        console.error(`[RestProvider] Failed to read batch at ${transferTime.toISOString()}:`, err.message)
       }
     }
 
     return batches
   }
 
-  /**
-   * Read all batch-related tags at the given timestamp and assemble
-   * the batch object.
-   */
-  async _buildBatchFromTimestamp(endTime) {
-    const batchTags = [
-      'ColdMilkSeparator1.CurrentWO',
-      'ColdMilkSeparator1.FromEntName',
-      'ColdMilkSeparator1.ToEntName',
-      'ColdMilkSeparator1.ConsQty',
-      'ColdMilkSeparator1.ProdQty',
-      'ColdMilkSeparator1.ProdItem',
-      'ColdMilkSeparator1.ProdLot',
-      'ColdMilkSeparator1.ConsItem',
-      'ColdMilkSeparator1.ConsLot',
-      'Ing_Sep_CMSep1_HIST.Cream_Flow_Totalized',
-      'Ing_Sep_CMSep1_HIST.Skim_Flow_Totalized',
+  async getSeparatorStatus() {
+    const fqns = [
+      // Live SCADA status
+      TAGS.SEP_FEED_PERMIT, TAGS.SEP_MOTOR_RPM,
+      TAGS.SEP_CREAM_FLOW, TAGS.SEP_SKIM_FLOW,
+      TAGS.SEP_FEED_TOTAL,
+      // XFR config (source, destinations, item)
+      TAGS.SEP_XFR_SOURCE, TAGS.SEP_XFR_ITEM_ID, TAGS.SEP_XFR_NAME,
+      TAGS.SEP_XFR_DEST_0, TAGS.SEP_XFR_DEST_1, TAGS.SEP_XFR_DEST_2, TAGS.SEP_XFR_DEST_3,
+      // Batch totals
+      TAGS.CREAM_FLOW_TOTAL, TAGS.SKIM_FLOW_TOTAL,
     ]
+    const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
+    const map = {}
+    fqns.forEach((fqn, i) => { map[fqn] = values[i] })
 
-    const results = await Promise.all(
-      batchTags.map(fqn => this._getValueAt(fqn, endTime))
-    )
+    const txt = (tag) => map[tag]?.Text ?? ''
+    const val = (tag) => map[tag]?.Value ?? 0
 
-    const tagMap = {}
-    batchTags.forEach((fqn, i) => { tagMap[fqn] = results[i] })
+    const creamTotalGal = val(TAGS.CREAM_FLOW_TOTAL)
+    const skimTotalGal = val(TAGS.SKIM_FLOW_TOTAL)
 
-    const val = (fqn) => tagMap[fqn]?.Value ?? 0
-    const txt = (fqn) => tagMap[fqn]?.Text ?? ''
+    const destinations = [
+      TAGS.SEP_XFR_DEST_0, TAGS.SEP_XFR_DEST_1,
+      TAGS.SEP_XFR_DEST_2, TAGS.SEP_XFR_DEST_3,
+    ].map(t => txt(t)).filter(Boolean)
 
-    const workOrder = txt('ColdMilkSeparator1.CurrentWO')
-    if (!workOrder) {
-      console.log(`[RestProvider] No work order found at ${endTime.toISOString()}, skipping`)
+    return {
+      feedPermit: val(TAGS.SEP_FEED_PERMIT),
+      motorRpm: val(TAGS.SEP_MOTOR_RPM),
+      creamFlowGpm: val(TAGS.SEP_CREAM_FLOW),
+      skimFlowGpm: val(TAGS.SEP_SKIM_FLOW),
+      feedTotalLbs: val(TAGS.SEP_FEED_TOTAL),
+      source: txt(TAGS.SEP_XFR_SOURCE),
+      itemId: txt(TAGS.SEP_XFR_ITEM_ID),
+      transferName: txt(TAGS.SEP_XFR_NAME),
+      destinations,
+      creamTotalLbs: creamTotalGal * CREAM_DENSITY_PPG,
+      skimTotalLbs: skimTotalGal * SKIM_DENSITY_PPG,
+    }
+  }
+
+  /**
+   * Read all batch-related tags at the TransferComplete timestamp.
+   * Volume tags reset to 0 between batches, so the value at this moment
+   * is the per-batch total.
+   */
+  async _buildBatchFromTransfer(transferTime) {
+    const tagMap = await this._getValuesAt([
+      TAGS.SEP_XFR_QTY_ACTUAL,
+      TAGS.SEP_XFR_QTY_TARGET,
+      TAGS.SEP_XFR_SOURCE,
+      TAGS.SEP_XFR_ITEM_ID,
+      TAGS.SEP_XFR_NAME,
+      TAGS.SEP_XFR_EU,
+      TAGS.SEP_XFR_DEST_0,
+      TAGS.SEP_XFR_DEST_1,
+      TAGS.SEP_XFR_DEST_2,
+      TAGS.SEP_XFR_DEST_3,
+      TAGS.CREAM_FLOW_TOTAL,
+      TAGS.SKIM_FLOW_TOTAL,
+    ], transferTime)
+
+    const val = (tag) => tagMap[tag]?.Value ?? 0
+    const txt = (tag) => tagMap[tag]?.Text ?? ''
+
+    const source = txt(TAGS.SEP_XFR_SOURCE)
+    if (!source) {
+      console.log(`[RestProvider] No source at ${transferTime.toISOString()}, skipping`)
       return null
     }
 
+    const batchId = `XFR-${transferTime.getTime()}`
+    const inputVolume = val(TAGS.SEP_XFR_QTY_ACTUAL)
+    const creamGallons = val(TAGS.CREAM_FLOW_TOTAL)
+    const skimGallons = val(TAGS.SKIM_FLOW_TOTAL)
+    const creamVolume = creamGallons * CREAM_DENSITY_PPG
+    const skimVolume = skimGallons * SKIM_DENSITY_PPG
+
+    const destinations = [
+      TAGS.SEP_XFR_DEST_0, TAGS.SEP_XFR_DEST_1,
+      TAGS.SEP_XFR_DEST_2, TAGS.SEP_XFR_DEST_3,
+    ].map(t => txt(t)).filter(Boolean)
+
+    console.log(`[RestProvider] Batch ${batchId}: ${source} → ${destinations.join(', ') || '?'}, input=${inputVolume.toFixed(1)} LBS, cream=${creamGallons.toFixed(1)} gal (${creamVolume.toFixed(1)} LBS), skim=${skimGallons.toFixed(1)} gal (${skimVolume.toFixed(1)} LBS)`)
+
     return {
-      batchId: workOrder,
-      sourceSilo: txt('ColdMilkSeparator1.FromEntName'),
-      inputVolume: val('ColdMilkSeparator1.ConsQty'),
-      creamVolume: val('Ing_Sep_CMSep1_HIST.Cream_Flow_Totalized'),
-      skimVolume: val('Ing_Sep_CMSep1_HIST.Skim_Flow_Totalized'),
-      batchStart: new Date(endTime.getTime() - 30 * 60 * 1000), // approximate
-      batchEnd: endTime,
-      // Extra fields for SunApps_API
-      workOrder,
-      destinationEntity: txt('ColdMilkSeparator1.ToEntName'),
-      prodItem: txt('ColdMilkSeparator1.ProdItem'),
-      prodLot: txt('ColdMilkSeparator1.ProdLot'),
-      prodQty: val('ColdMilkSeparator1.ProdQty'),
-      consItem: txt('ColdMilkSeparator1.ConsItem'),
-      consLot: txt('ColdMilkSeparator1.ConsLot'),
-      consQty: val('ColdMilkSeparator1.ConsQty'),
+      batchId,
+      sourceSilo: source,
+      destinations,
+      inputVolume,
+      creamVolume,
+      skimVolume,
+      batchStart: new Date(transferTime.getTime() - 30 * 60 * 1000),
+      batchEnd: transferTime,
+      itemId: txt(TAGS.SEP_XFR_ITEM_ID),
+      transferName: txt(TAGS.SEP_XFR_NAME),
+      unit: txt(TAGS.SEP_XFR_EU),
+      targetVolume: val(TAGS.SEP_XFR_QTY_TARGET),
     }
   }
 
   // ── Bulk milk flow ─────────────────────────────────────────────────
 
   /**
-   * Read the totalized cream/skim flow counters and compute deltas
-   * since the previous poll. Returns a single reading if the flow
-   * has changed, or an empty array if idle.
+   * Read the cream/skim flow counters and compute deltas since the
+   * previous poll. These counters accumulate within a batch and reset
+   * between batches, so a negative delta indicates a batch boundary —
+   * we skip that reading and re-seed.
    */
   async getBulkMilkFlowData(since) {
     const [creamPv, skimPv] = await Promise.all([
-      this._getCurrentValue('Ing_Sep_CMSep1_HIST.Cream_Flow_Totalized'),
-      this._getCurrentValue('Ing_Sep_CMSep1_HIST.Skim_Flow_Totalized'),
+      this._getCurrentValue(TAGS.CREAM_FLOW_TOTAL, { verbose: false }),
+      this._getCurrentValue(TAGS.SKIM_FLOW_TOTAL, { verbose: false }),
     ])
 
     const creamTotal = creamPv?.Value ?? 0
@@ -218,9 +359,9 @@ class RestProvider extends BaseProvider {
     this._prevCreamTotal = creamTotal
     this._prevSkimTotal = skimTotal
 
-    // Counter reset (new batch started) — skip this reading
+    // Counter reset (batch boundary) — re-seed, skip this reading
     if (creamDelta < 0 || skimDelta < 0) {
-      console.log('[RestProvider] Flow counter reset detected, skipping reading')
+      console.log('[RestProvider] Flow counter reset (batch boundary), re-seeding')
       return []
     }
 
@@ -234,6 +375,87 @@ class RestProvider extends BaseProvider {
       creamTotal,
       skimTotal,
     }]
+  }
+  // ── Blend tank status ─────────────────────────────────────────────
+
+  /**
+   * Read current blend tank status for all 4 tanks.
+   * Uses NOTE_STRING (product name from Atlas) + tank weight for activity detection.
+   * MES WO tags (CurrentWO, JobRunning) are stale and not used.
+   */
+  async getBlendTankStatus() {
+    const tanks = ['BlendTank1A', 'BlendTank1B', 'BlendTank2A', 'BlendTank2B']
+    const suffixes = [
+      TAGS.BT_NOTE_STRING, TAGS.BT_WEIGHT_LBS, TAGS.BT_BATCH_SIZE,
+      TAGS.BT_FROM_ENT, TAGS.BT_TO_ENT,
+    ]
+
+    const results = await Promise.all(tanks.map(async (tankId) => {
+      const fqns = suffixes.map(s => `${tankId}${s}`)
+      const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
+      const val = (i) => values[i]?.Value ?? 0
+      const txt = (i) => values[i]?.Text ?? ''
+
+      return {
+        tankId,
+        productName: txt(0),       // NOTE_STRING — Atlas product name
+        weightLbs: val(1),          // 100LT.SCL_LBS — tank weight
+        batchSize: val(2),
+        fromEntName: txt(3),
+        toEntName: txt(4),
+      }
+    }))
+
+    return results
+  }
+
+  // ── Milk/cream line totalizers ──────────────────────────────────────
+
+  /**
+   * Read current status for all milk and cream lines.
+   * Includes totalizer, product info, source silo, destination, mode, and status flags.
+   */
+  async getMilkLineStatus() {
+    const lineNames = ['ML1', 'ML2', 'ML3', 'ML4', 'CL1', 'CL2']
+    const suffixes = [
+      TAGS.LINE_TOTALIZER,        // 0  - batch totalizer (LBS)
+      TAGS.LINE_PRODUCT_NAME,     // 1  - product name from silo
+      TAGS.LINE_PRODUCT_CODE,     // 2  - product code
+      TAGS.LINE_SILO_NAME,        // 3  - source silo name
+      TAGS.LINE_REQUESTED_BY,     // 4  - destination vessel
+      TAGS.LINE_REQUESTED_TARGET, // 5  - LBS requested
+      TAGS.LINE_MODE,             // 6  - mode string
+      TAGS.LINE_STEP_NAME,        // 7  - batch step name
+      TAGS.LINE_ACTIVE,           // 8  - is active
+      TAGS.LINE_TARGET_COMPLETE,  // 9  - target complete flag
+      TAGS.LINE_DENSITY,          // 10 - product density PPG
+    ]
+
+    // Build all FQNs and fetch in parallel
+    const fqns = lineNames.flatMap(ln => suffixes.map(s => `${ln}${s}`))
+    const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
+
+    const perLine = suffixes.length
+    return lineNames.map((line, i) => {
+      const offset = i * perLine
+      const val = (idx) => values[offset + idx]?.Value ?? 0
+      const txt = (idx) => values[offset + idx]?.Text ?? ''
+
+      return {
+        line,
+        totalizerLbs: val(0),
+        productName: txt(1),
+        productCode: txt(2),
+        siloName: txt(3),
+        requestedBy: txt(4),       // destination vessel (e.g. "BlendTank1A", "UHT1")
+        requestedTargetLbs: val(5),
+        mode: txt(6),
+        stepName: txt(7),
+        active: !!val(8),
+        targetComplete: !!val(9),
+        density: val(10),
+      }
+    })
   }
 }
 
