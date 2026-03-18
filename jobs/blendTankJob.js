@@ -47,6 +47,15 @@ function isUhtDirect(requestedBy) {
 }
 
 /**
+ * Check if a blend tank is being used as a UHT passthrough (not a real blend).
+ * When ToEntName points to a UHT destination, the tank is just a waypoint —
+ * the UHT-direct line logic handles WO creation for these runs instead.
+ */
+function isUhtPassthrough(toEntName) {
+  return UHT_DESTINATIONS.some(d => toEntName?.toUpperCase().includes(d))
+}
+
+/**
  * Pending API forwards that failed and need retry.
  * Each entry: { endpoint, payload, description, attempts }
  */
@@ -117,6 +126,23 @@ async function run(historian) {
       const { tankId, productName, weightLbs, batchSize, fromEntName, toEntName } = status
       const prev = tankState[tankId]
       if (!prev) continue
+
+      // Skip tanks that are UHT passthroughs — ToEntName points to UHT/TSTAT.
+      // The UHT-direct line logic handles WO creation for these runs instead.
+      if (isUhtPassthrough(toEntName)) {
+        if (prev.batchActive) {
+          console.log(`[BlendTankJob] ${tankId} became UHT passthrough (→${toEntName}) — ending active batch "${prev.productName}"`)
+          prev.batchActive = false
+          await forward('/api/mes/milk/blend-tank/wo-end', {
+            tankId,
+            productName: prev.productName,
+            detectedAt: new Date().toISOString(),
+          }, `batch end (UHT passthrough) ${tankId} "${prev.productName}"`)
+        }
+        prev.productName = productName
+        prev.seeded = true
+        continue
+      }
 
       // First poll — seed state without creating batches.
       // Stale NOTE_STRING values (from tanks in CIP) would otherwise trigger false batch starts.
