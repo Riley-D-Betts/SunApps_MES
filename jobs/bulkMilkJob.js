@@ -11,10 +11,7 @@ async function run(historian) {
   try {
     const readings = await historian.getBulkMilkFlowData(lastPollTime)
 
-    if (readings.length === 0) {
-      console.log(`[BulkMilkJob] Poll OK — no new readings since ${lastPollTime.toISOString()}`)
-      return
-    }
+    if (readings.length === 0) return
 
     console.log(`[BulkMilkJob] Found ${readings.length} reading(s) since ${lastPollTime.toISOString()}`)
 

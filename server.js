@@ -30,9 +30,14 @@ app.get('/health', (req, res) => {
 app.use('/api/historian', historianRoutes)
 
 // Schedule jobs
-cron.schedule(config.SEPARATION_CRON, () => separationJob.run(historian))
-cron.schedule(config.BULK_MILK_CRON, () => bulkMilkJob.run(historian))
-cron.schedule(config.BLEND_TANK_CRON, () => blendTankJob.run(historian))
+if (config.MILK_TRACKING_ENABLED) {
+  cron.schedule(config.SEPARATION_CRON, () => separationJob.run(historian))
+  cron.schedule(config.BULK_MILK_CRON, () => bulkMilkJob.run(historian))
+  cron.schedule(config.BLEND_TANK_CRON, () => blendTankJob.run(historian))
+  console.log('  Milk tracking: ENABLED')
+} else {
+  console.log('  Milk tracking: DISABLED')
+}
 
 // Start server
 app.listen(config.PORT, () => {

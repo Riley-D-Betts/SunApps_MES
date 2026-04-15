@@ -350,9 +350,33 @@ async function run(historian) {
 }
 
 /**
- * Print a compact status summary to the console.
+ * Build a snapshot string of current status for change detection.
+ */
+let lastStatusSnapshot = ''
+
+function buildStatusSnapshot(statuses, lineReadings) {
+  const tanks = statuses.map(s => {
+    const state = tankState[s.tankId]
+    const active = state?.batchActive ? 'ACTIVE' : 'idle'
+    return `${s.tankId}:${active}:${s.productName || ''}:${Math.round(s.weightLbs || 0)}`
+  }).join('|')
+
+  const lines = lineReadings
+    .filter(r => r.totalizerLbs > 0 || r.active)
+    .map(r => `${r.line}:${Math.round(r.totalizerLbs)}:${r.productName || ''}:${r.requestedBy || ''}`)
+    .join('|')
+
+  return `${tanks}||${lines}`
+}
+
+/**
+ * Print a compact status summary to the console — only when something changed.
  */
 function logStatusSummary(statuses, lineReadings) {
+  const snapshot = buildStatusSnapshot(statuses, lineReadings)
+  if (snapshot === lastStatusSnapshot) return
+  lastStatusSnapshot = snapshot
+
   const ts = new Date().toLocaleTimeString()
   const tankLines = statuses.map(s => {
     const state = tankState[s.tankId]

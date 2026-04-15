@@ -42,8 +42,9 @@ async function run(historian) {
   }
 }
 
+let lastSepSnapshot = ''
+
 function logStatusSummary(status, batchCount) {
-  const ts = new Date().toLocaleTimeString()
   const {
     feedPermit, motorRpm, creamFlowGpm, skimFlowGpm, feedTotalLbs,
     source, itemId, transferName, destinations, creamTotalLbs, skimTotalLbs,
@@ -51,6 +52,13 @@ function logStatusSummary(status, batchCount) {
 
   const running = !!feedPermit
   const cip = running && (!feedTotalLbs || feedTotalLbs === 0)
+
+  // Only log when state changes (running/idle/cip transition, source, destination, or batches completed)
+  const snapshot = `${running}:${cip}:${source}:${destinations.join(',')}:${transferName || itemId}:${batchCount}`
+  if (snapshot === lastSepSnapshot) return
+  lastSepSnapshot = snapshot
+
+  const ts = new Date().toLocaleTimeString()
   const from = source || '—'
   const destStr = destinations.length > 0 ? destinations.join(', ') : '—'
   const batchNote = batchCount > 0 ? `  ** ${batchCount} batch(es) completed **` : ''
