@@ -1,0 +1,81 @@
+name: Deploy to Production
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to deploy (optional)'
+        required: false
+
+jobs:
+  deploy:
+    name: Deploy to Windows Server
+    runs-on: [self-hosted, prod-server]
+    environment: prod
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set TAG from input or release
+        shell: powershell
+        run: |
+          if ("${{ github.event.inputs.tag }}" -ne "") { Add-Content -Path $env:GITHUB_ENV -Value "TAG=${{ github.event.inputs.tag }}"
+          } else {
+            Add-Content -Path $env:GITHUB_ENV -Value "TAG=${{ github.event.release.tag_name }}"
+          }
+
+      - name: Checkout release tag
+        run: |
+          git fetch --tags
+          git checkout $env:TAG
+        shell: powershell
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Create .env
+        shell: powershell
+        run: |
+          $envPath = "./.env"
+          $envVars = @(
+            "PORT=${{ secrets.PORT }}"
+            "SUNAPPS_API_URL=${{ secrets.SUNAPPS_API_URL }}"
+            "HISTORIAN_PROVIDER=${{ secrets.HISTORIAN_PROVIDER }}"
+            "MILK_TRACKING_ENABLED=${{ secrets.MILK_TRACKING_ENABLED }}"
+            "SEPARATION_CRON=${{ secrets.SEPARATION_CRON }}"
+            "BULK_MILK_CRON=${{ secrets.BULK_MILK_CRON }}"
+            "BLEND_TANK_CRON=${{ secrets.BLEND_TANK_CRON }}"
+            "HISTORIAN_BASE_URL=${{ secrets.HISTORIAN_BASE_URL }}"
+            "HISTORIAN_DOMAIN=${{ secrets.HISTORIAN_DOMAIN }}"
+            "HISTORIAN_USERNAME=${{ secrets.HISTORIAN_USERNAME }}"
+            "HISTORIAN_PASSWORD=${{ secrets.HISTORIAN_PASSWORD }}"
+            "TEAMS_WEBHOOK_URL=${{ secrets.TEAMS_WEBHOOK_URL }}"
+          )
+          $utf8NoBomEncoding = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::WriteAllLines($envPath, $envVars, $utf8NoBomEncoding)
+
+      - name: Deploy files to app directory
+        shell: powershell
+        run: |
+          $deployPath = "C:\Apps\MES_Service"
+          Copy-Item -Path .\* -Destination "$deployPath" -Recurse -Force
+
+      - name: Install dependencies
+        run: |
+          cd C:\Apps\MES_Service
+          npm ci
+
+      - name: Add npm global bin to PATH, restart PM2 app
+        shell: powershell
+        run: |
+          $npmPath = npm config get prefix
+          $env:Path += ";$npmPath"
+          $env:Path += ";$npmPath\node_modules\pm2\bin"
+          pm2 restart MES-service
