@@ -1,0 +1,142 @@
+name: Deploy to Production
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to deploy (optional)'
+        required: false
+
+jobs:
+  deploy:
+    name: Deploy to Windows Server
+    runs-on: [self-hosted, prod-server]
+    environment: prod
+
+    steps:
+      - name: Record start time
+        id: start_time
+        run: echo "start_time=$(Get-Date -Format o)" >> $env:GITHUB_ENV
+        shell: powershell
+
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set TAG from input or release
+        shell: powershell
+        run: |
+          if ("${{ github.event.inputs.tag }}" -ne "") { Add-Content -Path $env:GITHUB_ENV -Value "TAG=${{ github.event.inputs.tag }}"
+          } else {
+            Add-Content -Path $env:GITHUB_ENV -Value "TAG=${{ github.event.release.tag_name }}"
+          }
+
+      - name: Checkout release tag
+        run: |
+          git fetch --tags
+          git checkout $env:TAG
+        shell: powershell
+
+      - name: Build Release Notes
+        shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $repo = "${{ github.repository }}"
+          $tag  = "$env:TAG"
+          $notes = "${{ github.event.release.body }}"
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            try {
+              $url = "https://api.github.com/repos/$repo/releases/tags/$tag"
+              $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = "application/vnd.github+json" }
+              $rel = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
+              $notes = $rel.body
+            } catch { $notes = "" }
+          }
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            git fetch --tags
+            $prevTag = git tag --sort=-creatordate | Select-Object -Index 1
+            if ($prevTag) { $notes = git log "$prevTag..$tag" --pretty=format:"* %s" }
+            else { $notes = git log -5 --pretty=format:"* %s" }
+          }
+          if ([string]::IsNullOrWhiteSpace($notes)) { $notes = "No release notes available." }
+          $max = 1500
+          if ($notes.Length -gt $max) { $notes = $notes.Substring(0, $max) + "`n...(truncated)" }
+          $notes = $notes -replace "`r`n", "`n"
+          "RELEASE_NOTES<<EOF" >> $env:GITHUB_ENV
+          $notes >> $env:GITHUB_ENV
+          "EOF" >> $env:GITHUB_ENV
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Create .env
+        shell: powershell
+        run: |
+          $envPath = "./.env"
+          $envVars = @(
+            "ENVIRONMENT=prod"
+            "PORT=${{ secrets.PORT }}"
+            "CORE_API_URL=${{ secrets.CORE_API_URL }}"
+            "HISTORIAN_PROVIDER=${{ secrets.HISTORIAN_PROVIDER }}"
+            "HISTORIAN_BASE_URL=${{ secrets.HISTORIAN_BASE_URL }}"
+            "HISTORIAN_DOMAIN=${{ secrets.HISTORIAN_DOMAIN }}"
+            "HISTORIAN_USERNAME=${{ secrets.HISTORIAN_USERNAME }}"
+            "HISTORIAN_PASSWORD=${{ secrets.HISTORIAN_PASSWORD }}"
+            "SEPARATION_CRON=${{ secrets.SEPARATION_CRON }}"
+            "BULK_MILK_CRON=${{ secrets.BULK_MILK_CRON }}"
+            "BLEND_TANK_CRON=${{ secrets.BLEND_TANK_CRON }}"
+            "SQL_USER=${{ secrets.SQL_USER }}"
+            "SQL_PASSWORD=${{ secrets.SQL_PASSWORD }}"
+            "SQL_DATABASE=${{ secrets.SQL_DATABASE }}"
+            "SQL_SERVER=${{ secrets.SQL_SERVER }}"
+            "TEAMS_WEBHOOK_URL=${{ secrets.TEAMS_WEBHOOK_URL }}"
+            "MES_DRY_RUN=${{ secrets.MES_DRY_RUN }}"
+          )
+          $utf8NoBomEncoding = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::WriteAllLines($envPath, $envVars, $utf8NoBomEncoding)
+
+      - name: Deploy files to app directory
+        shell: powershell
+        run: |
+          $deployPath = "C:\Apps\SunApps_MES"
+          if (!(Test-Path $deployPath)) { New-Item -Path $deployPath -ItemType Directory -Force }
+          Copy-Item -Path .\* -Destination "$deployPath" -Recurse -Force
+
+      - name: Install dependencies
+        run: |
+          cd C:\Apps\SunApps_MES
+          npm ci
+
+      - name: Add npm global bin to PATH, restart PM2 app
+        shell: powershell
+        run: |
+          $npmPath = npm config get prefix
+          $env:Path += ";$npmPath"
+          $env:Path += ";$npmPath\node_modules\pm2\bin"
+          pm2 restart sunapps_mes
+
+      - name: Notify Teams of Deployment Success
+        if: success()
+        env:
+          TEAMS_HOOK: ${{ vars.TEAMS_SOFTWARE_DEPLOYMENT_HOOK }}
+        shell: powershell
+        run: |
+          $startTime = [datetime]::Parse("${{ env.start_time }}")
+          $duration = (Get-Date) - $startTime
+          $card = @{
+            type = "AdaptiveCard"; version = "1.0"
+            body = @(
+              @{ type = "TextBlock"; text = "${{ github.repository }} Update! ${{ env.TAG }}"; weight = "Bolder"; size = "Large"; color = "Good" },
+              @{ type = "TextBlock"; text = "Release Notes"; weight = "Bolder"; size = "Medium"; spacing = "Medium" },
+              @{ type = "TextBlock"; text = "${{ env.RELEASE_NOTES }}"; wrap = $true; spacing = "Small" }
+            )
+          }
+          $payload = @{ attachments = @(@{ contentType = "application/vnd.microsoft.card.adaptive"; content = $card }) } | ConvertTo-Json -Depth 10 -Compress
+          Invoke-RestMethod -Uri $env:TEAMS_HOOK -Method Post -Body ([System.Text.Encoding]::UTF8.GetBytes($payload)) -ContentType 'application/json'
