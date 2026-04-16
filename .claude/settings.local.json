@@ -23,7 +23,13 @@
       "Bash(find . -type f -name \"*.js\" ! -path \"./node_modules/*\" -exec grep -l \"issue.*ingredient\\\\|GET.*active\\\\|POST.*issue\" {} \\\\;)",
       "Bash(cp -r ~/Workspace/SunApps_Milk/models ~/Workspace/MES_Service/)",
       "Bash(cp -r ~/Workspace/SunApps_Milk/controllers ~/Workspace/MES_Service/)",
-      "Bash(cp -r ~/Workspace/SunApps_Milk/clients ~/Workspace/MES_Service/)"
+      "Bash(cp -r ~/Workspace/SunApps_Milk/clients ~/Workspace/MES_Service/)",
+      "Bash(git push *)",
+      "Bash(gh repo *)",
+      "Bash(git remote *)",
+      "Bash(gh api *)",
+      "Bash(gh secret *)",
+      "Bash(npm install *)"
     ]
   }
 }
