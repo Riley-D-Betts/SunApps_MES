@@ -1,12 +1,8 @@
-const apiClient = require('../services/apiClient')
+const milkMesService = require('../services/milkMesService')
 const notifyService = require('../services/notifyService')
 
 let lastPollTime = new Date()
 
-/**
- * Poll Historian for separator batches and forward raw data to SunApps_API.
- * No business logic — just poll and forward.
- */
 async function run(historian) {
   try {
     const [batches, status] = await Promise.all([
@@ -14,20 +10,21 @@ async function run(historian) {
       historian.getSeparatorStatus(),
     ])
 
-    // Always log separator status
     logStatusSummary(status, batches.length)
 
     if (batches.length === 0) return
 
     for (const batch of batches) {
       try {
-        const result = await apiClient.post('/api/mes/milk/separation/batch', batch)
-        console.log(`[SeparationJob] Forwarded batch ${batch.batchId}: ${result.success ? 'OK' : 'FAIL'}`)
+        const result = await milkMesService.processSeparationBatch(batch)
+        if (!result.duplicate) {
+          console.log(`[SeparationJob] Processed batch ${batch.batchId}: status=${result.status}`)
+        }
       } catch (err) {
-        console.error(`[SeparationJob] Failed to forward batch ${batch.batchId}:`, err.message)
+        console.error(`[SeparationJob] Failed to process batch ${batch.batchId}:`, err.message)
         await notifyService.sendAlert(
-          'MES_Service: Separation Batch Forward Failed',
-          `Batch ${batch.batchId} could not be sent to SunApps_API: ${err.message}`
+          'SunApps MES: Separation Batch Failed',
+          `Batch ${batch.batchId} could not be processed: ${err.message}`
         )
       }
     }
@@ -36,7 +33,7 @@ async function run(historian) {
   } catch (err) {
     console.error('[SeparationJob] Poll error:', err.message)
     await notifyService.sendAlert(
-      'MES_Service: Historian Poll Failed',
+      'SunApps MES: Historian Poll Failed',
       `Separation job could not poll Historian: ${err.message}`
     )
   }

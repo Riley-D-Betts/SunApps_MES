@@ -1,20 +1,31 @@
 const express = require('express')
+const bodyParser = require('body-parser')
 const cron = require('node-cron')
 const config = require('./config')
+const { sequelize } = require('./config')
+const db = require('./models')
 const { createProvider } = require('./historian')
 const separationJob = require('./jobs/separationJob')
 const bulkMilkJob = require('./jobs/bulkMilkJob')
 const blendTankJob = require('./jobs/blendTankJob')
 const historianRoutes = require('./routes/historianRoutes')
+const milkMesRoutes = require('./routes/milkMesRoutes')
+const milkRoutes = require('./routes/milkRoutes')
 
 const app = express()
 const historian = createProvider()
 const startTime = Date.now()
 
-// Make historian available to route handlers
+sequelize.sync().then(async () => {
+  await db.ensureRuntimeSchema()
+  console.log('Sequelize models synced.')
+})
+
+app.use(bodyParser.json({ limit: '50mb' }))
+app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }))
+
 app.locals.historian = historian
 
-// Health endpoint
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -26,20 +37,19 @@ app.get('/health', (req, res) => {
   })
 })
 
-// Query API — gateway for SunApps_API to pull Historian data on demand
 app.use('/api/historian', historianRoutes)
+app.use('/api/mes/milk', milkMesRoutes)
+app.use('/api/milk', milkRoutes)
 
-// Schedule jobs
 cron.schedule(config.SEPARATION_CRON, () => separationJob.run(historian))
 cron.schedule(config.BULK_MILK_CRON, () => bulkMilkJob.run(historian))
 cron.schedule(config.BLEND_TANK_CRON, () => blendTankJob.run(historian))
 
-// Start server
 app.listen(config.PORT, () => {
-  console.log(`MES_Service running on port ${config.PORT}`)
+  console.log(`SunApps MES Service running on port ${config.PORT}`)
   console.log(`  Historian provider: ${config.HISTORIAN_PROVIDER}`)
   console.log(`  Separation poll: ${config.SEPARATION_CRON}`)
   console.log(`  Bulk milk poll: ${config.BULK_MILK_CRON}`)
   console.log(`  Blend tank poll: ${config.BLEND_TANK_CRON}`)
-  console.log(`  Forwarding to: ${config.SUNAPPS_API_URL}`)
+  console.log(`  Dry run: ${config.MES_DRY_RUN}`)
 })
