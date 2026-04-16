@@ -10,7 +10,20 @@
       "Bash(git commit:*)",
       "Bash(npx vue-tsc:*)",
       "Bash(npx vite:*)",
-      "Bash(ls *.log 2>/dev/null; tasklist 2>/dev/null | grep -i node)"
+      "Bash(ls *.log 2>/dev/null; tasklist 2>/dev/null | grep -i node)",
+      "Bash(find /c/Users/BryceChesley/Workspace/SunApps_API -type f -name *.test.js -o -name *.spec.js)",
+      "Bash(ls \"C:\\\\Users\\\\BryceChesley\\\\Workspace\\\\SunApps_API\\\\services\\\\lineIngredient\"*)",
+      "Bash(find C:\\\\Users\\\\BryceChesley\\\\Workspace\\\\SunApps_API_Legacy *)",
+      "Bash(find C:\\\\Users\\\\BryceChesley\\\\Workspace\\\\SunApps_Gateway *)",
+      "Bash(find . -type f -name \"*.js\" ! -path \"./node_modules/*\" -exec grep -l \"milk\\\\|blend.tank\\\\|bulk.milk\\\\|separation\" {} \\\\;)",
+      "Bash(grep -r \"milk\" . --include=\"*.js\" ! -path \"./node_modules/*\" -n)",
+      "Bash(xargs grep *)",
+      "Bash(find . -type f \\\\\\( -name \"*.js\" -o -name \"*.json\" \\\\\\) ! -path \"./node_modules/*\" -exec grep -l \"POST\\\\|post\\\\|separation\\\\|wo.start\\\\|wo.end\\\\|line.flow\\\\|issue.ingredient\" {} \\\\;)",
+      "Bash(find . -type f -name \"*.js\" ! -path \"*/node_modules/*\" -exec grep -l \"wo-start\\\\|wo-end\\\\|line-flow\\\\|issue-ingredient\\\\|blend-tank\" {} \\\\;)",
+      "Bash(find . -type f -name \"*.js\" ! -path \"./node_modules/*\" -exec grep -l \"issue.*ingredient\\\\|GET.*active\\\\|POST.*issue\" {} \\\\;)",
+      "Bash(cp -r ~/Workspace/SunApps_Milk/models ~/Workspace/MES_Service/)",
+      "Bash(cp -r ~/Workspace/SunApps_Milk/controllers ~/Workspace/MES_Service/)",
+      "Bash(cp -r ~/Workspace/SunApps_Milk/clients ~/Workspace/MES_Service/)"
     ]
   }
 }
