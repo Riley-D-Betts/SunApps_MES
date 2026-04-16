@@ -22,7 +22,7 @@ const sequelize = new Sequelize(
 )
 
 module.exports = {
-  PORT: process.env.PORT || 4300,
+  PORT: process.env.PORT || 4005,
   CORE_API_URL: process.env.CORE_API_URL || 'http://localhost:4000',
   MES_DRY_RUN: process.env.MES_DRY_RUN === 'true',
   HISTORIAN_PROVIDER: process.env.HISTORIAN_PROVIDER || 'mock',
