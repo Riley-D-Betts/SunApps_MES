@@ -298,7 +298,7 @@ async function processLineFlow(data) {
     }
 
     const body = {
-      item: {
+      component: {
         items: [{ item: { id: String(componentItem.id) }, quantity: totalLbs }],
       },
     }
@@ -386,7 +386,7 @@ async function issueIngredient(batchId, data) {
 
   const nsResult = await core.netsuitePost(
     `/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderIssue`,
-    { item: { items: [componentItem] } }
+    { component: { items: [componentItem] } }
   )
 
   const nsIssueId = nsResult?.id || null

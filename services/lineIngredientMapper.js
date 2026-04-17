@@ -60,8 +60,11 @@ const LINE_PRODUCT_MAP = {
   // Standardized fat percentages
   'raw organic 1%':              { id: 5409, name: 'Raw Organic 1%' },
   'organic 1%':                  { id: 5409, name: 'Raw Organic 1%' },
+  'organic low fat 1%':          { id: 5409, name: 'Raw Organic 1%' },
   'raw organic 2%':              { id: 5410, name: 'Raw Organic 2%' },
   'organic 2%':                  { id: 5410, name: 'Raw Organic 2%' },
+  'organic low fat 2%':          { id: 5410, name: 'Raw Organic 2%' },
+  'organic reduced fat 2%':      { id: 5410, name: 'Raw Organic 2%' },
   'raw organic 3.25%':           { id: 5411, name: 'Raw Organic 3.25%' },
   'organic 3.25%':               { id: 5411, name: 'Raw Organic 3.25%' },
   'raw organic 3.5%':            { id: 5481, name: 'Raw Organic 3.5%' },
