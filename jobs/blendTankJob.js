@@ -5,6 +5,10 @@ const WEIGHT_THRESHOLD_LBS = 500
 const EMPTY_THRESHOLD_LBS = 100
 const LINE_RESET_THRESHOLD_LBS = 100
 
+function validStr(val) {
+  return val && val !== 'None' && val !== 'none' ? val : null
+}
+
 const tankState = {
   BlendTank1A: { productName: null, batchActive: false, seeded: false },
   BlendTank1B: { productName: null, batchActive: false, seeded: false },
@@ -13,12 +17,12 @@ const tankState = {
 }
 
 const lineState = {
-  ML1: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtActive: false },
-  ML2: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtActive: false },
-  ML3: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtActive: false },
-  ML4: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtActive: false },
-  CL1: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtActive: false },
-  CL2: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtActive: false },
+  ML1: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtRequestedBy: '', uhtActive: false },
+  ML2: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtRequestedBy: '', uhtActive: false },
+  ML3: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtRequestedBy: '', uhtActive: false },
+  ML4: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtRequestedBy: '', uhtActive: false },
+  CL1: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtRequestedBy: '', uhtActive: false },
+  CL2: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtRequestedBy: '', uhtActive: false },
 }
 
 const UHT_DESTINATIONS = ['UHT1', 'UHT2', 'TSTAT1', 'TSTAT2']
@@ -46,7 +50,7 @@ async function run(historian) {
       }
 
       const hadProduct = !!prev.productName
-      const hasProduct = !!productName
+      const hasProduct = !!validStr(productName)
 
       if (prev.batchActive && hasProduct && weightLbs < EMPTY_THRESHOLD_LBS) {
         console.log(`[BlendTankJob] BATCH END (tank emptied) on ${tankId}: "${prev.productName}" (${Math.round(weightLbs)} lb)`)
@@ -110,14 +114,14 @@ async function run(historian) {
 
       if (prev.prevValue === null) {
         prev.prevValue = totalizerLbs
-        if (productName) prev.productName = productName
-        if (siloName) prev.siloName = siloName
-        if (requestedBy) prev.requestedBy = requestedBy
+        if (validStr(productName)) prev.productName = productName
+        if (validStr(siloName)) prev.siloName = siloName
+        if (validStr(requestedBy)) prev.requestedBy = requestedBy
         continue
       }
 
       const hadProduct = !!prev.productName
-      const hasProduct = !!productName
+      const hasProduct = !!validStr(productName)
       const totalizerReset = prev.prevValue > LINE_RESET_THRESHOLD_LBS && totalizerLbs < LINE_RESET_THRESHOLD_LBS
 
       if (hasProduct && isUhtDirect(requestedBy) && !prev.uhtActive) {
@@ -131,11 +135,12 @@ async function run(historian) {
         } catch (err) {
           console.error(`[BlendTankJob] processWOStart (UHT) failed for ${uhtId}:`, err.message)
         }
+        prev.uhtRequestedBy = requestedBy
         prev.uhtActive = true
       }
 
       if (prev.uhtActive && (totalizerReset || !hasProduct)) {
-        const uhtId = `${line}→${prev.requestedBy}`
+        const uhtId = `${line}→${prev.uhtRequestedBy}`
         const batchTotalLbs = totalizerReset ? prev.prevValue : (totalizerLbs > 10 ? totalizerLbs : prev.prevValue)
         console.log(`[BlendTankJob] UHT-DIRECT END on ${line}: "${prev.productName}" — ${batchTotalLbs.toFixed(1)} LBS`)
 
@@ -174,9 +179,9 @@ async function run(historian) {
         }
       }
 
-      if (productName) prev.productName = productName
-      if (siloName) prev.siloName = siloName
-      if (requestedBy) prev.requestedBy = requestedBy
+      if (validStr(productName)) prev.productName = productName
+      if (validStr(siloName)) prev.siloName = siloName
+      if (validStr(requestedBy)) prev.requestedBy = requestedBy
       if (requestedTargetLbs) prev.requestedTargetLbs = requestedTargetLbs
       prev.prevValue = totalizerLbs
     }

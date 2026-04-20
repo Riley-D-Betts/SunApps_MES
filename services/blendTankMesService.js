@@ -149,12 +149,15 @@ async function processWOEnd(data) {
     where: { blendTankBatchId: record.id, status: 'completed' },
   })
   const totalInflowLbs = inflows.reduce((sum, i) => sum + (i.totalLbs || 0), 0)
+  const completionQty = totalInflowLbs > 0
+    ? Math.round(totalInflowLbs)
+    : Math.round(record.batchSize || 1)
 
   let nsCompletionId = null
-  if (record.nsWorkOrderId && totalInflowLbs > 0 && !config.MES_DRY_RUN) {
+  if (record.nsWorkOrderId && completionQty > 0 && !config.MES_DRY_RUN) {
     try {
-      const completionQty = Math.round(totalInflowLbs)
       const lotNumber = `${tankId}-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`
+      const qtySource = totalInflowLbs > 0 ? 'inflows' : 'batchSize'
 
       const body = {
         quantity: completionQty,
@@ -165,7 +168,7 @@ async function processWOEnd(data) {
         },
       }
 
-      console.log(`[BlendTankMesService] Completing NS WO ${record.nsWorkOrderId} for "${record.productName}": ${completionQty} LBS, lot=${lotNumber}`)
+      console.log(`[BlendTankMesService] Completing NS WO ${record.nsWorkOrderId} for "${record.productName}": ${completionQty} LBS (${qtySource}), lot=${lotNumber}`)
       const nsResult = await core.netsuitePost(
         `/record/v1/workOrder/${record.nsWorkOrderId}/!transform/workOrderCompletion`,
         body
@@ -181,8 +184,8 @@ async function processWOEnd(data) {
     } catch (err) {
       console.error(`[BlendTankMesService] Failed to complete NS WO ${record.nsWorkOrderId}:`, err.message)
     }
-  } else if (record.nsWorkOrderId && totalInflowLbs === 0) {
-    console.log(`[BlendTankMesService] No inflows for batch "${record.productName}" on ${tankId} — skipping NS completion`)
+  } else if (record.nsWorkOrderId && !completionQty) {
+    console.log(`[BlendTankMesService] No completion quantity for batch "${record.productName}" on ${tankId} — skipping NS completion`)
   }
 
   await record.update({ status: 'completed', completedAt: detectedAt || new Date() })
