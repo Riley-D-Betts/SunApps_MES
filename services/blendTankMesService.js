@@ -5,6 +5,19 @@ const lineMapper = require('./lineIngredientMapper')
 const config = require('../config')
 const db = require('../models')
 
+// Cache WO BOM line numbers to avoid repeated NS fetches per batch
+const _woBomCache = {}
+
+async function getWoBomLineNumber(nsWorkOrderId, itemId) {
+  if (!_woBomCache[nsWorkOrderId]) {
+    const woDetail = await core.netsuiteGet(`/record/v1/workOrder/${nsWorkOrderId}?expandSubResources=true`)
+    _woBomCache[nsWorkOrderId] = woDetail?.item?.items || []
+  }
+  const bomItems = _woBomCache[nsWorkOrderId]
+  const bomLine = bomItems.find(b => String(b.item?.id || b.item) === String(itemId))
+  return bomLine?.line ? parseInt(bomLine.line, 10) : null
+}
+
 async function processWOStart(data) {
   const { tankId, productName, batchSize, fromEntName, toEntName, detectedAt } = data
 
@@ -159,11 +172,19 @@ async function processWOEnd(data) {
       const lotNumber = `${tankId}-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`
       const qtySource = totalInflowLbs > 0 ? 'inflows' : 'batchSize'
 
+      const completionBinId = itemConfig.getBinId(tankId)
+      const completionInventoryItem = { quantity: completionQty, receiptInventoryNumber: lotNumber }
+      if (completionBinId) {
+        completionInventoryItem.binnumber = { id: completionBinId }
+      } else {
+        console.warn(`[BlendTankMesService] No NS bin configured for tank "${tankId}" — completing without bin assignment (may fail if bin tracking is required)`)
+      }
+
       const body = {
         quantity: completionQty,
         inventorydetail: {
           inventoryassignment: {
-            items: [{ quantity: completionQty, receiptInventoryNumber: lotNumber }],
+            items: [completionInventoryItem],
           },
         },
       }
@@ -179,6 +200,9 @@ async function processWOEnd(data) {
         if (match) nsCompletionId = match[1]
       }
       if (!nsCompletionId && nsResult?.id) nsCompletionId = nsResult.id
+
+      // Clear BOM cache for this WO — it's done
+      delete _woBomCache[record.nsWorkOrderId]
 
       console.log(`[BlendTankMesService] WO ${record.nsWorkOrderNumber || record.nsWorkOrderId} completed: ${completionQty} LBS → completion ${nsCompletionId}`)
     } catch (err) {
@@ -300,13 +324,47 @@ async function processLineFlow(data) {
       return { success: true, inflowId: inflowRecord.id, status: 'pending_ns' }
     }
 
-    const body = {
-      component: {
-        items: [{ item: { id: String(componentItem.id) }, quantity: totalLbs }],
+    const lineNumber = await getWoBomLineNumber(targetBatch.nsWorkOrderId, componentItem.id)
+    if (!lineNumber) {
+      console.warn(`[BlendTankMesService] Item ${componentItem.name} (${componentItem.id}) not in WO BOM ${targetBatch.nsWorkOrderId} — cannot issue`)
+      await inflowRecord.update({ status: 'pending_ns' })
+      await db.MesProcessingLog.create({
+        eventType: 'blend_tank_line_issue', sourceId: targetBatch.nsWorkOrderId,
+        nsTransactionType: 'workOrderIssue', payload: JSON.stringify(data),
+        result: JSON.stringify({ skipped: 'item not in WO BOM', componentItem }), success: true,
+      })
+      return { success: true, inflowId: inflowRecord.id, status: 'pending_ns' }
+    }
+
+    const binId = itemConfig.getBinId(siloName)
+    if (!binId) {
+      console.warn(`[BlendTankMesService] No NS bin configured for silo "${siloName}" — cannot issue bin-tracked item (pending_ns until bin is configured)`)
+      await inflowRecord.update({ status: 'pending_ns' })
+      await db.MesProcessingLog.create({
+        eventType: 'blend_tank_line_issue', sourceId: targetBatch.nsWorkOrderId,
+        nsTransactionType: 'workOrderIssue', payload: JSON.stringify(data),
+        result: JSON.stringify({ skipped: 'no NS bin configured for silo', siloName, componentItem }), success: true,
+      })
+      return { success: true, inflowId: inflowRecord.id, status: 'pending_ns' }
+    }
+
+    const componentEntry = {
+      lineNumber,
+      quantity: totalLbs,
+      componentinventorydetail: {
+        inventoryassignment: {
+          items: [{ quantity: totalLbs, binnumber: { id: binId } }],
+        },
       },
     }
 
-    console.log(`[BlendTankMesService] Issuing ${totalLbs.toFixed(1)} LBS "${lineProductName || ingredientType}" (${line}, resolved=${resolvedFrom}) to NS WO ${targetBatch.nsWorkOrderId}`)
+    const body = {
+      component: {
+        items: [componentEntry],
+      },
+    }
+
+    console.log(`[BlendTankMesService] Issuing ${totalLbs.toFixed(1)} LBS "${lineProductName || ingredientType}" (${line}, resolved=${resolvedFrom}, lineNumber=${lineNumber}) to NS WO ${targetBatch.nsWorkOrderId}`)
     const nsResult = await core.netsuitePost(
       `/record/v1/workOrder/${targetBatch.nsWorkOrderId}/!transform/workOrderIssue`,
       body
@@ -371,7 +429,7 @@ async function getBatchComponents(batchId) {
 }
 
 async function issueIngredient(batchId, data) {
-  const { nsItemId, quantity, lot } = data
+  const { nsItemId, quantity, lot, siloName, binId: explicitBinId } = data
 
   if (!nsItemId) throw new Error('nsItemId is required')
   if (!quantity || quantity <= 0) throw new Error('quantity must be greater than 0')
@@ -380,10 +438,19 @@ async function issueIngredient(batchId, data) {
   if (!batch) throw new Error(`Batch ${batchId} not found`)
   if (!batch.nsWorkOrderId) throw new Error(`Batch ${batchId} has no NS work order — cannot issue`)
 
-  const componentItem = { item: { id: String(nsItemId) }, quantity }
-  if (lot) {
-    componentItem.inventoryDetail = {
-      inventoryAssignment: { items: [{ issueInventoryNumber: { id: lot }, quantity }] },
+  const lineNumber = await getWoBomLineNumber(batch.nsWorkOrderId, nsItemId)
+  if (!lineNumber) throw new Error(`Item ${nsItemId} not found in WO ${batch.nsWorkOrderId} BOM`)
+
+  const resolvedBinId = explicitBinId || (siloName ? itemConfig.getBinId(siloName) : null)
+
+  const componentItem = { lineNumber, quantity }
+  const inventoryDetailItems = [{ quantity }]
+  if (lot) inventoryDetailItems[0].issueinventorynumber = { id: lot }
+  if (resolvedBinId) inventoryDetailItems[0].binnumber = { id: resolvedBinId }
+
+  if (lot || resolvedBinId) {
+    componentItem.componentinventorydetail = {
+      inventoryassignment: { items: inventoryDetailItems },
     }
   }
 

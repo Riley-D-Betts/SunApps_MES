@@ -29,7 +29,16 @@
       "Bash(git remote *)",
       "Bash(gh api *)",
       "Bash(gh secret *)",
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "Bash(curl -s \"http://10.4.2.199:4000/api/netsuite/record/v1/inventoryItem/5480\")",
+      "Bash(curl -s \"http://10.4.2.199:4000/api/netsuite/record/v1/assemblyItem/3937?expandSubResources=true\")",
+      "Bash(curl -s \"http://10.4.2.199:4000/api/netsuite/record/v1/assemblyItem/3230/billOfMaterials/113\")",
+      "Bash(curl -s \"http://10.4.2.199:4000/api/netsuite/record/v1/bomRevision/174?expandSubResources=true\")",
+      "Bash(curl -s \"http://10.4.2.199:4000/api/netsuite/record/v1/workOrderIssue?limit=3&offset=2997\")",
+      "Bash(curl -s \"http://10.4.2.199:4000/api/netsuite/record/v1/workOrderIssue?limit=1&offset=2999\")",
+      "Bash(curl -s \"http://10.4.2.199:4000/api/netsuite/record/v1/inventoryItem/5477\")",
+      "Bash(curl -s \"http://10.4.2.199:4000/api/netsuite/record/v1/workOrder/4323660\")",
+      "Bash(python3 -m json.tool)"
     ]
   }
 }

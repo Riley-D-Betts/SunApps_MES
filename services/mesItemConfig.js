@@ -46,6 +46,31 @@ const WASTE_ALERT_THRESHOLD = 5
 
 const BLEND_TANK_ITEM_MAP = {}
 
+// NS bin IDs for each silo and blend tank at location 23 (bin names: Silo-Raw-N, Silo-Cream-N, Blend-NA/B)
+const SILO_BIN_MAP = {
+  MSilo1: 1006,
+  MSilo2: 1002,
+  MSilo3: 1003,
+  MSilo4: 1005,
+  MSilo5: 1001,
+  CSilo1: 1013,
+  CSilo2: 1008,
+  CSilo3: 1007,
+}
+
+const TANK_BIN_MAP = {
+  BlendTank1A: 1016,
+  BlendTank1B: 1017,
+  BlendTank2A: 1019,
+  BlendTank2B: 1020,
+}
+
+function getBinId(siloOrTankName) {
+  if (!siloOrTankName) return null
+  const v = SILO_BIN_MAP[siloOrTankName] ?? TANK_BIN_MAP[siloOrTankName] ?? null
+  return v != null ? v : null
+}
+
 const HISTORIAN_ITEM_MAP = {
   '300015': { id: 5417, name: 'Raw Conventional Milk', nsType: 'Assembly' },
   '300016': { id: 5404, name: 'Raw Organic Milk', nsType: 'Assembly' },
@@ -53,6 +78,9 @@ const HISTORIAN_ITEM_MAP = {
   '300010': { id: 5482, name: 'Raw Organic 0%', nsType: 'InvtPart' },
   '300011': { id: 5480, name: 'Raw Conventional Cream', nsType: 'InvtPart' },
   '300012': { id: 5483, name: 'Raw Organic Cream', nsType: 'InvtPart' },
+  '300013': { id: 5405, name: 'Raw Conventional UF Milk', nsType: 'InvtPart' },
+  '300017': { id: 5403, name: 'Raw Organic A2 Milk', nsType: 'Assembly' },
+  '205000': { id: 5406, name: 'Raw Organic Grade A (A2/A2) Milk', nsType: 'Assembly' },
 }
 
 function getItem(mesItemCode, sourceSilo) {
@@ -111,6 +139,8 @@ module.exports = {
   SILO_ITEM_MAP,
   HISTORIAN_ITEM_MAP,
   BLEND_TANK_ITEM_MAP,
+  SILO_BIN_MAP,
+  TANK_BIN_MAP,
   RAW_ITEMS,
   CREAM_ITEM,
   SKIM_ITEM,
@@ -123,5 +153,6 @@ module.exports = {
   getOutputItems,
   getInputItem,
   getBlendTankItem,
+  getBinId,
   resolveNSItemByMesCode,
 }
