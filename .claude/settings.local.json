@@ -38,7 +38,10 @@
       "Bash(curl -s \"http://10.4.2.199:4000/api/netsuite/record/v1/workOrderIssue?limit=1&offset=2999\")",
       "Bash(curl -s \"http://10.4.2.199:4000/api/netsuite/record/v1/inventoryItem/5477\")",
       "Bash(curl -s \"http://10.4.2.199:4000/api/netsuite/record/v1/workOrder/4323660\")",
-      "Bash(python3 -m json.tool)"
+      "Bash(python3 -m json.tool)",
+      "Bash(git -C \"C:\\\\Users\\\\BryceChesley\\\\Workspace\\\\SunApps_MES\" status)",
+      "Bash(git -C \"C:\\\\Users\\\\BryceChesley\\\\Workspace\\\\SunApps_MES\" diff)",
+      "Bash(git *)"
     ]
   }
 }
