@@ -11,6 +11,7 @@ const blendTankJob = require('./jobs/blendTankJob')
 const historianRoutes = require('./routes/historianRoutes')
 const milkMesRoutes = require('./routes/milkMesRoutes')
 const milkRoutes = require('./routes/milkRoutes')
+const liveStatusRoutes = require('./routes/liveStatusRoutes')
 
 const app = express()
 const historian = createProvider()
@@ -39,6 +40,7 @@ app.get('/health', (req, res) => {
 
 app.use('/api/historian', historianRoutes)
 app.use('/api/mes/milk', milkMesRoutes)
+app.use('/api/mes/live-status', liveStatusRoutes)
 app.use('/api/milk', milkRoutes)
 
 cron.schedule(config.SEPARATION_CRON, () => separationJob.run(historian))

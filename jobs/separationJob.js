@@ -1,9 +1,11 @@
 const milkMesService = require('../services/milkMesService')
 const notifyService = require('../services/notifyService')
+const statusStore = require('../services/statusStore')
 
 let lastPollTime = new Date()
 
 async function run(historian) {
+  const pollStart = Date.now()
   try {
     const [batches, status] = await Promise.all([
       historian.getSeparatorBatches(lastPollTime),
@@ -12,6 +14,12 @@ async function run(historian) {
 
     logStatusSummary(status, batches.length)
 
+    statusStore.setSeparator({
+      status,
+      recentBatchCount: batches.length,
+      pollDurationMs: Date.now() - pollStart,
+    })
+
     if (batches.length === 0) return
 
     for (const batch of batches) {
@@ -19,9 +27,19 @@ async function run(historian) {
         const result = await milkMesService.processSeparationBatch(batch)
         if (!result.duplicate) {
           console.log(`[SeparationJob] Processed batch ${batch.batchId}: status=${result.status}`)
+          statusStore.pushEvent('separation.batch', `Processed batch ${batch.batchId}`, {
+            batchId: batch.batchId,
+            sourceSilo: batch.sourceSilo,
+            destinations: batch.destinations,
+            inputVolume: batch.inputVolume,
+            creamVolume: batch.creamVolume,
+            skimVolume: batch.skimVolume,
+            status: result.status,
+          })
         }
       } catch (err) {
         console.error(`[SeparationJob] Failed to process batch ${batch.batchId}:`, err.message)
+        statusStore.pushEvent('separation.batch.error', `Batch ${batch.batchId} failed`, { error: err.message })
         await notifyService.sendAlert(
           'SunApps MES: Separation Batch Failed',
           `Batch ${batch.batchId} could not be processed: ${err.message}`
@@ -32,6 +50,7 @@ async function run(historian) {
     lastPollTime = new Date()
   } catch (err) {
     console.error('[SeparationJob] Poll error:', err.message)
+    statusStore.pushEvent('separation.poll.error', 'Historian poll failed', { error: err.message })
     await notifyService.sendAlert(
       'SunApps MES: Historian Poll Failed',
       `Separation job could not poll Historian: ${err.message}`
