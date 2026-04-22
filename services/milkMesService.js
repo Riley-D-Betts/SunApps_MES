@@ -70,8 +70,57 @@ async function processSeparationBatch(data) {
   try {
     const { cream: creamItem, skim: skimItem } = itemConfig.getOutputItems(sourceSilo)
 
+    // Resolve source bin (where the raw milk is being consumed from)
+    const sourceBinId = itemConfig.getBinId(sourceSilo)
+
+    // Resolve destination bins from SCADA destinations array — cream goes to a
+    // C-silo, skim goes to an M-silo (distinct from sourceSilo).
+    let creamDestBinId = null
+    let skimDestBinId = null
+    let creamDestSilo = null
+    let skimDestSilo = null
+    for (const d of destinations || []) {
+      const normalized = itemConfig.normalizeSiloName(d)
+      const cls = itemConfig.classifySiloDestination(d)
+      const binId = itemConfig.getBinId(d)
+      if (!binId || !normalized) continue
+      if (cls === 'cream' && !creamDestBinId) {
+        creamDestBinId = binId
+        creamDestSilo = normalized
+      } else if (cls === 'skim' && !skimDestBinId && normalized !== sourceSilo) {
+        skimDestBinId = binId
+        skimDestSilo = normalized
+      }
+    }
+
+    // Bin-tracked items require a bin on every assignment — bail to pending_ns
+    // if we can't resolve them. The SCADA data is persisted either way.
+    const needCream = !!(creamItem.id && creamVolume > 0)
+    const needSkim = !!(skimItem.id && skimVolume > 0)
+    const missingBins = []
+    if (inputItem.id && !sourceBinId) missingBins.push(`source "${sourceSilo}"`)
+    if (needCream && !creamDestBinId) missingBins.push(`cream destination (from ${JSON.stringify(destinations || [])})`)
+    if (needSkim && !skimDestBinId) missingBins.push(`skim destination (from ${JSON.stringify(destinations || [])})`)
+
+    if (missingBins.length > 0 && !config.MES_DRY_RUN && inputItem.id) {
+      console.warn(`[MilkMesService] Cannot build unbuild for batch ${batchId} — missing bins: ${missingBins.join('; ')} — saving pending_ns`)
+      await record.update({ status: 'pending_ns', processedAt: new Date() })
+      await db.MesProcessingLog.create({
+        eventType: 'separation_unbuild', sourceId: batchId,
+        nsTransactionType: 'assemblyUnbuild', nsTransactionId: null,
+        payload: JSON.stringify(data),
+        result: JSON.stringify({ skipped: 'missing bin(s)', missingBins, sourceSilo, destinations, creamDestSilo, skimDestSilo }),
+        success: true,
+      })
+      return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'pending_ns' }
+    }
+
+    const lotDate = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+    const creamLot = `${sourceSilo}-${lotDate}-CR`
+    const skimLot = `${sourceSilo}-${lotDate}-SK`
+
     const body = {
-      item: inputItem.id || undefined,
+      item: inputItem.id ? { id: inputItem.id } : undefined,
       quantity: inputVolume,
       location: { id: 23 },
       subsidiary: { id: 2 },
@@ -82,26 +131,48 @@ async function processSeparationBatch(data) {
       custbody_milk_destinations: (destinations || []).join(', '),
     }
 
-    const componentItems = []
-    if (creamItem.id && creamVolume > 0) {
-      componentItems.push({
-        item: creamItem.id,
-        quantity: creamVolume,
-        inventoryDetail: {
-          inventoryAssignment: { items: [{ quantity: creamVolume }] },
+    if (sourceBinId) {
+      body.inventorydetail = {
+        inventoryassignment: {
+          items: [{ quantity: inputVolume, binnumber: { id: sourceBinId } }],
         },
-      })
+      }
     }
-    if (skimItem.id && skimVolume > 0) {
-      componentItems.push({
-        item: skimItem.id,
-        quantity: skimVolume,
-        inventoryDetail: {
-          inventoryAssignment: { items: [{ quantity: skimVolume }] },
-        },
-      })
+
+    const componentItems = []
+    if (needCream) {
+      const creamEntry = { item: { id: creamItem.id }, quantity: creamVolume }
+      if (creamDestBinId) {
+        creamEntry.inventorydetail = {
+          inventoryassignment: {
+            items: [{
+              quantity: creamVolume,
+              receiptInventoryNumber: creamLot,
+              binnumber: { id: creamDestBinId },
+            }],
+          },
+        }
+      }
+      componentItems.push(creamEntry)
+    }
+    if (needSkim) {
+      const skimEntry = { item: { id: skimItem.id }, quantity: skimVolume }
+      if (skimDestBinId) {
+        skimEntry.inventorydetail = {
+          inventoryassignment: {
+            items: [{
+              quantity: skimVolume,
+              receiptInventoryNumber: skimLot,
+              binnumber: { id: skimDestBinId },
+            }],
+          },
+        }
+      }
+      componentItems.push(skimEntry)
     }
     if (componentItems.length > 0) body.component = { items: componentItems }
+
+    console.log(`[MilkMesService] Unbuild bins: source=${sourceSilo}(${sourceBinId || '-'}) cream→${creamDestSilo || '-'}(${creamDestBinId || '-'}) skim→${skimDestSilo || '-'}(${skimDestBinId || '-'})`)
 
     if (config.MES_DRY_RUN) {
       console.log(`[MilkMesService] DRY RUN — batch ${batchId} saved, skipping NS unbuild`)

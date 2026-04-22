@@ -65,10 +65,47 @@ const TANK_BIN_MAP = {
   BlendTank2B: 1020,
 }
 
+// SCADA strings for silos aren't perfectly consistent — operators sometimes
+// configure "RawMilkSilo5" / "CreamSilo2" instead of the canonical "MSilo5" /
+// "CSilo2". Normalize to the bin-map key before lookup.
+function normalizeSiloName(raw) {
+  if (!raw || typeof raw !== 'string') return null
+  const s = raw.trim()
+  if (!s) return null
+  if (SILO_BIN_MAP[s] != null || TANK_BIN_MAP[s] != null) return s
+
+  const m = s.match(/(\d+)\s*$/)
+  if (!m) return null
+  const n = m[1]
+  const lower = s.toLowerCase()
+  if (lower.includes('cream') || lower.startsWith('csilo') || lower.startsWith('cl')) {
+    return `CSilo${n}`
+  }
+  if (lower.includes('milk') || lower.includes('skim') || lower.startsWith('msilo') || lower.startsWith('ml')) {
+    return `MSilo${n}`
+  }
+  return null
+}
+
 function getBinId(siloOrTankName) {
   if (!siloOrTankName) return null
-  const v = SILO_BIN_MAP[siloOrTankName] ?? TANK_BIN_MAP[siloOrTankName] ?? null
+  const direct = SILO_BIN_MAP[siloOrTankName] ?? TANK_BIN_MAP[siloOrTankName]
+  if (direct != null) return direct
+  const normalized = normalizeSiloName(siloOrTankName)
+  if (!normalized) return null
+  const v = SILO_BIN_MAP[normalized] ?? TANK_BIN_MAP[normalized] ?? null
   return v != null ? v : null
+}
+
+// Classify a destination silo as the cream receiver or skim receiver.
+// Cream silos start with "C" (CSilo*), milk silos start with "M" (MSilo*) — raw
+// skim is received back into an M-silo after separation.
+function classifySiloDestination(raw) {
+  const name = normalizeSiloName(raw)
+  if (!name) return null
+  if (name.startsWith('CSilo')) return 'cream'
+  if (name.startsWith('MSilo')) return 'skim'
+  return null
 }
 
 const HISTORIAN_ITEM_MAP = {
@@ -154,5 +191,7 @@ module.exports = {
   getInputItem,
   getBlendTankItem,
   getBinId,
+  normalizeSiloName,
+  classifySiloDestination,
   resolveNSItemByMesCode,
 }
