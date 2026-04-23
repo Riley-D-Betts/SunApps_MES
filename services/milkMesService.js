@@ -21,7 +21,7 @@ async function processSeparationBatch(data) {
   })
   if (existing) {
     console.log(`[MilkMesService] Batch ${batchId} / ${sourceSilo} already processed (status: ${existing.status}) — skipping`)
-    return { success: true, duplicate: true, batchId, status: existing.status }
+    return { success: true, duplicate: true, batchId, status: existing.status, summary: null }
   }
 
   // Source product: prefer the silo's currently-selected product index (from
@@ -59,6 +59,45 @@ async function processSeparationBatch(data) {
 
   const wasteVolume = inputVolume - (creamVolume || 0) - (skimVolume || 0)
   const wastePercent = inputVolume > 0 ? (wasteVolume / inputVolume) * 100 : 0
+
+  // Compact dashboard-facing view of this batch. Returned alongside every exit
+  // path so the job can push it into statusStore.recentBatches regardless of
+  // which branch (completed / pending_ns / dry_run / error) we land on.
+  const summary = {
+    batchId,
+    batchStart,
+    batchEnd,
+    transferName: transferName || null,
+    source: {
+      silo: sourceSilo,
+      productIndex: sourceIndex,
+      productName: sourceName,
+      nsItemId: sourceItem.id,
+      nsItemName: sourceItem.name,
+      binId: sourceBinId,
+    },
+    cream: creamDest && {
+      silo: creamDest.silo || creamDest.raw,
+      productIndex: creamDest.productIndex,
+      productName: creamDest.productName,
+      nsItemId: creamDest.item.id,
+      nsItemName: creamDest.item.name,
+      binId: creamDest.binId,
+    },
+    skim: skimDest && {
+      silo: skimDest.silo || skimDest.raw,
+      productIndex: skimDest.productIndex,
+      productName: skimDest.productName,
+      nsItemId: skimDest.item.id,
+      nsItemName: skimDest.item.name,
+      binId: skimDest.binId,
+    },
+    inputVolume,
+    creamVolume: creamVolume || 0,
+    skimVolume: skimVolume || 0,
+    wasteVolume: parseFloat(wasteVolume.toFixed(2)),
+    wastePercent: parseFloat(wastePercent.toFixed(2)),
+  }
 
   const fmtItem = (label, item, silo, idx, name, bin) =>
     `  ${label}: ${silo || '-'} idx=${idx || '-'} "${name || '-'}" → NS ${item?.id || 'MISSING'} (${item?.name || '-'}) bin=${bin ?? 'MISSING'}`
@@ -136,7 +175,7 @@ async function processSeparationBatch(data) {
         result: JSON.stringify({ skipped: 'missing resolution', gaps, sourceItem, creamDest, skimDest }),
         success: true,
       })
-      return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'pending_ns', gaps }
+      return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'pending_ns', gaps, summary: { ...summary, status: 'pending_ns', gaps } }
     }
 
     const lotDate = new Date().toISOString().slice(0, 10).replace(/-/g, '')
@@ -204,7 +243,7 @@ async function processSeparationBatch(data) {
         nsTransactionType: 'assemblyUnbuild', nsTransactionId: null,
         payload: JSON.stringify(data), result: JSON.stringify({ dryRun: true, body }), success: true,
       })
-      return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'dry_run', wastePercent: parseFloat(wastePercent.toFixed(2)) }
+      return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'dry_run', wastePercent: parseFloat(wastePercent.toFixed(2)), summary: { ...summary, status: 'dry_run' } }
     }
 
     let nsResult
@@ -229,7 +268,7 @@ async function processSeparationBatch(data) {
     })
 
     console.log(`[MilkMesService] Batch ${batchId} completed — NS transaction: ${nsTransactionId}`)
-    return { success: true, duplicate: false, batchId, nsTransactionId }
+    return { success: true, duplicate: false, batchId, nsTransactionId, summary: { ...summary, status: 'completed', nsTransactionId } }
 
   } catch (err) {
     console.error(`[MilkMesService] Failed to create unbuild for batch ${batchId}:`, err.message)
@@ -239,6 +278,7 @@ async function processSeparationBatch(data) {
       nsTransactionType: 'assemblyUnbuild', nsTransactionId: null,
       payload: JSON.stringify(data), result: null, success: false, errorMessage: err.message,
     })
+    err.summary = { ...summary, status: 'error', errorMessage: err.message }
     throw err
   }
 }

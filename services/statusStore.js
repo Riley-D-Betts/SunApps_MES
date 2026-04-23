@@ -9,6 +9,7 @@
  */
 
 const MAX_EVENTS = 500
+const MAX_RECENT_BATCHES = 20
 
 const state = {
   separator: null,                 // { status, recentBatchCount, pollDurationMs, pollAt }
@@ -24,6 +25,7 @@ const state = {
     equipment: null,
   },
   events: [],                      // newest first
+  recentBatches: [],               // newest first; each entry is a processed separator batch
 }
 
 function now() {
@@ -63,6 +65,19 @@ function setUhts(snapshot) {
 function setSurgeTanks(snapshot) {
   state.surgeTanks = { ...snapshot, pollAt: now() }
   state.lastPoll.equipment = state.surgeTanks.pollAt
+}
+
+/**
+ * Record a processed separation batch. Kept as a ring buffer (newest first)
+ * so the dashboard can render the last N runs without a DB query. Each entry
+ * captures the resolved source/cream/skim products + NS item + bin so an
+ * operator can see at a glance whether the unbuild made it to NetSuite.
+ */
+function pushSeparationBatch(batch) {
+  state.recentBatches.unshift({ t: now(), ...batch })
+  if (state.recentBatches.length > MAX_RECENT_BATCHES) {
+    state.recentBatches.length = MAX_RECENT_BATCHES
+  }
 }
 
 /**
@@ -141,6 +156,7 @@ function snapshot() {
     silos: combineSilos(),
     uhts: state.uhts,
     surgeTanks: state.surgeTanks,
+    recentBatches: state.recentBatches,
     lastPoll: { ...state.lastPoll },
     eventCount: state.events.length,
   }
@@ -164,6 +180,7 @@ module.exports = {
   setSilos,
   setUhts,
   setSurgeTanks,
+  pushSeparationBatch,
   snapshot,
   events,
 }

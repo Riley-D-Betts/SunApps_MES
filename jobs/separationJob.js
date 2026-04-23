@@ -36,10 +36,12 @@ async function run(historian) {
             skimVolume: batch.skimVolume,
             status: result.status,
           })
+          if (result.summary) statusStore.pushSeparationBatch(result.summary)
         }
       } catch (err) {
         console.error(`[SeparationJob] Failed to process batch ${batch.batchId}:`, err.message)
         statusStore.pushEvent('separation.batch.error', `Batch ${batch.batchId} failed`, { error: err.message })
+        if (err.summary) statusStore.pushSeparationBatch(err.summary)
         await notifyService.sendAlert(
           'SunApps MES: Separation Batch Failed',
           `Batch ${batch.batchId} could not be processed: ${err.message}`
