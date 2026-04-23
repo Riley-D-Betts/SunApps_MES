@@ -96,11 +96,17 @@ const TAGS = {
   UHT_GAL_ACTUAL:     '.GalActual',
   UHT_STEP_NUM:       '.StepNum',
 
-  // Surge tank tags (ThermaRoute.ST{N}_*). The main-level transmitter is
-  // LT8{N}01 and the balance/small-tank transmitter is LT8{N}66 for N in 1..4.
-  // We substitute the tank number at query time.
-  ST_MAIN_LEVEL:      '_LT8{N}01_Status',   // 0-100% (main tank)
-  ST_BAL_LEVEL:       '_LT8{N}66_Status',   // 0-100% (balance/small tank)
+  // Surge tank tags. Two different prefixes are used:
+  //   * Status / product / state bits live under single-prefix `ThermaRoute.ST{N}_*`
+  //   * The actual level-percentage and gallons readings live under the
+  //     DOUBLE-prefixed `ThermaRoute.ThermaRoute.ST{N}_LT...` path — that's
+  //     where the PLC writes the real "Sterile Tank Level %" values. The
+  //     single-prefix `_Status` variants return 0 regardless of fill.
+  // {N} is the tank number (1..4); the level transmitter numbers follow the
+  // same N: LT8{N}01 is the main tank, LT8{N}66 is the cooling pot.
+  ST_MAIN_LEVEL_FQN:  'ThermaRoute.ThermaRoute.ST{TID}_LT8{N}01',
+  ST_MAIN_GAL_FQN:    'ThermaRoute.ThermaRoute.ST{TID}_LT8{N}01_Gal',
+  ST_BAL_LEVEL_FQN:   'ThermaRoute.ThermaRoute.ST{TID}_LT8{N}66',
   ST_PRODUCT_DESC:    '_ProductDesc',
   ST_STATE:           '_State',
   ST_TANK_EMPTY:      '_TankEmpty_Indicator',
@@ -595,23 +601,27 @@ class RestProvider extends BaseProvider {
       { tankId: 'ST83', num: 3 },
       { tankId: 'ST84', num: 4 },
     ]
-    const suffixTemplates = [
-      TAGS.ST_MAIN_LEVEL,      // 0 — 0-100% main tank
-      TAGS.ST_BAL_LEVEL,       // 1 — 0-100% balance tank
-      TAGS.ST_PRODUCT_DESC,    // 2 — String
-      TAGS.ST_STATE,           // 3 — State number
-      TAGS.ST_TANK_EMPTY,      // 4 — Discrete
-      TAGS.ST_CONNECTED,       // 5 — Discrete
-      TAGS.ST_STER_PROD_BARR,  // 6 — Discrete
-      TAGS.ST_FILLING_OK,      // 7 — Discrete
-    ]
+    // Per-tank FQN list. Level + gallons use the double-`ThermaRoute.` path;
+    // everything else is under single-prefix `ThermaRoute.ST{TID}_*`.
+    const fqnsPerTank = t => {
+      const sub = s => s.replace('{TID}', t.tankId).replace('{N}', t.num)
+      return [
+        sub(TAGS.ST_MAIN_LEVEL_FQN),                       // 0 — main %
+        sub(TAGS.ST_MAIN_GAL_FQN),                         // 1 — main gal
+        sub(TAGS.ST_BAL_LEVEL_FQN),                        // 2 — balance (cooling pot) %
+        `ThermaRoute.${t.tankId}${TAGS.ST_PRODUCT_DESC}`,  // 3 — string
+        `ThermaRoute.${t.tankId}${TAGS.ST_STATE}`,         // 4 — state number
+        `ThermaRoute.${t.tankId}${TAGS.ST_TANK_EMPTY}`,    // 5 — discrete
+        `ThermaRoute.${t.tankId}${TAGS.ST_CONNECTED}`,     // 6 — discrete
+        `ThermaRoute.${t.tankId}${TAGS.ST_STER_PROD_BARR}`,// 7 — discrete
+        `ThermaRoute.${t.tankId}${TAGS.ST_FILLING_OK}`,    // 8 — discrete
+      ]
+    }
+    const perTank = 9
 
-    const fqns = tanks.flatMap(t =>
-      suffixTemplates.map(sfx => `ThermaRoute.${t.tankId}${sfx.replace('{N}', t.num)}`)
-    )
+    const fqns = tanks.flatMap(fqnsPerTank)
     const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
 
-    const perTank = suffixTemplates.length
     return tanks.map((t, i) => {
       const offset = i * perTank
       const val = (idx) => values[offset + idx]?.Value ?? 0
@@ -620,13 +630,14 @@ class RestProvider extends BaseProvider {
       return {
         tankId: t.tankId,
         mainLevelPct: val(0),
-        balanceLevelPct: val(1),
-        productDesc: txt(2),
-        state: val(3),
-        empty: !!val(4),
-        connected: !!val(5),
-        sterProdBarrOK: !!val(6),
-        fillingOK: !!val(7),
+        mainGallons: val(1),
+        balanceLevelPct: val(2),
+        productDesc: txt(3),
+        state: val(4),
+        empty: !!val(5),
+        connected: !!val(6),
+        sterProdBarrOK: !!val(7),
+        fillingOK: !!val(8),
       }
     })
   }

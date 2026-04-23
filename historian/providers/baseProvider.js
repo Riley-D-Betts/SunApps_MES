@@ -131,6 +131,7 @@ class BaseProvider {
    * @returns {Promise<Array<{
    *   tankId: string,
    *   mainLevelPct: number,
+   *   mainGallons: number,
    *   balanceLevelPct: number,
    *   productDesc: string,
    *   state: number,
