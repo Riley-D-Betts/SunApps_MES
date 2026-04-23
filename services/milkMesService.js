@@ -5,13 +5,16 @@ const db = require('../models')
 
 async function processSeparationBatch(data) {
   const {
-    batchId, sourceSilo, destinations, inputVolume, creamVolume, skimVolume,
+    batchId, sourceSilo: sourceRaw, destinations: destsRaw = [], siloProductConfig = {},
+    inputVolume, creamVolume, skimVolume,
     batchStart, batchEnd, itemId, transferName, unit, targetVolume,
   } = data
 
   if (!batchId) throw new Error('batchId is required')
-  if (!sourceSilo) throw new Error('sourceSilo is required')
+  if (!sourceRaw) throw new Error('sourceSilo is required')
   if (!inputVolume || inputVolume <= 0) throw new Error('inputVolume must be greater than 0')
+
+  const sourceSilo = itemConfig.normalizeSiloName(sourceRaw) || sourceRaw
 
   const existing = await db.MesSeparationBatch.findOne({
     where: { batchId, sourceSilo, batchEnd: batchEnd || null },
@@ -21,15 +24,50 @@ async function processSeparationBatch(data) {
     return { success: true, duplicate: true, batchId, status: existing.status }
   }
 
-  const inputItem = itemConfig.getItem(itemId, sourceSilo)
+  // Source product: prefer the silo's currently-selected product index (from
+  // the Standardization HMI). Falls back to the legacy XFR.ItemID mapping so
+  // older batches without siloProductConfig still resolve something.
+  const lookupCfg = (name) => (name && (siloProductConfig[name] || siloProductConfig[itemConfig.normalizeSiloName(name) || ''])) || {}
+  const sourceCfg = lookupCfg(sourceRaw)
+  const sourceIndex = sourceCfg.productIndex || 0
+  const sourceName = sourceCfg.productName || ''
+  const sourceItem = sourceIndex
+    ? itemConfig.getItemByProductIndex(sourceIndex)
+    : itemConfig.getItem(itemId, sourceSilo)
+  const sourceBinId = itemConfig.getBinId(sourceSilo)
 
-  console.log(`[MilkMesService] Processing batch ${batchId} (${sourceSilo} → ${(destinations || []).join(', ')}):`)
-  console.log(`  Input: ${inputItem.name} (itemId: ${itemId || 'none'}, transfer: ${transferName || 'none'})`)
+  // Classify each raw destination and look up its current product. C-silo ⇒
+  // cream; M-silo (not the source) ⇒ skim/normalized milk.
+  const resolvedDests = (destsRaw || []).map(raw => {
+    const silo = itemConfig.normalizeSiloName(raw)
+    const cls = itemConfig.classifySiloDestination(raw)
+    const cfg = lookupCfg(raw)
+    const idx = cfg.productIndex || 0
+    return {
+      raw,
+      silo,
+      kind: cls,
+      binId: silo ? itemConfig.getBinId(silo) : null,
+      productIndex: idx,
+      productName: cfg.productName || '',
+      item: idx ? itemConfig.getItemByProductIndex(idx) : { id: null, name: '' },
+    }
+  })
+
+  const creamDest = resolvedDests.find(d => d.kind === 'cream') || null
+  const skimDest = resolvedDests.find(d => d.kind === 'skim' && d.silo && d.silo !== sourceSilo) || null
 
   const wasteVolume = inputVolume - (creamVolume || 0) - (skimVolume || 0)
   const wastePercent = inputVolume > 0 ? (wasteVolume / inputVolume) * 100 : 0
 
-  console.log(`  Volumes: input=${inputVolume} LBS, cream=${creamVolume}, skim=${skimVolume}, waste=${wasteVolume.toFixed(1)} (${wastePercent.toFixed(1)}%)`)
+  const fmtItem = (label, item, silo, idx, name, bin) =>
+    `  ${label}: ${silo || '-'} idx=${idx || '-'} "${name || '-'}" → NS ${item?.id || 'MISSING'} (${item?.name || '-'}) bin=${bin ?? 'MISSING'}`
+
+  console.log(`[MilkMesService] Processing batch ${batchId} (${sourceSilo} → ${resolvedDests.map(d => d.silo || d.raw).join(', ') || '?'})`)
+  console.log(fmtItem('Source', sourceItem, sourceSilo, sourceIndex, sourceName, sourceBinId))
+  console.log(fmtItem('Cream ', creamDest?.item, creamDest?.silo || creamDest?.raw, creamDest?.productIndex, creamDest?.productName, creamDest?.binId))
+  console.log(fmtItem('Skim  ', skimDest?.item, skimDest?.silo || skimDest?.raw, skimDest?.productIndex, skimDest?.productName, skimDest?.binId))
+  console.log(`  Volumes: input=${Number(inputVolume).toFixed(1)} LBS, cream=${Number(creamVolume || 0).toFixed(1)}, skim=${Number(skimVolume || 0).toFixed(1)}, waste=${wasteVolume.toFixed(1)} (${wastePercent.toFixed(1)}%)`)
 
   if (wastePercent > itemConfig.WASTE_ALERT_THRESHOLD) {
     console.warn(`[MilkMesService] High waste alert: ${wastePercent.toFixed(1)}% (threshold: ${itemConfig.WASTE_ALERT_THRESHOLD}%)`)
@@ -38,6 +76,14 @@ async function processSeparationBatch(data) {
       `Batch ${batchId} from ${sourceSilo}\nWaste: ${wasteVolume.toFixed(1)} LBS (${wastePercent.toFixed(1)}%)\nThreshold: ${itemConfig.WASTE_ALERT_THRESHOLD}%\nInput: ${inputVolume} | Cream: ${creamVolume} | Skim: ${skimVolume}`
     )
   }
+
+  // Everything we resolved goes into destinations JSON so we can debug "why did
+  // this batch go pending_ns" from the DB row alone (no migration needed).
+  const destinationsJson = JSON.stringify({
+    raw: destsRaw,
+    resolved: resolvedDests,
+    source: { silo: sourceSilo, productIndex: sourceIndex, productName: sourceName, nsItemId: sourceItem.id },
+  })
 
   let record
   try {
@@ -52,7 +98,7 @@ async function processSeparationBatch(data) {
       batchStart,
       batchEnd,
       transferName: transferName || null,
-      destinations: destinations ? JSON.stringify(destinations) : null,
+      destinations: destinationsJson,
       itemId: itemId || null,
       unit: unit || null,
       targetVolume: targetVolume ?? null,
@@ -66,53 +112,31 @@ async function processSeparationBatch(data) {
     throw err
   }
 
-  let nsResult = null
   try {
-    const { cream: creamItem, skim: skimItem } = itemConfig.getOutputItems(sourceSilo)
+    const needCream = !!(creamDest && (creamVolume || 0) > 0)
+    const needSkim = !!(skimDest && (skimVolume || 0) > 0)
 
-    // Resolve source bin (where the raw milk is being consumed from)
-    const sourceBinId = itemConfig.getBinId(sourceSilo)
+    // Every piece the unbuild needs. Any gap → pending_ns so ops has a backlog
+    // of what still needs to be created/configured in NetSuite.
+    const gaps = []
+    if (!sourceItem.id) gaps.push(`source item (idx=${sourceIndex || '-'}, silo=${sourceSilo})`)
+    if (!sourceBinId) gaps.push(`source bin (${sourceSilo})`)
+    if (needCream && !creamDest.item.id) gaps.push(`cream item (idx=${creamDest.productIndex || '-'}, silo=${creamDest.silo})`)
+    if (needCream && !creamDest.binId) gaps.push(`cream bin (${creamDest.silo || creamDest.raw})`)
+    if (needSkim && !skimDest.item.id) gaps.push(`skim item (idx=${skimDest.productIndex || '-'}, silo=${skimDest.silo})`)
+    if (needSkim && !skimDest.binId) gaps.push(`skim bin (${skimDest.silo || skimDest.raw})`)
 
-    // Resolve destination bins from SCADA destinations array — cream goes to a
-    // C-silo, skim goes to an M-silo (distinct from sourceSilo).
-    let creamDestBinId = null
-    let skimDestBinId = null
-    let creamDestSilo = null
-    let skimDestSilo = null
-    for (const d of destinations || []) {
-      const normalized = itemConfig.normalizeSiloName(d)
-      const cls = itemConfig.classifySiloDestination(d)
-      const binId = itemConfig.getBinId(d)
-      if (!binId || !normalized) continue
-      if (cls === 'cream' && !creamDestBinId) {
-        creamDestBinId = binId
-        creamDestSilo = normalized
-      } else if (cls === 'skim' && !skimDestBinId && normalized !== sourceSilo) {
-        skimDestBinId = binId
-        skimDestSilo = normalized
-      }
-    }
-
-    // Bin-tracked items require a bin on every assignment — bail to pending_ns
-    // if we can't resolve them. The SCADA data is persisted either way.
-    const needCream = !!(creamItem.id && creamVolume > 0)
-    const needSkim = !!(skimItem.id && skimVolume > 0)
-    const missingBins = []
-    if (inputItem.id && !sourceBinId) missingBins.push(`source "${sourceSilo}"`)
-    if (needCream && !creamDestBinId) missingBins.push(`cream destination (from ${JSON.stringify(destinations || [])})`)
-    if (needSkim && !skimDestBinId) missingBins.push(`skim destination (from ${JSON.stringify(destinations || [])})`)
-
-    if (missingBins.length > 0 && !config.MES_DRY_RUN && inputItem.id) {
-      console.warn(`[MilkMesService] Cannot build unbuild for batch ${batchId} — missing bins: ${missingBins.join('; ')} — saving pending_ns`)
+    if (gaps.length > 0 && !config.MES_DRY_RUN) {
+      console.warn(`[MilkMesService] Batch ${batchId} missing: ${gaps.join('; ')} — saving pending_ns`)
       await record.update({ status: 'pending_ns', processedAt: new Date() })
       await db.MesProcessingLog.create({
         eventType: 'separation_unbuild', sourceId: batchId,
         nsTransactionType: 'assemblyUnbuild', nsTransactionId: null,
         payload: JSON.stringify(data),
-        result: JSON.stringify({ skipped: 'missing bin(s)', missingBins, sourceSilo, destinations, creamDestSilo, skimDestSilo }),
+        result: JSON.stringify({ skipped: 'missing resolution', gaps, sourceItem, creamDest, skimDest }),
         success: true,
       })
-      return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'pending_ns' }
+      return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'pending_ns', gaps }
     }
 
     const lotDate = new Date().toISOString().slice(0, 10).replace(/-/g, '')
@@ -120,7 +144,7 @@ async function processSeparationBatch(data) {
     const skimLot = `${sourceSilo}-${lotDate}-SK`
 
     const body = {
-      item: inputItem.id ? { id: inputItem.id } : undefined,
+      item: sourceItem.id ? { id: sourceItem.id } : undefined,
       quantity: inputVolume,
       location: { id: 23 },
       subsidiary: { id: 2 },
@@ -128,7 +152,7 @@ async function processSeparationBatch(data) {
       custbody_milk_batch_start: batchStart,
       custbody_milk_batch_end: batchEnd,
       custbody_milk_transfer_name: transferName || batchId,
-      custbody_milk_destinations: (destinations || []).join(', '),
+      custbody_milk_destinations: destsRaw.join(', '),
     }
 
     if (sourceBinId) {
@@ -140,42 +164,40 @@ async function processSeparationBatch(data) {
     }
 
     const componentItems = []
-    if (needCream) {
-      const creamEntry = { item: { id: creamItem.id }, quantity: creamVolume }
-      if (creamDestBinId) {
-        creamEntry.inventorydetail = {
+    if (needCream && creamDest.item.id) {
+      componentItems.push({
+        item: { id: creamDest.item.id },
+        quantity: creamVolume,
+        inventorydetail: creamDest.binId ? {
           inventoryassignment: {
             items: [{
               quantity: creamVolume,
               receiptInventoryNumber: creamLot,
-              binnumber: { id: creamDestBinId },
+              binnumber: { id: creamDest.binId },
             }],
           },
-        }
-      }
-      componentItems.push(creamEntry)
+        } : undefined,
+      })
     }
-    if (needSkim) {
-      const skimEntry = { item: { id: skimItem.id }, quantity: skimVolume }
-      if (skimDestBinId) {
-        skimEntry.inventorydetail = {
+    if (needSkim && skimDest.item.id) {
+      componentItems.push({
+        item: { id: skimDest.item.id },
+        quantity: skimVolume,
+        inventorydetail: skimDest.binId ? {
           inventoryassignment: {
             items: [{
               quantity: skimVolume,
               receiptInventoryNumber: skimLot,
-              binnumber: { id: skimDestBinId },
+              binnumber: { id: skimDest.binId },
             }],
           },
-        }
-      }
-      componentItems.push(skimEntry)
+        } : undefined,
+      })
     }
     if (componentItems.length > 0) body.component = { items: componentItems }
 
-    console.log(`[MilkMesService] Unbuild bins: source=${sourceSilo}(${sourceBinId || '-'}) cream→${creamDestSilo || '-'}(${creamDestBinId || '-'}) skim→${skimDestSilo || '-'}(${skimDestBinId || '-'})`)
-
     if (config.MES_DRY_RUN) {
-      console.log(`[MilkMesService] DRY RUN — batch ${batchId} saved, skipping NS unbuild`)
+      console.log(`[MilkMesService] DRY RUN — batch ${batchId} saved, skipping NS unbuild. Payload:\n${JSON.stringify(body, null, 2)}`)
       await record.update({ status: 'dry_run', processedAt: new Date() })
       await db.MesProcessingLog.create({
         eventType: 'separation_unbuild', sourceId: batchId,
@@ -185,17 +207,7 @@ async function processSeparationBatch(data) {
       return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'dry_run', wastePercent: parseFloat(wastePercent.toFixed(2)) }
     }
 
-    if (!inputItem.id) {
-      console.log(`[MilkMesService] No NS item ID for input — skipping unbuild (record saved for later)`)
-      await record.update({ status: 'pending_ns', processedAt: new Date() })
-      await db.MesProcessingLog.create({
-        eventType: 'separation_unbuild', sourceId: batchId,
-        nsTransactionType: 'assemblyUnbuild', nsTransactionId: null,
-        payload: JSON.stringify(data), result: JSON.stringify({ skipped: 'no NS item ID configured' }), success: true,
-      })
-      return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'pending_ns' }
-    }
-
+    let nsResult
     try {
       nsResult = await core.netsuitePost('/record/v1/assemblyUnbuild', body)
     } catch (err) {

@@ -20,22 +20,46 @@ class MockProvider extends BaseProvider {
 
     this._batchCounter++
     const now = new Date()
-    const batchStart = new Date(now.getTime() - 30 * 60 * 1000) // 30 min ago
-    const inputVolume = 5000 + Math.floor(Math.random() * 2000) // 5000-7000 gal
-    const creamVolume = Math.floor(inputVolume * (0.35 + Math.random() * 0.05)) // ~35-40%
-    const skimVolume = Math.floor(inputVolume * (0.55 + Math.random() * 0.05))  // ~55-60%
+    const batchStart = new Date(now.getTime() - 30 * 60 * 1000)
+    const inputVolume = 5000 + Math.floor(Math.random() * 2000)
+    const creamVolume = Math.floor(inputVolume * (0.08 + Math.random() * 0.04)) // ~8-12% (realistic cream yield)
+    const skimVolume = Math.floor(inputVolume * (0.85 + Math.random() * 0.04))  // ~85-89% normalized output
 
-    const silos = ['SILO_1', 'SILO_2']
-    const sourceSilo = silos[Math.floor(Math.random() * silos.length)]
+    // Three realistic scenarios: pure conventional raw → conv cream + raw skim;
+    // organic → org cream + raw org skim; and a normalization run where the
+    // skim side is standardized to 2%. Exercising all three makes the product-
+    // index → NS item lookup path visible in dev.
+    const scenarios = [
+      { source: 'MSilo1', sourceIdx: 15, sourceName: 'Raw Conventional',
+        creamSilo: 'CSilo1', creamIdx: 11, creamName: 'Conventional Cream 40%',
+        skimSilo:  'MSilo2', skimIdx:  5, skimName:  'Conventional Fat Free' },
+      { source: 'MSilo4', sourceIdx: 16, sourceName: 'Raw Organic',
+        creamSilo: 'CSilo3', creamIdx: 12, creamName: 'Organic Cream 40%',
+        skimSilo:  'MSilo5', skimIdx: 10, skimName: 'Organic Fat Free' },
+      { source: 'MSilo1', sourceIdx: 15, sourceName: 'Raw Conventional',
+        creamSilo: 'CSilo2', creamIdx: 11, creamName: 'Conventional Cream 40%',
+        skimSilo:  'MSilo3', skimIdx:  3, skimName:  'Conventional Reduced Fat 2%' },
+    ]
+    const s = scenarios[Math.floor(Math.random() * scenarios.length)]
 
     return [{
       batchId: `SEP-${this._batchCounter}`,
-      sourceSilo,
+      sourceSilo: s.source,
+      destinations: [s.creamSilo, s.skimSilo],
+      siloProductConfig: {
+        [s.source]:    { productIndex: s.sourceIdx, productName: s.sourceName },
+        [s.creamSilo]: { productIndex: s.creamIdx,  productName: s.creamName  },
+        [s.skimSilo]:  { productIndex: s.skimIdx,   productName: s.skimName   },
+      },
       inputVolume,
       creamVolume,
       skimVolume,
       batchStart,
       batchEnd: now,
+      itemId: String(300000 + s.sourceIdx),
+      transferName: `Separation ${s.source} → ${s.creamSilo}/${s.skimSilo}`,
+      unit: 'LBS',
+      targetVolume: inputVolume,
     }]
   }
 

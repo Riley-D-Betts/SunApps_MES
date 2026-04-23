@@ -87,6 +87,7 @@ const TAGS = {
   SILO_LBS:           '_LBS.Value',       // suffix on lowercase-name prefix
   SILO_PRODUCT_NAME:  '.ProductName',     // suffix on UPPERCASE prefix (e.g. MSILO1)
   SILO_DENSITY:       '.ProductDensity',  // suffix on UPPERCASE prefix (PPG)
+  SILO_PRODUCT_INDEX: '.IndexSelectRead', // suffix on UPPERCASE prefix — the 1-40 code from the Standardization HMI Product Config table
 
   // UHT tags (per-UHT prefix, e.g. UHT1)
   UHT_ACTIVE:         '.Active',
@@ -342,12 +343,19 @@ class RestProvider extends BaseProvider {
       TAGS.SEP_XFR_DEST_2, TAGS.SEP_XFR_DEST_3,
     ].map(t => txt(t)).filter(Boolean)
 
-    console.log(`[RestProvider] Batch ${batchId}: ${source} → ${destinations.join(', ') || '?'}, input=${inputVolume.toFixed(1)} LBS, cream=${creamGallons.toFixed(1)} gal (${creamVolume.toFixed(1)} LBS), skim=${skimGallons.toFixed(1)} gal (${skimVolume.toFixed(1)} LBS)`)
+    // Pull the 1-40 product index + name for every silo that shows up on this
+    // batch — the Standardization HMI writes whatever the operator selected to
+    // each silo's IndexSelectRead tag, so this is how we resolve "what got
+    // produced into MSilo1 this run" (can be raw skim, 1%, 2%, whole, etc.).
+    const siloProductConfig = await this._readSiloProductConfigRaw([source, ...destinations])
+
+    console.log(`[RestProvider] Batch ${batchId}: ${source}[${siloProductConfig[source]?.productIndex || '?'}] → ${destinations.map(d => `${d}[${siloProductConfig[d]?.productIndex || '?'}]`).join(', ') || '?'}, input=${inputVolume.toFixed(1)} LBS, cream=${creamGallons.toFixed(1)} gal (${creamVolume.toFixed(1)} LBS), skim=${skimGallons.toFixed(1)} gal (${skimVolume.toFixed(1)} LBS)`)
 
     return {
       batchId,
       sourceSilo: source,
       destinations,
+      siloProductConfig,
       inputVolume,
       creamVolume,
       skimVolume,
@@ -358,6 +366,55 @@ class RestProvider extends BaseProvider {
       unit: txt(TAGS.SEP_XFR_EU),
       targetVolume: val(TAGS.SEP_XFR_QTY_TARGET),
     }
+  }
+
+  /**
+   * Read IndexSelectRead + ProductName for each silo name. Accepts raw SCADA
+   * names (MSilo1, MSILO1, RawMilkSilo5, CreamSilo2, etc.) and folds them all
+   * onto the canonical MSilo#/CSilo# form before querying. Non-silo names
+   * (UHT1, BlendTank1A) are skipped. The returned map is keyed by every
+   * variant that was passed in so callers can look up by either raw or
+   * canonical form — e.g. `out['RawMilkSilo5']` and `out['MSilo5']` both
+   * resolve to the same config object.
+   */
+  async _readSiloProductConfigRaw(siloNames) {
+    // canonical → list of raw variants that collapse onto it
+    const byCanonical = {}
+    for (const raw of siloNames || []) {
+      if (typeof raw !== 'string') continue
+      const trimmed = raw.trim()
+      if (!trimmed) continue
+      let canon = null
+      const direct = trimmed.match(/^([mc])silo(\d+)$/i)
+      if (direct) {
+        canon = `${direct[1].toUpperCase()}Silo${direct[2]}`
+      } else {
+        const n = trimmed.match(/(\d+)\s*$/)?.[1]
+        if (!n) continue
+        const low = trimmed.toLowerCase()
+        if (low.includes('cream')) canon = `CSilo${n}`
+        else if (low.includes('milk') || low.includes('skim')) canon = `MSilo${n}`
+        else continue
+      }
+      ;(byCanonical[canon] = byCanonical[canon] || []).push(trimmed)
+    }
+    const canonList = Object.keys(byCanonical)
+    if (canonList.length === 0) return {}
+    const fqns = canonList.flatMap(c => [
+      `${c.toUpperCase()}${TAGS.SILO_PRODUCT_INDEX}`,
+      `${c.toUpperCase()}${TAGS.SILO_PRODUCT_NAME}`,
+    ])
+    const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
+    const out = {}
+    canonList.forEach((c, i) => {
+      const cfg = {
+        productIndex: values[i * 2]?.Value || 0,
+        productName: values[i * 2 + 1]?.Text || '',
+      }
+      out[c] = cfg
+      for (const raw of byCanonical[c]) out[raw] = cfg
+    })
+    return out
   }
 
   // ── Bulk milk flow ─────────────────────────────────────────────────
@@ -519,12 +576,13 @@ class RestProvider extends BaseProvider {
     ]
 
     const fqnsPerSilo = s => [
-      `${s.prefixLower}${TAGS.SILO_GALLONS}`,     // 0 — e.g. MSilo1_Gallons.Value
-      `${s.prefixLower}${TAGS.SILO_LBS}`,         // 1 — e.g. MSilo1_LBS.Value
-      `${s.prefixUpper}${TAGS.SILO_PRODUCT_NAME}`,// 2 — e.g. MSILO1.ProductName
-      `${s.prefixUpper}${TAGS.SILO_DENSITY}`,     // 3 — e.g. MSILO1.ProductDensity
+      `${s.prefixLower}${TAGS.SILO_GALLONS}`,      // 0 — e.g. MSilo1_Gallons.Value
+      `${s.prefixLower}${TAGS.SILO_LBS}`,          // 1 — e.g. MSilo1_LBS.Value
+      `${s.prefixUpper}${TAGS.SILO_PRODUCT_NAME}`, // 2 — e.g. MSILO1.ProductName
+      `${s.prefixUpper}${TAGS.SILO_DENSITY}`,      // 3 — e.g. MSILO1.ProductDensity
+      `${s.prefixUpper}${TAGS.SILO_PRODUCT_INDEX}`,// 4 — e.g. MSILO1.IndexSelectRead
     ]
-    const perSilo = 4
+    const perSilo = 5
 
     const fqns = silos.flatMap(fqnsPerSilo)
     const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
@@ -547,9 +605,11 @@ class RestProvider extends BaseProvider {
         tempF: 0,  // TempValue tag returns bad quality; kept in shape for future use
         productName: txt(2),
         density: val(3),
+        productIndex: val(4) || 0,
       }
     })
   }
+
 
   /**
    * Read current status for both UHT pasteurizers.

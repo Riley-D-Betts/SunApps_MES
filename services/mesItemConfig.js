@@ -120,6 +120,49 @@ const HISTORIAN_ITEM_MAP = {
   '205000': { id: 5406, name: 'Raw Organic Grade A (A2/A2) Milk', nsType: 'Assembly' },
 }
 
+// Keyed by the Standardization HMI "Product Config" index (1-40). When the
+// separator runs, the source silo's IndexSelectRead, the skim-destination
+// silo's IndexSelectRead, and the cream-destination silo's IndexSelectRead
+// each resolve to an entry here — that lookup drives the NS items on the
+// assembly unbuild. An entry with `id: null` means the NetSuite item has
+// not been created yet; batches that land on a null entry are deliberately
+// dropped to `pending_ns` so we have a list of what still needs to be
+// created in NetSuite before the flow is end-to-end.
+const PRODUCT_INDEX_ITEM_MAP = {
+  1:  { id: 5416, name: 'Conventional Whole 3.5%' },
+  2:  { id: 5413, name: 'Conventional Whole 3.25%' },
+  3:  { id: 5412, name: 'Conventional Reduced Fat 2%' },
+  4:  { id: 5415, name: 'Conventional Low Fat 1%' },
+  5:  { id: 5477, name: 'Conventional Fat Free' },
+  6:  { id: 5481, name: 'Organic Whole 3.5%' },
+  7:  { id: 5411, name: 'Organic Whole 3.25%' },
+  8:  { id: 5410, name: 'Organic Reduced Fat 2%' },
+  9:  { id: 5409, name: 'Organic Low Fat 1%' },
+  10: { id: 5482, name: 'Organic Fat Free' },
+  11: { id: 5480, name: 'Conventional Cream 40%' },
+  12: { id: 5483, name: 'Organic Cream 40%' },
+  13: { id: 5405, name: 'Conventional UF Milk' },
+  14: { id: 5402, name: 'Organic UF Milk' },
+  15: { id: 5417, name: 'Raw Conventional' },
+  16: { id: 5404, name: 'Raw Organic' },
+  19: { id: null, name: 'Water' },
+  20: { id: null, name: 'Blowback' },
+  21: { id: 5403, name: 'Raw A2 Organic' },
+  22: { id: null, name: 'A2 Organic Whole 3.25%' },
+  23: { id: null, name: 'A2 Organic Reduced Fat 2%' },
+  24: { id: null, name: 'A2 Organic Low Fat 1%' },
+  25: { id: null, name: 'A2 Organic Fat Free' },
+  26: { id: null, name: 'A2 Organic Cream' },
+}
+
+function getItemByProductIndex(idx) {
+  const n = Number(idx)
+  if (!Number.isFinite(n) || n <= 0) return { id: null, name: `Unknown product (index ${idx ?? 'none'})` }
+  const hit = PRODUCT_INDEX_ITEM_MAP[n]
+  if (hit) return hit
+  return { id: null, name: `Unmapped product index ${n}` }
+}
+
 function getItem(mesItemCode, sourceSilo) {
   if (mesItemCode && HISTORIAN_ITEM_MAP[mesItemCode]) return HISTORIAN_ITEM_MAP[mesItemCode]
   if (sourceSilo && SILO_ITEM_MAP[sourceSilo]) return SILO_ITEM_MAP[sourceSilo]
@@ -179,6 +222,7 @@ module.exports = {
   SILO_BIN_MAP,
   TANK_BIN_MAP,
   RAW_ITEMS,
+  PRODUCT_INDEX_ITEM_MAP,
   CREAM_ITEM,
   SKIM_ITEM,
   CREAM_ITEM_CONV,
@@ -187,6 +231,7 @@ module.exports = {
   SKIM_ITEM_ORG,
   WASTE_ALERT_THRESHOLD,
   getItem,
+  getItemByProductIndex,
   getOutputItems,
   getInputItem,
   getBlendTankItem,
