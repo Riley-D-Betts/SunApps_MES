@@ -91,13 +91,15 @@ class BaseProvider {
   }
 
   /**
-   * Get current level, product, and temperature for every silo
-   * (5 raw milk, 3 cream, and the cream balance tank).
+   * Get current gallons, lbs, and product info for every silo (5 raw milk
+   * + 3 cream). Level % is derived from gallons/capacity since the
+   * canonical LevelValue tag has bad OPC quality.
    * @returns {Promise<Array<{
    *   siloId: string,
-   *   kind: 'milk' | 'cream' | 'cream-balance',
+   *   kind: 'milk' | 'cream',
    *   gallons: number,
    *   lbs: number,
+   *   capacityGal: number,
    *   levelPct: number,
    *   tempF: number,
    *   productName: string,

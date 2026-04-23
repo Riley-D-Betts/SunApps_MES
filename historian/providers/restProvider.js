@@ -79,13 +79,14 @@ const TAGS = {
   LINE_INHIBITED:       '.STAT_INHIBITED',
   LINE_MEM_TOTALIZER:   '.MEMBATCHTOTALIZER',    // previous batch totalizer
 
-  // Silo tags (per-silo prefix substituted at query time, e.g. MSILO1)
-  SILO_GALLONS:       '.GALLONS',
-  SILO_LBS:           '.LBS',
-  SILO_LEVEL:         '.LevelValue',      // 0-100%
-  SILO_TEMP:          '.TempValue',       // °F
-  SILO_PRODUCT_NAME:  '.ProductName',
-  SILO_DENSITY:       '.ProductDensity',  // PPG
+  // Silo tags — the .GALLONS/.LBS/.LevelValue/.TempValue tags exist under the
+  // UPPERCASE prefix but are bad quality (OpcQuality=0). The PLC writes live
+  // data to the underscore/CamelCase form: `MSilo{N}_Gallons.Value` etc.
+  // Product name + density use the UPPERCASE prefix.
+  SILO_GALLONS:       '_Gallons.Value',   // suffix on lowercase-name prefix (e.g. MSilo1)
+  SILO_LBS:           '_LBS.Value',       // suffix on lowercase-name prefix
+  SILO_PRODUCT_NAME:  '.ProductName',     // suffix on UPPERCASE prefix (e.g. MSILO1)
+  SILO_DENSITY:       '.ProductDensity',  // suffix on UPPERCASE prefix (PPG)
 
   // UHT tags (per-UHT prefix, e.g. UHT1)
   UHT_ACTIVE:         '.Active',
@@ -488,49 +489,60 @@ class RestProvider extends BaseProvider {
   // ── Silos, UHTs, Surge tanks — live status for the dashboard ────────
 
   /**
-   * Read current levels, temperatures, and product info for every silo.
-   * Covers 5 raw milk silos (MSILO1-5), 3 cream silos (CSILO1-3), and the
-   * cream balance tank. Returns one entry per silo.
+   * Read current gallons, lbs, and product info for every silo.
+   * Covers 5 raw milk silos (MSILO1-5) + 3 cream silos (CSILO1-3).
+   *
+   * Level % is derived from gallons / capacity since the canonical `LevelValue`
+   * tag on these silos returns bad OPC quality. Capacities below are plausible
+   * defaults — adjust if the real values differ.
+   *
+   * CreamBalance is excluded because all four of its Historian tags
+   * (.GALLONS, .LBS, .LevelValue, .TempValue) return OpcQuality=0.
    */
   async getSiloStatus() {
+    // prefixLower is used for the underscore-suffix tags (Gallons.Value / LBS.Value)
+    // prefixUpper is used for ProductName / ProductDensity
+    const SILO_CAPACITY_GAL = { milk: 60000, cream: 20000 }
     const silos = [
-      { siloId: 'MSilo1', prefix: 'MSILO1', kind: 'milk' },
-      { siloId: 'MSilo2', prefix: 'MSILO2', kind: 'milk' },
-      { siloId: 'MSilo3', prefix: 'MSILO3', kind: 'milk' },
-      { siloId: 'MSilo4', prefix: 'MSILO4', kind: 'milk' },
-      { siloId: 'MSilo5', prefix: 'MSILO5', kind: 'milk' },
-      { siloId: 'CSilo1', prefix: 'CSILO1', kind: 'cream' },
-      { siloId: 'CSilo2', prefix: 'CSILO2', kind: 'cream' },
-      { siloId: 'CSilo3', prefix: 'CSILO3', kind: 'cream' },
-      { siloId: 'CreamBalance', prefix: 'CreamBalance', kind: 'cream-balance' },
-    ]
-    const suffixes = [
-      TAGS.SILO_GALLONS,      // 0
-      TAGS.SILO_LBS,          // 1
-      TAGS.SILO_LEVEL,        // 2 — 0-100%
-      TAGS.SILO_TEMP,         // 3 — °F (not present on CreamBalance)
-      TAGS.SILO_PRODUCT_NAME, // 4 (not present on CreamBalance)
-      TAGS.SILO_DENSITY,      // 5 (not present on CreamBalance)
+      { siloId: 'MSilo1', prefixLower: 'MSilo1', prefixUpper: 'MSILO1', kind: 'milk' },
+      { siloId: 'MSilo2', prefixLower: 'MSilo2', prefixUpper: 'MSILO2', kind: 'milk' },
+      { siloId: 'MSilo3', prefixLower: 'MSilo3', prefixUpper: 'MSILO3', kind: 'milk' },
+      { siloId: 'MSilo4', prefixLower: 'MSilo4', prefixUpper: 'MSILO4', kind: 'milk' },
+      { siloId: 'MSilo5', prefixLower: 'MSilo5', prefixUpper: 'MSILO5', kind: 'milk' },
+      { siloId: 'CSilo1', prefixLower: 'CSilo1', prefixUpper: 'CSILO1', kind: 'cream' },
+      { siloId: 'CSilo2', prefixLower: 'CSilo2', prefixUpper: 'CSILO2', kind: 'cream' },
+      { siloId: 'CSilo3', prefixLower: 'CSilo3', prefixUpper: 'CSILO3', kind: 'cream' },
     ]
 
-    const fqns = silos.flatMap(s => suffixes.map(sfx => `${s.prefix}${sfx}`))
+    const fqnsPerSilo = s => [
+      `${s.prefixLower}${TAGS.SILO_GALLONS}`,     // 0 — e.g. MSilo1_Gallons.Value
+      `${s.prefixLower}${TAGS.SILO_LBS}`,         // 1 — e.g. MSilo1_LBS.Value
+      `${s.prefixUpper}${TAGS.SILO_PRODUCT_NAME}`,// 2 — e.g. MSILO1.ProductName
+      `${s.prefixUpper}${TAGS.SILO_DENSITY}`,     // 3 — e.g. MSILO1.ProductDensity
+    ]
+    const perSilo = 4
+
+    const fqns = silos.flatMap(fqnsPerSilo)
     const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
 
-    const perSilo = suffixes.length
     return silos.map((s, i) => {
       const offset = i * perSilo
       const val = (idx) => values[offset + idx]?.Value ?? 0
       const txt = (idx) => values[offset + idx]?.Text ?? ''
+      const capacity = SILO_CAPACITY_GAL[s.kind] ?? 0
+      const gallons = Math.max(0, val(0))  // PLC sometimes reports small negative calibration values
+      const lbs = Math.max(0, val(1))
 
       return {
         siloId: s.siloId,
         kind: s.kind,
-        gallons: val(0),
-        lbs: val(1),
-        levelPct: val(2),
-        tempF: val(3),
-        productName: txt(4),
-        density: val(5),
+        gallons,
+        lbs,
+        capacityGal: capacity,
+        levelPct: capacity > 0 ? (gallons / capacity) * 100 : 0,
+        tempF: 0,  // TempValue tag returns bad quality; kept in shape for future use
+        productName: txt(2),
+        density: val(3),
       }
     })
   }

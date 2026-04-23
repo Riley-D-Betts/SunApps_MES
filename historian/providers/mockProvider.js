@@ -86,6 +86,7 @@ class MockProvider extends BaseProvider {
   }
 
   async getSiloStatus() {
+    const SILO_CAPACITY_GAL = { milk: 60000, cream: 20000 }
     const silos = [
       { siloId: 'MSilo1', kind: 'milk', productName: 'Raw Conventional Milk' },
       { siloId: 'MSilo2', kind: 'milk', productName: 'Raw Conventional Milk' },
@@ -95,18 +96,18 @@ class MockProvider extends BaseProvider {
       { siloId: 'CSilo1', kind: 'cream', productName: 'Raw Conventional Cream' },
       { siloId: 'CSilo2', kind: 'cream', productName: 'Raw Conventional Cream' },
       { siloId: 'CSilo3', kind: 'cream', productName: 'Raw Organic Cream' },
-      { siloId: 'CreamBalance', kind: 'cream-balance', productName: '' },
     ]
     return silos.map(s => {
-      const levelPct = Math.floor(Math.random() * 100)
+      const capacity = SILO_CAPACITY_GAL[s.kind]
+      const gallons = Math.floor(Math.random() * capacity)
       const density = s.kind === 'milk' ? 8.63 : 8.3
-      const gallons = Math.floor((levelPct / 100) * 6000)
       return {
         ...s,
         gallons,
         lbs: Math.round(gallons * density),
-        levelPct,
-        tempF: s.kind === 'cream-balance' ? 0 : 35 + Math.random() * 5,
+        capacityGal: capacity,
+        levelPct: (gallons / capacity) * 100,
+        tempF: 0,
         density,
       }
     })
