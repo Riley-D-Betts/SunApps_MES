@@ -81,6 +81,80 @@ function pushSeparationBatch(batch) {
 }
 
 /**
+ * Reshape a MesSeparationBatch DB row into the dashboard summary shape. Handles
+ * two historical formats of the `destinations` column: the new JSON object
+ * (`{ raw, resolved, source }`) with full product+bin resolution, and the
+ * legacy plain-array-of-strings format which has no per-destination items.
+ * Legacy rows render with just a source row on the dashboard (cream/skim
+ * hidden) — good enough to show history without requiring a migration.
+ */
+function summaryFromDbRow(row) {
+  let parsed = null
+  if (row.destinations) {
+    try { parsed = JSON.parse(row.destinations) } catch { /* legacy/non-JSON */ }
+  }
+  const hasNewFormat = parsed && !Array.isArray(parsed) && parsed.source
+  const resolvedList = hasNewFormat && Array.isArray(parsed.resolved) ? parsed.resolved : []
+
+  const toSide = (s) => s ? {
+    silo: s.silo || s.raw || '',
+    productIndex: s.productIndex ?? 0,
+    productName: s.productName ?? '',
+    nsItemId: s.nsItemId ?? s.item?.id ?? null,
+    nsItemName: s.nsItemName ?? s.item?.name ?? '',
+    binId: s.binId ?? null,
+  } : null
+
+  const source = hasNewFormat ? parsed.source : { silo: row.sourceSilo }
+  const cream = resolvedList.find(d => d.kind === 'cream') || null
+  const skim = resolvedList.find(d => d.kind === 'skim' && (d.silo || d.raw) !== row.sourceSilo) || null
+
+  const ts = row.processedAt || row.createdAt || new Date()
+  return {
+    t: (ts instanceof Date ? ts : new Date(ts)).toISOString(),
+    batchId: row.batchId,
+    batchStart: row.batchStart,
+    batchEnd: row.batchEnd,
+    transferName: row.transferName || null,
+    source: toSide(source),
+    cream: toSide(cream),
+    skim: toSide(skim),
+    inputVolume: Number(row.inputVolume) || 0,
+    creamVolume: Number(row.creamVolume) || 0,
+    skimVolume: Number(row.skimVolume) || 0,
+    wasteVolume: Number(row.wasteVolume) || 0,
+    wastePercent: Number(row.wastePercent) || 0,
+    status: row.status,
+    nsTransactionId: row.nsTransactionId || null,
+    errorMessage: row.errorMessage || undefined,
+  }
+}
+
+/**
+ * Load the most recent batches from the DB into the in-memory ring on startup.
+ * Without this the dashboard panel is empty after every redeploy until the
+ * next real batch fires. Pass the Sequelize model so statusStore stays
+ * decoupled from the models/ directory.
+ */
+async function hydrateSeparationBatches(MesSeparationBatch) {
+  try {
+    const rows = await MesSeparationBatch.findAll({
+      order: [['createdAt', 'DESC']],
+      limit: MAX_RECENT_BATCHES,
+    })
+    // DB comes back newest-first. Push oldest-first so the final ring is
+    // newest-first (pushSeparationBatch unshifts).
+    state.recentBatches = []
+    for (const row of rows.slice().reverse()) {
+      state.recentBatches.unshift(summaryFromDbRow(row))
+    }
+    console.log(`[StatusStore] Hydrated recentBatches with ${state.recentBatches.length} row(s) from DB`)
+  } catch (err) {
+    console.error('[StatusStore] Failed to hydrate recentBatches:', err.message)
+  }
+}
+
+/**
  * Derive a silo occupancy view from the current separator + blend-tank line
  * snapshots. We don't poll silos directly — a silo's "status" is whatever
  * line or transfer is currently using it.
@@ -181,6 +255,7 @@ module.exports = {
   setUhts,
   setSurgeTanks,
   pushSeparationBatch,
+  hydrateSeparationBatches,
   snapshot,
   events,
 }

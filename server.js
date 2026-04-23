@@ -9,6 +9,7 @@ const separationJob = require('./jobs/separationJob')
 const bulkMilkJob = require('./jobs/bulkMilkJob')
 const blendTankJob = require('./jobs/blendTankJob')
 const equipmentJob = require('./jobs/equipmentJob')
+const statusStore = require('./services/statusStore')
 const historianRoutes = require('./routes/historianRoutes')
 const milkMesRoutes = require('./routes/milkMesRoutes')
 const milkRoutes = require('./routes/milkRoutes')
@@ -20,6 +21,7 @@ const startTime = Date.now()
 
 sequelize.sync().then(async () => {
   await db.ensureRuntimeSchema()
+  await statusStore.hydrateSeparationBatches(db.MesSeparationBatch)
   console.log('Sequelize models synced.')
 })
 
