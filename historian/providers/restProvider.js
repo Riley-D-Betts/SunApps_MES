@@ -102,11 +102,9 @@ const TAGS = {
   //     DOUBLE-prefixed `ThermaRoute.ThermaRoute.ST{N}_LT...` path — that's
   //     where the PLC writes the real "Sterile Tank Level %" values. The
   //     single-prefix `_Status` variants return 0 regardless of fill.
-  // {N} is the tank number (1..4); the level transmitter numbers follow the
-  // same N: LT8{N}01 is the main tank, LT8{N}66 is the cooling pot.
+  // {N} is the tank number (1..4); LT8{N}01 is the main tank.
   ST_MAIN_LEVEL_FQN:  'ThermaRoute.ThermaRoute.{TID}_LT8{N}01',
   ST_MAIN_GAL_FQN:    'ThermaRoute.ThermaRoute.{TID}_LT8{N}01_Gal',
-  ST_BAL_LEVEL_FQN:   'ThermaRoute.ThermaRoute.{TID}_LT8{N}66',
   ST_PRODUCT_DESC:    '_ProductDesc',
   ST_STATE:           '_State',
   ST_TANK_EMPTY:      '_TankEmpty_Indicator',
@@ -608,16 +606,15 @@ class RestProvider extends BaseProvider {
       return [
         sub(TAGS.ST_MAIN_LEVEL_FQN),                       // 0 — main %
         sub(TAGS.ST_MAIN_GAL_FQN),                         // 1 — main gal
-        sub(TAGS.ST_BAL_LEVEL_FQN),                        // 2 — balance (cooling pot) %
-        `ThermaRoute.${t.tankId}${TAGS.ST_PRODUCT_DESC}`,  // 3 — string
-        `ThermaRoute.${t.tankId}${TAGS.ST_STATE}`,         // 4 — state number
-        `ThermaRoute.${t.tankId}${TAGS.ST_TANK_EMPTY}`,    // 5 — discrete
-        `ThermaRoute.${t.tankId}${TAGS.ST_CONNECTED}`,     // 6 — discrete
-        `ThermaRoute.${t.tankId}${TAGS.ST_STER_PROD_BARR}`,// 7 — discrete
-        `ThermaRoute.${t.tankId}${TAGS.ST_FILLING_OK}`,    // 8 — discrete
+        `ThermaRoute.${t.tankId}${TAGS.ST_PRODUCT_DESC}`,  // 2 — string
+        `ThermaRoute.${t.tankId}${TAGS.ST_STATE}`,         // 3 — state number
+        `ThermaRoute.${t.tankId}${TAGS.ST_TANK_EMPTY}`,    // 4 — discrete
+        `ThermaRoute.${t.tankId}${TAGS.ST_CONNECTED}`,     // 5 — discrete
+        `ThermaRoute.${t.tankId}${TAGS.ST_STER_PROD_BARR}`,// 6 — discrete
+        `ThermaRoute.${t.tankId}${TAGS.ST_FILLING_OK}`,    // 7 — discrete
       ]
     }
-    const perTank = 9
+    const perTank = 8
 
     const fqns = tanks.flatMap(fqnsPerTank)
     const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
@@ -631,13 +628,12 @@ class RestProvider extends BaseProvider {
         tankId: t.tankId,
         mainLevelPct: val(0),
         mainGallons: val(1),
-        balanceLevelPct: val(2),
-        productDesc: txt(3),
-        state: val(4),
-        empty: !!val(5),
-        connected: !!val(6),
-        sterProdBarrOK: !!val(7),
-        fillingOK: !!val(8),
+        productDesc: txt(2),
+        state: val(3),
+        empty: !!val(4),
+        connected: !!val(5),
+        sterProdBarrOK: !!val(6),
+        fillingOK: !!val(7),
       }
     })
   }

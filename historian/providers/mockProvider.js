@@ -136,7 +136,6 @@ class MockProvider extends BaseProvider {
         tankId,
         mainLevelPct,
         mainGallons: Math.round(mainLevelPct * 50),  // ~5000 gal capacity per surge tank
-        balanceLevelPct: filling ? Math.floor(Math.random() * 100) : 0,
         productDesc: filling ? ['Marcels 1%', 'KS 2% org', 'Conv 3.25%', 'Horizon whole'][i] : '',
         state: filling ? 5 + Math.floor(Math.random() * 10) : 1,
         empty: mainLevelPct < 2,

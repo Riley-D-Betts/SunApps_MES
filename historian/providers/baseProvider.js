@@ -132,7 +132,6 @@ class BaseProvider {
    *   tankId: string,
    *   mainLevelPct: number,
    *   mainGallons: number,
-   *   balanceLevelPct: number,
    *   productDesc: string,
    *   state: number,
    *   empty: boolean,
