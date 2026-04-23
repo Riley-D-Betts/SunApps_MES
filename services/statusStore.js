@@ -222,6 +222,9 @@ function combineSilos() {
 }
 
 function snapshot() {
+  // Errored batches stay in the ring (and in console/DB) for diagnostics but
+  // are hidden from the dashboard so the panel isn't dominated by pre-fix NS
+  // rejections. Flip this filter when we want errors surfaced again.
   return {
     generatedAt: now(),
     separator: state.separator,
@@ -230,7 +233,7 @@ function snapshot() {
     silos: combineSilos(),
     uhts: state.uhts,
     surgeTanks: state.surgeTanks,
-    recentBatches: state.recentBatches,
+    recentBatches: state.recentBatches.filter(b => b.status !== 'error'),
     lastPoll: { ...state.lastPoll },
     eventCount: state.events.length,
   }
