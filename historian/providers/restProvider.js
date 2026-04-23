@@ -104,9 +104,9 @@ const TAGS = {
   //     single-prefix `_Status` variants return 0 regardless of fill.
   // {N} is the tank number (1..4); the level transmitter numbers follow the
   // same N: LT8{N}01 is the main tank, LT8{N}66 is the cooling pot.
-  ST_MAIN_LEVEL_FQN:  'ThermaRoute.ThermaRoute.ST{TID}_LT8{N}01',
-  ST_MAIN_GAL_FQN:    'ThermaRoute.ThermaRoute.ST{TID}_LT8{N}01_Gal',
-  ST_BAL_LEVEL_FQN:   'ThermaRoute.ThermaRoute.ST{TID}_LT8{N}66',
+  ST_MAIN_LEVEL_FQN:  'ThermaRoute.ThermaRoute.{TID}_LT8{N}01',
+  ST_MAIN_GAL_FQN:    'ThermaRoute.ThermaRoute.{TID}_LT8{N}01_Gal',
+  ST_BAL_LEVEL_FQN:   'ThermaRoute.ThermaRoute.{TID}_LT8{N}66',
   ST_PRODUCT_DESC:    '_ProductDesc',
   ST_STATE:           '_State',
   ST_TANK_EMPTY:      '_TankEmpty_Indicator',
