@@ -14,10 +14,14 @@ const state = {
   separator: null,                 // { status, recentBatchCount, pollDurationMs, pollAt }
   blendTanks: null,                // { tanks: [...], lines: [...], pollDurationMs, pollAt }
   bulkMilk: null,                  // { reading, creamTotal, skimTotal, pollDurationMs, pollAt }
+  silos: null,                     // { silos: [...], pollDurationMs, pollAt }
+  uhts: null,                      // { uhts: [...], pollDurationMs, pollAt }
+  surgeTanks: null,                // { tanks: [...], pollDurationMs, pollAt }
   lastPoll: {
     separator: null,
     blendTank: null,
     bulkMilk: null,
+    equipment: null,
   },
   events: [],                      // newest first
 }
@@ -44,6 +48,21 @@ function setBlendTanks(snapshot) {
 function setBulkMilk(snapshot) {
   state.bulkMilk = { ...snapshot, pollAt: now() }
   state.lastPoll.bulkMilk = state.bulkMilk.pollAt
+}
+
+function setSilos(snapshot) {
+  state.silos = { ...snapshot, pollAt: now() }
+  state.lastPoll.equipment = state.silos.pollAt
+}
+
+function setUhts(snapshot) {
+  state.uhts = { ...snapshot, pollAt: now() }
+  state.lastPoll.equipment = state.uhts.pollAt
+}
+
+function setSurgeTanks(snapshot) {
+  state.surgeTanks = { ...snapshot, pollAt: now() }
+  state.lastPoll.equipment = state.surgeTanks.pollAt
 }
 
 /**
@@ -92,13 +111,36 @@ function deriveSilos() {
   return Object.values(silos)
 }
 
+/**
+ * Merge the polled silo levels (from getSiloStatus) with derived activity
+ * (from separator + line snapshots). Activity is keyed by siloId so each
+ * silo object gets any current transfers appended.
+ */
+function combineSilos() {
+  const activity = deriveSilos()
+  const activityBySilo = Object.fromEntries(activity.map(a => [a.silo, a.activity]))
+  const polled = state.silos?.silos ?? []
+
+  if (polled.length === 0) {
+    // No level data yet — fall back to just the activity view.
+    return activity
+  }
+
+  return polled.map(s => ({
+    ...s,
+    activity: activityBySilo[s.siloId] ?? [],
+  }))
+}
+
 function snapshot() {
   return {
     generatedAt: now(),
     separator: state.separator,
     blendTanks: state.blendTanks,
     bulkMilk: state.bulkMilk,
-    silos: deriveSilos(),
+    silos: combineSilos(),
+    uhts: state.uhts,
+    surgeTanks: state.surgeTanks,
     lastPoll: { ...state.lastPoll },
     eventCount: state.events.length,
   }
@@ -119,6 +161,9 @@ module.exports = {
   setSeparator,
   setBlendTanks,
   setBulkMilk,
+  setSilos,
+  setUhts,
+  setSurgeTanks,
   snapshot,
   events,
 }

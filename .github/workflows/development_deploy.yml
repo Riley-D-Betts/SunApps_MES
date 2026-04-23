@@ -36,6 +36,7 @@ jobs:
             "SEPARATION_CRON=${{ secrets.SEPARATION_CRON }}"
             "BULK_MILK_CRON=${{ secrets.BULK_MILK_CRON }}"
             "BLEND_TANK_CRON=${{ secrets.BLEND_TANK_CRON }}"
+            "EQUIPMENT_CRON=${{ secrets.EQUIPMENT_CRON }}"
             "SQL_USER=${{ secrets.SQL_USER }}"
             "SQL_PASSWORD=${{ secrets.SQL_PASSWORD }}"
             "SQL_DATABASE=${{ secrets.SQL_DATABASE }}"

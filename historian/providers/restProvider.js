@@ -79,6 +79,33 @@ const TAGS = {
   LINE_INHIBITED:       '.STAT_INHIBITED',
   LINE_MEM_TOTALIZER:   '.MEMBATCHTOTALIZER',    // previous batch totalizer
 
+  // Silo tags (per-silo prefix substituted at query time, e.g. MSILO1)
+  SILO_GALLONS:       '.GALLONS',
+  SILO_LBS:           '.LBS',
+  SILO_LEVEL:         '.LevelValue',      // 0-100%
+  SILO_TEMP:          '.TempValue',       // °F
+  SILO_PRODUCT_NAME:  '.ProductName',
+  SILO_DENSITY:       '.ProductDensity',  // PPG
+
+  // UHT tags (per-UHT prefix, e.g. UHT1)
+  UHT_ACTIVE:         '.Active',
+  UHT_JOB_RUNNING:    '.JobRunning',
+  UHT_CURRENT_WO:     '.CurrentWO',
+  UHT_CURRENT_ITEM:   '.CurrentItem',
+  UHT_GAL_ACTUAL:     '.GalActual',
+  UHT_STEP_NUM:       '.StepNum',
+
+  // Surge tank tags (ThermaRoute.ST{N}_*). The main-level transmitter is
+  // LT8{N}01 and the balance/small-tank transmitter is LT8{N}66 for N in 1..4.
+  // We substitute the tank number at query time.
+  ST_MAIN_LEVEL:      '_LT8{N}01_Status',   // 0-100% (main tank)
+  ST_BAL_LEVEL:       '_LT8{N}66_Status',   // 0-100% (balance/small tank)
+  ST_PRODUCT_DESC:    '_ProductDesc',
+  ST_STATE:           '_State',
+  ST_TANK_EMPTY:      '_TankEmpty_Indicator',
+  ST_CONNECTED:       '_Connected',
+  ST_STER_PROD_BARR:  '_SterProdBarrOK',
+  ST_FILLING_OK:      '_FillingOK',
 }
 
 class RestProvider extends BaseProvider {
@@ -454,6 +481,140 @@ class RestProvider extends BaseProvider {
         active: !!val(8),
         targetComplete: !!val(9),
         density: val(10),
+      }
+    })
+  }
+
+  // ── Silos, UHTs, Surge tanks — live status for the dashboard ────────
+
+  /**
+   * Read current levels, temperatures, and product info for every silo.
+   * Covers 5 raw milk silos (MSILO1-5), 3 cream silos (CSILO1-3), and the
+   * cream balance tank. Returns one entry per silo.
+   */
+  async getSiloStatus() {
+    const silos = [
+      { siloId: 'MSilo1', prefix: 'MSILO1', kind: 'milk' },
+      { siloId: 'MSilo2', prefix: 'MSILO2', kind: 'milk' },
+      { siloId: 'MSilo3', prefix: 'MSILO3', kind: 'milk' },
+      { siloId: 'MSilo4', prefix: 'MSILO4', kind: 'milk' },
+      { siloId: 'MSilo5', prefix: 'MSILO5', kind: 'milk' },
+      { siloId: 'CSilo1', prefix: 'CSILO1', kind: 'cream' },
+      { siloId: 'CSilo2', prefix: 'CSILO2', kind: 'cream' },
+      { siloId: 'CSilo3', prefix: 'CSILO3', kind: 'cream' },
+      { siloId: 'CreamBalance', prefix: 'CreamBalance', kind: 'cream-balance' },
+    ]
+    const suffixes = [
+      TAGS.SILO_GALLONS,      // 0
+      TAGS.SILO_LBS,          // 1
+      TAGS.SILO_LEVEL,        // 2 — 0-100%
+      TAGS.SILO_TEMP,         // 3 — °F (not present on CreamBalance)
+      TAGS.SILO_PRODUCT_NAME, // 4 (not present on CreamBalance)
+      TAGS.SILO_DENSITY,      // 5 (not present on CreamBalance)
+    ]
+
+    const fqns = silos.flatMap(s => suffixes.map(sfx => `${s.prefix}${sfx}`))
+    const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
+
+    const perSilo = suffixes.length
+    return silos.map((s, i) => {
+      const offset = i * perSilo
+      const val = (idx) => values[offset + idx]?.Value ?? 0
+      const txt = (idx) => values[offset + idx]?.Text ?? ''
+
+      return {
+        siloId: s.siloId,
+        kind: s.kind,
+        gallons: val(0),
+        lbs: val(1),
+        levelPct: val(2),
+        tempF: val(3),
+        productName: txt(4),
+        density: val(5),
+      }
+    })
+  }
+
+  /**
+   * Read current status for both UHT pasteurizers.
+   * Exposes the run/step state plus the current WO and item.
+   */
+  async getUhtStatus() {
+    const uhts = ['UHT1', 'UHT2']
+    const suffixes = [
+      TAGS.UHT_ACTIVE,        // 0 — Discrete
+      TAGS.UHT_JOB_RUNNING,   // 1 — Discrete
+      TAGS.UHT_CURRENT_WO,    // 2 — String
+      TAGS.UHT_CURRENT_ITEM,  // 3 — String
+      TAGS.UHT_GAL_ACTUAL,    // 4 — Analog (gal)
+      TAGS.UHT_STEP_NUM,      // 5 — Analog (step number)
+    ]
+
+    const fqns = uhts.flatMap(u => suffixes.map(s => `${u}${s}`))
+    const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
+
+    const perUht = suffixes.length
+    return uhts.map((uhtId, i) => {
+      const offset = i * perUht
+      const val = (idx) => values[offset + idx]?.Value ?? 0
+      const txt = (idx) => values[offset + idx]?.Text ?? ''
+
+      return {
+        uhtId,
+        active: !!val(0),
+        jobRunning: !!val(1),
+        currentWO: txt(2),
+        currentItem: txt(3),
+        galActual: val(4),
+        stepNum: val(5),
+      }
+    })
+  }
+
+  /**
+   * Read current status for the four aseptic surge tanks (ST81-84).
+   * Each tank has a main level transmitter (LT8{N}01) and a small balance-tank
+   * transmitter (LT8{N}66) — we expose both since they're both on the HMI.
+   */
+  async getSurgeTankStatus() {
+    const tanks = [
+      { tankId: 'ST81', num: 1 },
+      { tankId: 'ST82', num: 2 },
+      { tankId: 'ST83', num: 3 },
+      { tankId: 'ST84', num: 4 },
+    ]
+    const suffixTemplates = [
+      TAGS.ST_MAIN_LEVEL,      // 0 — 0-100% main tank
+      TAGS.ST_BAL_LEVEL,       // 1 — 0-100% balance tank
+      TAGS.ST_PRODUCT_DESC,    // 2 — String
+      TAGS.ST_STATE,           // 3 — State number
+      TAGS.ST_TANK_EMPTY,      // 4 — Discrete
+      TAGS.ST_CONNECTED,       // 5 — Discrete
+      TAGS.ST_STER_PROD_BARR,  // 6 — Discrete
+      TAGS.ST_FILLING_OK,      // 7 — Discrete
+    ]
+
+    const fqns = tanks.flatMap(t =>
+      suffixTemplates.map(sfx => `ThermaRoute.${t.tankId}${sfx.replace('{N}', t.num)}`)
+    )
+    const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
+
+    const perTank = suffixTemplates.length
+    return tanks.map((t, i) => {
+      const offset = i * perTank
+      const val = (idx) => values[offset + idx]?.Value ?? 0
+      const txt = (idx) => values[offset + idx]?.Text ?? ''
+
+      return {
+        tankId: t.tankId,
+        mainLevelPct: val(0),
+        balanceLevelPct: val(1),
+        productDesc: txt(2),
+        state: val(3),
+        empty: !!val(4),
+        connected: !!val(5),
+        sterProdBarrOK: !!val(6),
+        fillingOK: !!val(7),
       }
     })
   }

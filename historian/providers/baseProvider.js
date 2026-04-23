@@ -89,6 +89,58 @@ class BaseProvider {
   async getMilkLineStatus() {
     throw new Error('getMilkLineStatus() not implemented')
   }
+
+  /**
+   * Get current level, product, and temperature for every silo
+   * (5 raw milk, 3 cream, and the cream balance tank).
+   * @returns {Promise<Array<{
+   *   siloId: string,
+   *   kind: 'milk' | 'cream' | 'cream-balance',
+   *   gallons: number,
+   *   lbs: number,
+   *   levelPct: number,
+   *   tempF: number,
+   *   productName: string,
+   *   density: number
+   * }>>}
+   */
+  async getSiloStatus() {
+    throw new Error('getSiloStatus() not implemented')
+  }
+
+  /**
+   * Get live status for both UHT pasteurizers.
+   * @returns {Promise<Array<{
+   *   uhtId: string,
+   *   active: boolean,
+   *   jobRunning: boolean,
+   *   currentWO: string,
+   *   currentItem: string,
+   *   galActual: number,
+   *   stepNum: number
+   * }>>}
+   */
+  async getUhtStatus() {
+    throw new Error('getUhtStatus() not implemented')
+  }
+
+  /**
+   * Get live status for the four aseptic surge tanks (ST81-84).
+   * @returns {Promise<Array<{
+   *   tankId: string,
+   *   mainLevelPct: number,
+   *   balanceLevelPct: number,
+   *   productDesc: string,
+   *   state: number,
+   *   empty: boolean,
+   *   connected: boolean,
+   *   sterProdBarrOK: boolean,
+   *   fillingOK: boolean
+   * }>>}
+   */
+  async getSurgeTankStatus() {
+    throw new Error('getSurgeTankStatus() not implemented')
+  }
 }
 
 module.exports = BaseProvider

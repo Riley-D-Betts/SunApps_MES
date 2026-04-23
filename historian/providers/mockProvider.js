@@ -85,6 +85,66 @@ class MockProvider extends BaseProvider {
     })
   }
 
+  async getSiloStatus() {
+    const silos = [
+      { siloId: 'MSilo1', kind: 'milk', productName: 'Raw Conventional Milk' },
+      { siloId: 'MSilo2', kind: 'milk', productName: 'Raw Conventional Milk' },
+      { siloId: 'MSilo3', kind: 'milk', productName: 'Raw Conventional Milk' },
+      { siloId: 'MSilo4', kind: 'milk', productName: 'Raw Organic Milk' },
+      { siloId: 'MSilo5', kind: 'milk', productName: 'Raw Organic Milk' },
+      { siloId: 'CSilo1', kind: 'cream', productName: 'Raw Conventional Cream' },
+      { siloId: 'CSilo2', kind: 'cream', productName: 'Raw Conventional Cream' },
+      { siloId: 'CSilo3', kind: 'cream', productName: 'Raw Organic Cream' },
+      { siloId: 'CreamBalance', kind: 'cream-balance', productName: '' },
+    ]
+    return silos.map(s => {
+      const levelPct = Math.floor(Math.random() * 100)
+      const density = s.kind === 'milk' ? 8.63 : 8.3
+      const gallons = Math.floor((levelPct / 100) * 6000)
+      return {
+        ...s,
+        gallons,
+        lbs: Math.round(gallons * density),
+        levelPct,
+        tempF: s.kind === 'cream-balance' ? 0 : 35 + Math.random() * 5,
+        density,
+      }
+    })
+  }
+
+  async getUhtStatus() {
+    return ['UHT1', 'UHT2'].map((uhtId, i) => {
+      const running = Math.random() > 0.3
+      return {
+        uhtId,
+        active: running,
+        jobRunning: running,
+        currentWO: running ? `UHT-WO-${2000 + i}` : '',
+        currentItem: running ? (i === 0 ? '300015' : '300042') : '',
+        galActual: running ? Math.floor(Math.random() * 50000) : 0,
+        stepNum: running ? Math.floor(Math.random() * 30) + 1 : 0,
+      }
+    })
+  }
+
+  async getSurgeTankStatus() {
+    return ['ST81', 'ST82', 'ST83', 'ST84'].map((tankId, i) => {
+      const filling = Math.random() > 0.5
+      const mainLevelPct = filling ? Math.floor(Math.random() * 100) : 0
+      return {
+        tankId,
+        mainLevelPct,
+        balanceLevelPct: filling ? Math.floor(Math.random() * 100) : 0,
+        productDesc: filling ? ['Marcels 1%', 'KS 2% org', 'Conv 3.25%', 'Horizon whole'][i] : '',
+        state: filling ? 5 + Math.floor(Math.random() * 10) : 1,
+        empty: mainLevelPct < 2,
+        connected: true,
+        sterProdBarrOK: true,
+        fillingOK: filling,
+      }
+    })
+  }
+
   async getMilkLineStatus() {
     const lines = ['ML1', 'ML2', 'ML3', 'ML4', 'CL1', 'CL2']
     const mockProducts = {
