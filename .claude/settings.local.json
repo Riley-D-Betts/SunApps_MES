@@ -41,7 +41,12 @@
       "Bash(python3 -m json.tool)",
       "Bash(git -C \"C:\\\\Users\\\\BryceChesley\\\\Workspace\\\\SunApps_MES\" status)",
       "Bash(git -C \"C:\\\\Users\\\\BryceChesley\\\\Workspace\\\\SunApps_MES\" diff)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(npm run *)",
+      "Bash(npm test *)",
+      "Bash(npx jest *)",
+      "Bash(gh run *)",
+      "Bash(python -c ' *)"
     ]
   }
 }
