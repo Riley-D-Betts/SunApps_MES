@@ -159,12 +159,18 @@ async function processWOEnd(data) {
       const lotNumber = `${tankId}-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`
       const qtySource = totalInflowLbs > 0 ? 'inflows' : 'batchSize'
 
-      const completionBinId = itemConfig.getBinId(tankId)
+      // For UHT-direct WOs, processWOStart stores the destination surge tank
+      // (ST81-84) in toEntName — that's where the FG actually lands. Blend
+      // tanks don't set toEntName meaningfully, so fall back to tankId for them.
+      const completionDest = (record.toEntName && /^ST\d+$/.test(record.toEntName))
+        ? record.toEntName
+        : tankId
+      const completionBinId = itemConfig.getBinId(completionDest)
       const completionInventoryItem = { quantity: completionQty, receiptInventoryNumber: lotNumber }
       if (completionBinId) {
         completionInventoryItem.binnumber = { id: completionBinId }
       } else {
-        console.warn(`[BlendTankMesService] No NS bin configured for tank "${tankId}" — completing without bin assignment (may fail if bin tracking is required)`)
+        console.warn(`[BlendTankMesService] No NS bin configured for "${completionDest}" — completing without bin assignment (may fail if bin tracking is required)`)
       }
 
       const body = {

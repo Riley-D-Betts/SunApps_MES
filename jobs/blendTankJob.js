@@ -132,16 +132,43 @@ async function run(historian) {
       const totalizerReset = prev.prevValue > LINE_RESET_THRESHOLD_LBS && totalizerLbs < LINE_RESET_THRESHOLD_LBS
 
       if (hasProduct && isUhtDirect(requestedBy) && !prev.uhtActive) {
-        const uhtId = `${line}→${requestedBy}`
+        const tankId = `${line}→${requestedBy}`
         console.log(`[BlendTankJob] UHT-DIRECT START on ${line}: "${productName}" (${siloName} → ${requestedBy})`)
         statusStore.pushEvent('line.uhtDirectStart', `${line}: UHT-direct "${productName}" (${siloName} → ${requestedBy})`, { line, productName, siloName, destination: requestedBy })
+
+        // The line carries a RAW product (the issue/component); the FG is the
+        // pasteurized product landing in whichever surge tank the operator
+        // routed this UHT to. Look it up via ThermaRoute.{UHT}_{ST}_Connection_Code.
+        const uhtMatch = String(requestedBy || '').match(/(?:UHT|TSTAT)(\d+)/i)
+        const uhtIdNum = uhtMatch ? `UHT${uhtMatch[1]}` : null
+        let fgProductName = productName
+        let surgeTankId = null
+        if (uhtIdNum) {
+          try {
+            const dest = await historian.getUhtDestinationSurgeTank(uhtIdNum)
+            if (dest?.surgeTankId) {
+              surgeTankId = dest.surgeTankId
+              if (dest.productDesc) fgProductName = dest.productDesc
+              console.log(`[BlendTankJob] ${line} UHT-direct → ${uhtIdNum} → ${surgeTankId} ("${dest.productDesc || ''}")`)
+            } else {
+              console.warn(`[BlendTankJob] No connected surge tank for ${uhtIdNum} — using line product as FG`)
+            }
+          } catch (err) {
+            console.error(`[BlendTankJob] getUhtDestinationSurgeTank(${uhtIdNum}) failed:`, err.message)
+          }
+        }
+
         try {
           await blendTankMesService.processWOStart({
-            tankId: uhtId, productName, batchSize: requestedTargetLbs || 0,
-            fromEntName: siloName || '', toEntName: requestedBy || '', detectedAt: new Date().toISOString(),
+            tankId,
+            productName: fgProductName,
+            batchSize: requestedTargetLbs || 0,
+            fromEntName: siloName || '',
+            toEntName: surgeTankId || requestedBy || '',
+            detectedAt: new Date().toISOString(),
           })
         } catch (err) {
-          console.error(`[BlendTankJob] processWOStart (UHT) failed for ${uhtId}:`, err.message)
+          console.error(`[BlendTankJob] processWOStart (UHT) failed for ${tankId}:`, err.message)
         }
         prev.uhtRequestedBy = requestedBy
         prev.uhtActive = true

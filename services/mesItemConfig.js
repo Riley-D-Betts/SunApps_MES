@@ -65,6 +65,18 @@ const TANK_BIN_MAP = {
   BlendTank2B: 1020,
 }
 
+// Aseptic surge tanks (post-UHT). Operator routes any UHT to any ST per run,
+// so completion bin for a UHT-direct WO is whichever ST is connected at the
+// time. NS bin IDs need to be filled in by the user — null entries cause the
+// completion to fall through bin-less (logs a warning, NS accepts as long as
+// the FG isn't bin-tracked).
+const SURGE_TANK_BIN_MAP = {
+  ST81: null,
+  ST82: null,
+  ST83: null,
+  ST84: null,
+}
+
 // SCADA strings for silos aren't perfectly consistent — operators sometimes
 // configure "RawMilkSilo5" / "CreamSilo2" instead of the canonical "MSilo5" /
 // "CSilo2". Normalize to the bin-map key before lookup.
@@ -89,8 +101,10 @@ function normalizeSiloName(raw) {
 
 function getBinId(siloOrTankName) {
   if (!siloOrTankName) return null
-  const direct = SILO_BIN_MAP[siloOrTankName] ?? TANK_BIN_MAP[siloOrTankName]
+  const direct = SILO_BIN_MAP[siloOrTankName] ?? TANK_BIN_MAP[siloOrTankName] ?? SURGE_TANK_BIN_MAP[siloOrTankName]
   if (direct != null) return direct
+  // Surge-tank shorthand (ST81-84) is already canonical; no further normalization.
+  if (/^ST\d+$/.test(siloOrTankName)) return null
   const normalized = normalizeSiloName(siloOrTankName)
   if (!normalized) return null
   const v = SILO_BIN_MAP[normalized] ?? TANK_BIN_MAP[normalized] ?? null
@@ -221,6 +235,7 @@ module.exports = {
   BLEND_TANK_ITEM_MAP,
   SILO_BIN_MAP,
   TANK_BIN_MAP,
+  SURGE_TANK_BIN_MAP,
   RAW_ITEMS,
   PRODUCT_INDEX_ITEM_MAP,
   CREAM_ITEM,

@@ -143,6 +143,22 @@ class BaseProvider {
   async getSurgeTankStatus() {
     throw new Error('getSurgeTankStatus() not implemented')
   }
+
+  /**
+   * Resolve which surge tank a given UHT is currently routed to. Used at the
+   * start of a UHT-direct run to figure out which ST{NN} will receive the FG,
+   * so the WO can be created with the correct pasteurized assembly item.
+   * @param {string} uhtId - 'UHT1' or 'UHT2'
+   * @returns {Promise<{
+   *   surgeTankId: string,
+   *   connectionCode: number,
+   *   productDesc: string,
+   *   mainLevelPct: number
+   * } | null>}
+   */
+  async getUhtDestinationSurgeTank(uhtId) {
+    throw new Error('getUhtDestinationSurgeTank() not implemented')
+  }
 }
 
 module.exports = BaseProvider

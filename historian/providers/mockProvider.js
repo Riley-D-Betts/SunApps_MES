@@ -170,6 +170,22 @@ class MockProvider extends BaseProvider {
     })
   }
 
+  async getUhtDestinationSurgeTank(uhtId) {
+    if (!/^UHT[12]$/i.test(uhtId)) return null
+    // UHT1 → ST81/82, UHT2 → ST83/84 deterministically per cycle so dev sees
+    // the routing exercise both halves of the matrix. Real plant routes are
+    // operator-driven and read from the Connection_Code tags by RestProvider.
+    const cycle = this._blendTankCycle % 4
+    const choices = uhtId.toUpperCase() === 'UHT1' ? ['ST81', 'ST82'] : ['ST83', 'ST84']
+    const surgeTankId = choices[cycle % choices.length]
+    return {
+      surgeTankId,
+      connectionCode: 1,
+      productDesc: ['Marcels 1%', 'Kirkland Whole', 'Horizon Organic 2%', 'Conventional 3.25%'][cycle],
+      mainLevelPct: 30 + Math.floor(Math.random() * 50),
+    }
+  }
+
   async getMilkLineStatus() {
     const lines = ['ML1', 'ML2', 'ML3', 'ML4', 'CL1', 'CL2']
     const mockProducts = {

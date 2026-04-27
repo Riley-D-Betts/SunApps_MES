@@ -112,6 +112,11 @@ const TAGS = {
   ST_CONNECTED:       '_Connected',
   ST_STER_PROD_BARR:  '_SterProdBarrOK',
   ST_FILLING_OK:      '_FillingOK',
+
+  // UHT → Surge tank routing. The plant exposes one Connection_Code per
+  // (UHT, ST) pair. A non-zero code means the operator has routed that UHT
+  // to that surge tank — i.e. the FG from a UHT-direct run will land there.
+  UHT_ST_CONNECTION_FQN: 'ThermaRoute.{UHT}_{ST}_Connection_Code',
 }
 
 class RestProvider extends BaseProvider {
@@ -696,6 +701,48 @@ class RestProvider extends BaseProvider {
         fillingOK: !!val(7),
       }
     })
+  }
+
+  /**
+   * Resolve which surge tank (ST81-84) a given UHT is currently routed to.
+   * Reads the four `ThermaRoute.{UHT}_{ST}_Connection_Code` tags and picks
+   * whichever has a non-zero code — that's the operator's selected route.
+   * Also returns the surge tank's productDesc so the caller can use it as
+   * the FG for a UHT-direct WO. Returns null if no surge tank is connected.
+   */
+  async getUhtDestinationSurgeTank(uhtId) {
+    if (!/^UHT[12]$/i.test(uhtId)) return null
+    const sts = ['ST81', 'ST82', 'ST83', 'ST84']
+    const codeFqns = sts.map(st =>
+      TAGS.UHT_ST_CONNECTION_FQN.replace('{UHT}', uhtId.toUpperCase()).replace('{ST}', st)
+    )
+    const codeValues = await Promise.all(codeFqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
+    let connectedIdx = -1
+    let connectedCode = 0
+    for (let i = 0; i < sts.length; i++) {
+      const code = codeValues[i]?.Value ?? 0
+      if (code !== 0) {
+        connectedIdx = i
+        connectedCode = code
+        break
+      }
+    }
+    if (connectedIdx < 0) return null
+
+    const tankId = sts[connectedIdx]
+    const num = connectedIdx + 1
+    const productFqn = `ThermaRoute.${tankId}${TAGS.ST_PRODUCT_DESC}`
+    const levelFqn = TAGS.ST_MAIN_LEVEL_FQN.replace('{TID}', tankId).replace('{N}', num)
+    const [productPv, levelPv] = await Promise.all([
+      this._getCurrentValue(productFqn, { verbose: false }),
+      this._getCurrentValue(levelFqn, { verbose: false }),
+    ])
+    return {
+      surgeTankId: tankId,
+      connectionCode: connectedCode,
+      productDesc: productPv?.Text || '',
+      mainLevelPct: levelPv?.Value || 0,
+    }
   }
 }
 
