@@ -67,14 +67,12 @@ const TANK_BIN_MAP = {
 
 // Aseptic surge tanks (post-UHT). Operator routes any UHT to any ST per run,
 // so completion bin for a UHT-direct WO is whichever ST is connected at the
-// time. NS bin IDs need to be filled in by the user — null entries cause the
-// completion to fall through bin-less (logs a warning, NS accepts as long as
-// the FG isn't bin-tracked).
+// time. NS bin names: Surge-81/82/83/84.
 const SURGE_TANK_BIN_MAP = {
-  ST81: null,
-  ST82: null,
-  ST83: null,
-  ST84: null,
+  ST81: 1011,
+  ST82: 1012,
+  ST83: 1014,
+  ST84: 1015,
 }
 
 // SCADA strings for silos aren't perfectly consistent — operators sometimes
