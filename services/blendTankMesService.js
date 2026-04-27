@@ -5,19 +5,6 @@ const lineMapper = require('./lineIngredientMapper')
 const config = require('../config')
 const db = require('../models')
 
-// Cache WO BOM line numbers to avoid repeated NS fetches per batch
-const _woBomCache = {}
-
-async function getWoBomLineNumber(nsWorkOrderId, itemId) {
-  if (!_woBomCache[nsWorkOrderId]) {
-    const woDetail = await core.netsuiteGet(`/record/v1/workOrder/${nsWorkOrderId}?expandSubResources=true`)
-    _woBomCache[nsWorkOrderId] = woDetail?.item?.items || []
-  }
-  const bomItems = _woBomCache[nsWorkOrderId]
-  const bomLine = bomItems.find(b => String(b.item?.id || b.item) === String(itemId))
-  return bomLine?.line ? parseInt(bomLine.line, 10) : null
-}
-
 async function processWOStart(data) {
   const { tankId, productName, batchSize, fromEntName, toEntName, detectedAt } = data
 
@@ -201,9 +188,6 @@ async function processWOEnd(data) {
       }
       if (!nsCompletionId && nsResult?.id) nsCompletionId = nsResult.id
 
-      // Clear BOM cache for this WO — it's done
-      delete _woBomCache[record.nsWorkOrderId]
-
       console.log(`[BlendTankMesService] WO ${record.nsWorkOrderNumber || record.nsWorkOrderId} completed: ${completionQty} LBS → completion ${nsCompletionId}`)
     } catch (err) {
       console.error(`[BlendTankMesService] Failed to complete NS WO ${record.nsWorkOrderId}:`, err.message)
@@ -324,18 +308,6 @@ async function processLineFlow(data) {
       return { success: true, inflowId: inflowRecord.id, status: 'pending_ns' }
     }
 
-    const lineNumber = await getWoBomLineNumber(targetBatch.nsWorkOrderId, componentItem.id)
-    if (!lineNumber) {
-      console.warn(`[BlendTankMesService] Item ${componentItem.name} (${componentItem.id}) not in WO BOM ${targetBatch.nsWorkOrderId} — cannot issue`)
-      await inflowRecord.update({ status: 'pending_ns' })
-      await db.MesProcessingLog.create({
-        eventType: 'blend_tank_line_issue', sourceId: targetBatch.nsWorkOrderId,
-        nsTransactionType: 'workOrderIssue', payload: JSON.stringify(data),
-        result: JSON.stringify({ skipped: 'item not in WO BOM', componentItem }), success: true,
-      })
-      return { success: true, inflowId: inflowRecord.id, status: 'pending_ns' }
-    }
-
     const binId = itemConfig.getBinId(siloName)
     if (!binId) {
       console.warn(`[BlendTankMesService] No NS bin configured for silo "${siloName}" — cannot issue bin-tracked item (pending_ns until bin is configured)`)
@@ -348,27 +320,28 @@ async function processLineFlow(data) {
       return { success: true, inflowId: inflowRecord.id, status: 'pending_ns' }
     }
 
-    const componentEntry = {
-      lineNumber,
-      quantity: totalLbs,
-      componentinventorydetail: {
-        inventoryassignment: {
-          items: [{ quantity: totalLbs, binnumber: { id: binId } }],
-        },
-      },
-    }
-
+    // Direct POST instead of /!transform/workOrderIssue — the transform path
+    // requires lineNumber (item must already be on the WO's BOM), which fails
+    // for our normalized/swap-silo runs. The direct endpoint accepts item.id
+    // and adds the component to the WO automatically. Pattern mirrors
+    // SunApps_Manufacturing/services/workOrderService.js:725-742.
     const body = {
-      component: {
-        items: [componentEntry],
+      transaction: { id: targetBatch.nsWorkOrderId },
+      item: {
+        items: [{
+          item: { id: componentItem.id },
+          quantity: totalLbs,
+          inventorydetail: {
+            inventoryassignment: {
+              items: [{ quantity: totalLbs, binnumber: { id: binId } }],
+            },
+          },
+        }],
       },
     }
 
-    console.log(`[BlendTankMesService] Issuing ${totalLbs.toFixed(1)} LBS "${lineProductName || ingredientType}" (${line}, resolved=${resolvedFrom}, lineNumber=${lineNumber}) to NS WO ${targetBatch.nsWorkOrderId}`)
-    const nsResult = await core.netsuitePost(
-      `/record/v1/workOrder/${targetBatch.nsWorkOrderId}/!transform/workOrderIssue`,
-      body
-    )
+    console.log(`[BlendTankMesService] Issuing ${totalLbs.toFixed(1)} LBS "${lineProductName || ingredientType}" (${line}, resolved=${resolvedFrom}, NS ${componentItem.id}) to NS WO ${targetBatch.nsWorkOrderId}`)
+    const nsResult = await core.netsuitePost('/record/v1/workOrderIssue', body)
 
     let nsIssueId = nsResult?.id || null
     if (!nsIssueId && nsResult?.headers?.location) {
@@ -438,28 +411,29 @@ async function issueIngredient(batchId, data) {
   if (!batch) throw new Error(`Batch ${batchId} not found`)
   if (!batch.nsWorkOrderId) throw new Error(`Batch ${batchId} has no NS work order — cannot issue`)
 
-  const lineNumber = await getWoBomLineNumber(batch.nsWorkOrderId, nsItemId)
-  if (!lineNumber) throw new Error(`Item ${nsItemId} not found in WO ${batch.nsWorkOrderId} BOM`)
-
   const resolvedBinId = explicitBinId || (siloName ? itemConfig.getBinId(siloName) : null)
 
-  const componentItem = { lineNumber, quantity }
   const inventoryDetailItems = [{ quantity }]
   if (lot) inventoryDetailItems[0].issueinventorynumber = { id: lot }
   if (resolvedBinId) inventoryDetailItems[0].binnumber = { id: resolvedBinId }
 
+  const itemEntry = { item: { id: nsItemId }, quantity }
   if (lot || resolvedBinId) {
-    componentItem.componentinventorydetail = {
-      inventoryassignment: { items: inventoryDetailItems },
-    }
+    itemEntry.inventorydetail = { inventoryassignment: { items: inventoryDetailItems } }
   }
 
-  const nsResult = await core.netsuitePost(
-    `/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderIssue`,
-    { component: { items: [componentItem] } }
-  )
+  const body = {
+    transaction: { id: batch.nsWorkOrderId },
+    item: { items: [itemEntry] },
+  }
 
-  const nsIssueId = nsResult?.id || null
+  const nsResult = await core.netsuitePost('/record/v1/workOrderIssue', body)
+
+  let nsIssueId = nsResult?.id || null
+  if (!nsIssueId && nsResult?.headers?.location) {
+    const match = nsResult.headers.location.match(/\/(\d+)$/)
+    if (match) nsIssueId = match[1]
+  }
 
   await db.MesProcessingLog.create({
     eventType: 'blend_tank_manual_issue', sourceId: batch.nsWorkOrderId,
