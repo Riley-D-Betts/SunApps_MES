@@ -142,29 +142,30 @@ async function main() {
   }
   const lineNumber = targetLineRow?.line || (await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`))?.body?.item?.items?.find(c => String(c.item?.id) === targetIdStr)?.line
 
-  // Use the DIRECT endpoint (not transform) so NS only consumes what we
-  // explicitly list — transform tries to auto-issue every BOM line and
-  // demands per-line inventory detail for lot-tracked components.
+  // The direct /record/v1/workOrderIssue endpoint at SunTado's NS rejects
+  // any creation attempt with "Transaction can only be created from a work
+  // order" — both `transaction: { id }` and `createdFrom: { id }` are
+  // rejected. Forced to use transform.
   //
-  // Body shape matches the workOrderIssue response we observed (#21674):
-  //   { createdFrom: { id }, component: { items: [{ item: "<id>",
-  //       lineNumber, quantity }] } }
-  // Note `item` is a STRING (not { id: ... }) and `component` is the sublist
-  // field name on a workOrderIssue (NOT `item` — that's the FG reference).
+  // Transform's default merge behavior pre-populates ALL BOM lines (which
+  // demands inventory detail for lot-tracked vitamins/citrate that we
+  // haven't staged). The `?replace=component` query param flips it to
+  // "consume only what I list" — exactly what we want.
   const issueBody = {
-    transaction: { id: RECOVERY.nsWorkOrderId },
     custbody_tran_last_modified_by: 'system',
     component: {
       items: [{
         item: targetIdStr,
         lineNumber,
         quantity: RECOVERY.totalLbs,
-        Status: '1',
       }],
     },
   }
-  console.log(`POSTing direct workOrderIssue body:`, JSON.stringify(issueBody))
-  const issueResp = await core.netsuitePost('/record/v1/workOrderIssue', issueBody)
+  console.log(`POSTing transform/workOrderIssue?replace=component body:`, JSON.stringify(issueBody))
+  const issueResp = await core.netsuitePost(
+    `/record/v1/workOrder/${RECOVERY.nsWorkOrderId}/!transform/workOrderIssue?replace=component`,
+    issueBody
+  )
   let nsIssueId = issueResp?.body?.id || issueResp?.id || null
   if (!nsIssueId && issueResp?.headers?.location) {
     const m = String(issueResp.headers.location).match(/\/(\d+)$/)
