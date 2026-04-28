@@ -26,6 +26,7 @@ const state = {
   },
   events: [],                      // newest first
   recentBatches: [],               // newest first; each entry is a processed separator batch
+  tick: null,                      // { batches: [...], pipeStates: {...}, updatedAt }
 }
 
 function now() {
@@ -73,6 +74,66 @@ function setSurgeTanks(snapshot) {
  * captures the resolved source/cream/skim products + NS item + bin so an
  * operator can see at a glance whether the unbuild made it to NetSuite.
  */
+/**
+ * Snapshot of issue/completion tick state. Written by issueCompletionJob at
+ * the end of each tick (and once on startup via hydrateTickState). The
+ * dashboard reads this to render per-line "pending delta" / per-tank
+ * "cumulative completed" without hitting the DB on every snapshot read.
+ *
+ * Shape:
+ *   {
+ *     batches: [{ batchId, tankId, productName, nsWorkOrderId, nsWorkOrderNumber,
+ *                 cumulativeIssuedLbs, cumulativeCompletedLbs,
+ *                 lastIssueAt, lastCompletionAt }],
+ *     pipeStates: { [line]: { batchId, tankId, lastIssuedTotalizerLbs,
+ *                              lastIssueAt, lastTotalizerLbs, lastObservedAt } },
+ *     updatedAt
+ *   }
+ */
+function setTick(tick) {
+  state.tick = { ...tick, updatedAt: now() }
+}
+
+async function hydrateTickState(MesBlendTankBatch, MesPipeIssueState) {
+  try {
+    const batches = await MesBlendTankBatch.findAll({
+      where: { status: 'active' },
+      order: [['detectedAt', 'DESC']],
+    })
+    const pipeStates = await MesPipeIssueState.findAll()
+    const batchById = Object.fromEntries(batches.map(b => [b.id, b]))
+    const pipeMap = {}
+    for (const ps of pipeStates) {
+      const b = batchById[ps.blendTankBatchId]
+      pipeMap[ps.line] = {
+        batchId: ps.blendTankBatchId,
+        tankId: b?.tankId || null,
+        lastIssuedTotalizerLbs: parseFloat(ps.lastIssuedTotalizerLbs) || 0,
+        lastIssueAt: ps.lastIssueAt,
+        lastTotalizerLbs: ps.lastTotalizerLbs != null ? parseFloat(ps.lastTotalizerLbs) : null,
+        lastObservedAt: ps.lastObservedAt,
+      }
+    }
+    setTick({
+      batches: batches.map(b => ({
+        batchId: b.id,
+        tankId: b.tankId,
+        productName: b.productName,
+        nsWorkOrderId: b.nsWorkOrderId,
+        nsWorkOrderNumber: b.nsWorkOrderNumber,
+        cumulativeIssuedLbs: parseFloat(b.cumulativeIssuedLbs) || 0,
+        cumulativeCompletedLbs: parseFloat(b.cumulativeCompletedLbs) || 0,
+        lastIssueAt: b.lastIssueAt,
+        lastCompletionAt: b.lastCompletionAt,
+      })),
+      pipeStates: pipeMap,
+    })
+    console.log(`[StatusStore] Hydrated tick state: ${batches.length} active batch(es), ${pipeStates.length} pipe state(s)`)
+  } catch (err) {
+    console.error('[StatusStore] Failed to hydrate tick state:', err.message)
+  }
+}
+
 function pushSeparationBatch(batch) {
   state.recentBatches.unshift({ t: now(), ...batch })
   if (state.recentBatches.length > MAX_RECENT_BATCHES) {
@@ -234,6 +295,7 @@ function snapshot() {
     uhts: state.uhts,
     surgeTanks: state.surgeTanks,
     recentBatches: state.recentBatches.filter(b => b.status !== 'error'),
+    tick: state.tick,
     lastPoll: { ...state.lastPoll },
     eventCount: state.events.length,
   }
@@ -259,6 +321,8 @@ module.exports = {
   setSurgeTanks,
   pushSeparationBatch,
   hydrateSeparationBatches,
+  setTick,
+  hydrateTickState,
   snapshot,
   events,
 }
