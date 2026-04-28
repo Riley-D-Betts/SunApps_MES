@@ -203,16 +203,15 @@ async function processWOEnd(data) {
 }
 
 /**
- * Legacy event-based handler — fired by blendTankJob on totalizer reset.
+ * Tail-catcher: fired by blendTankJob the moment the line totalizer resets
+ * (or the line's product clears). The reset value is the totalizer's peak
+ * for this batch on this line. The 5-min tick may have already issued part
+ * of it; we only fire NS for the remaining delta vs MesPipeIssueState.
  *
- * Previously this path POSTed a workOrderIssue for the entire reset value.
- * That's now done by the tick (issueCompletionJob), which fires one issue per
- * totalizer delta on a steady cadence. This handler now ONLY records the
- * reset event in MesBlendTankInflow for traceability — it does not call NS.
- *
- * Net effect: ongoing inflow accounting lives in the tick. The legacy event
- * is a breadcrumb so debugging "why did this batch end" is easier — it shows
- * the totalizer-reset event that the tick alone wouldn't surface.
+ * Without this safety net, a fill that completes inside one 5-min tick
+ * window is invisible to the tick — the totalizer goes 0 → peak → 0
+ * between two consecutive ticks and we never see the peak. This handler
+ * captures it the moment blendTankJob detects the reset.
  */
 async function processLineFlow(data) {
   const { line, totalLbs, lineProductName, ingredientType, siloName, destination, resetTime } = data
@@ -227,31 +226,138 @@ async function processLineFlow(data) {
     }
   }
 
+  // Match the tank using the canonical normalizer (BT2A ↔ BlendTank2A)
   const activeBatches = await db.MesBlendTankBatch.findAll({ where: { status: 'active' } })
   let targetBatch = null
-  if (activeBatches.length > 0) {
-    if (destination) {
+  if (activeBatches.length > 0 && destination) {
+    const destCanonical = normalizeTankRef(destination)
+    if (destCanonical) {
+      targetBatch = activeBatches.find(b => normalizeTankRef(b.tankId) === destCanonical)
+    }
+    if (!targetBatch) {
       const destNorm = destination.toLowerCase().replace(/[^a-z0-9]/g, '')
       targetBatch = activeBatches.find(b => {
         const tankNorm = b.tankId.toLowerCase().replace(/[^a-z0-9]/g, '')
         return tankNorm === destNorm || tankNorm.includes(destNorm) || destNorm.includes(tankNorm)
       })
     }
-    if (!targetBatch) targetBatch = activeBatches[0]
   }
 
-  const record = await db.MesBlendTankInflow.create({
-    blendTankBatchId: targetBatch?.id ?? null,
+  if (!targetBatch) {
+    const record = await db.MesBlendTankInflow.create({
+      blendTankBatchId: null, line,
+      ingredientType: lineProductName || ingredientType || 'unknown',
+      totalLbs, nsItemId: null, status: 'unmatched', resetTime,
+    })
+    console.log(`[BlendTankMesService] processLineFlow ${line} reset (${totalLbs.toFixed(1)} lb) — no active batch matched destination "${destination}"`)
+    return { success: true, inflowId: record.id, status: 'unmatched' }
+  }
+
+  // Compute the tail delta — totalizer's peak minus what the tick already issued
+  const pipeState = await db.MesPipeIssueState.findOne({
+    where: { blendTankBatchId: targetBatch.id, line },
+  })
+  const lastIssued = pipeState ? (parseFloat(pipeState.lastIssuedTotalizerLbs) || 0) : 0
+  const delta = totalLbs - lastIssued
+
+  if (delta < config.MES_MIN_ISSUE_LBS) {
+    const record = await db.MesBlendTankInflow.create({
+      blendTankBatchId: targetBatch.id, line,
+      ingredientType: lineProductName || ingredientType || 'unknown',
+      totalLbs, nsItemId: null, status: 'tick_already_issued', resetTime,
+    })
+    console.log(`[BlendTankMesService] processLineFlow ${line} reset (${totalLbs.toFixed(1)} lb): tick already issued ${lastIssued.toFixed(1)} — no tail to catch`)
+    return { success: true, inflowId: record.id, status: 'tick_already_issued' }
+  }
+
+  const component = resolveLineComponent({ line, productName: lineProductName })
+  const binId = itemConfig.getBinId(siloName)
+
+  const inflowRecord = await db.MesBlendTankInflow.create({
+    blendTankBatchId: targetBatch.id,
     line,
     ingredientType: lineProductName || ingredientType || (line.startsWith('CL') ? 'cream' : 'skim'),
-    totalLbs,
-    nsItemId: null,
-    status: targetBatch ? 'reset_event' : 'unmatched',
+    totalLbs: delta,
+    nsItemId: component?.id ? String(component.id) : null,
+    status: 'pending',
     resetTime,
   })
 
-  console.log(`[BlendTankMesService] Recorded line reset for ${line} (${totalLbs.toFixed(1)} lb, batch=${targetBatch?.tankId || 'unmatched'}) — NS issue handled by tick`)
-  return { success: true, inflowId: record.id, status: record.status }
+  if (config.MES_DRY_RUN) {
+    await inflowRecord.update({ status: 'dry_run' })
+    console.log(`[BlendTankMesService] DRY RUN tail-catcher ${line} → ${targetBatch.tankId}: ${delta.toFixed(1)} lb`)
+    return { success: true, inflowId: inflowRecord.id, status: 'dry_run' }
+  }
+  if (!targetBatch.nsWorkOrderId || !component?.id || !binId) {
+    await inflowRecord.update({ status: 'pending_ns' })
+    console.warn(`[BlendTankMesService] tail-catcher ${line} → ${targetBatch.tankId}: missing ${!targetBatch.nsWorkOrderId ? 'NS WO' : !component?.id ? 'NS item' : 'bin'} — saved as pending_ns (delta ${delta.toFixed(1)})`)
+    await db.MesProcessingLog.create({
+      eventType: 'blend_tank_tail_issue', sourceId: targetBatch.nsWorkOrderId,
+      nsTransactionType: 'workOrderIssue', payload: JSON.stringify(data),
+      result: JSON.stringify({ skipped: 'gap', siloName, component, binId }),
+      success: true,
+    })
+    return { success: true, inflowId: inflowRecord.id, status: 'pending_ns' }
+  }
+
+  const body = {
+    transaction: { id: targetBatch.nsWorkOrderId },
+    item: {
+      items: [{
+        item: { id: component.id },
+        quantity: delta,
+        inventorydetail: {
+          inventoryassignment: {
+            items: [{ quantity: delta, binnumber: { id: binId } }],
+          },
+        },
+      }],
+    },
+  }
+
+  try {
+    console.log(`[BlendTankMesService] tail-catcher ${line} → WO ${targetBatch.nsWorkOrderId} (${targetBatch.tankId}): ${delta.toFixed(1)} lb (peak ${totalLbs.toFixed(1)}, tick had issued ${lastIssued.toFixed(1)})`)
+    const nsResult = await core.netsuitePost('/record/v1/workOrderIssue', body)
+
+    let nsIssueId = nsResult?.id || null
+    if (!nsIssueId && nsResult?.headers?.location) {
+      const m = nsResult.headers.location.match(/\/(\d+)$/)
+      if (m) nsIssueId = m[1]
+    }
+
+    await inflowRecord.update({ nsIssueId: nsIssueId ? String(nsIssueId) : null, status: 'completed' })
+    // Bring the pipe state up to the peak so the next tick doesn't re-issue
+    if (pipeState) {
+      await pipeState.update({ lastIssuedTotalizerLbs: totalLbs, lastIssueAt: new Date() })
+    } else {
+      await db.MesPipeIssueState.create({
+        blendTankBatchId: targetBatch.id, line,
+        lastIssuedTotalizerLbs: totalLbs, lastIssueAt: new Date(),
+        lastTotalizerLbs: totalLbs, lastObservedAt: new Date(),
+      })
+    }
+    await targetBatch.increment({ cumulativeIssuedLbs: delta })
+    await targetBatch.update({ lastIssueAt: new Date() })
+
+    await db.MesProcessingLog.create({
+      eventType: 'blend_tank_tail_issue', sourceId: targetBatch.nsWorkOrderId,
+      nsTransactionType: 'workOrderIssue', nsTransactionId: nsIssueId,
+      payload: JSON.stringify({ ...data, delta, lastIssued }),
+      result: JSON.stringify({ nsIssueId }),
+      success: true,
+    })
+
+    return { success: true, inflowId: inflowRecord.id, nsIssueId, status: 'completed' }
+  } catch (err) {
+    console.error(`[BlendTankMesService] tail-catcher ${line} → WO ${targetBatch.nsWorkOrderId} failed:`, err.message)
+    await inflowRecord.update({ status: 'error', errorMessage: err.message })
+    await db.MesProcessingLog.create({
+      eventType: 'blend_tank_tail_issue', sourceId: targetBatch.nsWorkOrderId,
+      nsTransactionType: 'workOrderIssue', payload: JSON.stringify(data),
+      success: false, errorMessage: err.message,
+    })
+    return { success: true, inflowId: inflowRecord.id, status: 'error', error: err.message }
+  }
 }
 
 async function getActiveBatches() {
@@ -342,15 +448,43 @@ function resolveLineComponent(reading) {
 }
 
 /**
- * Match a line reading to one active batch. For real blend tanks (BlendTank1A
- * etc.) we match on `requestedBy`. For UHT-direct virtual batches the tankId is
- * encoded as "{line}→{destination}", so we match on the line itself.
+ * Map any tank reference SCADA might write — "BlendTank2A", "BT2A", "Tank2A",
+ * "Blend2A", "2A" — to a canonical short form ("2a"). The line tags use the
+ * abbreviated "BT2A" form in `requestedBy` while our MesBlendTankBatch.tankId
+ * stores the full "BlendTank2A" form, so we normalize both before comparing.
+ *
+ * Returns null for inputs that don't look like a blend-tank reference.
+ */
+function normalizeTankRef(raw) {
+  if (!raw || typeof raw !== 'string') return null
+  let s = raw.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
+  if (!s) return null
+  s = s.replace(/^blendtank/, '').replace(/^bt/, '').replace(/^blend/, '').replace(/^tank/, '')
+  return /^[12][ab]$/.test(s) ? s : null
+}
+
+/**
+ * Match a line reading to one active batch. Three paths in order:
+ *   1. UHT-direct virtual batches (tankId encoded as "{line}→{destination}")
+ *   2. Canonical-form match between reading.requestedBy and batch.tankId
+ *      (handles the BT2A ↔ BlendTank2A abbreviation)
+ *   3. Loose substring match on raw normalized strings (legacy path — kept
+ *      for any historian quirk we haven't seen yet, but the canonical form
+ *      should cover the real cases)
  */
 function findBatchForLine(reading, activeBatches) {
   for (const batch of activeBatches) {
     if (batch.tankId.startsWith(`${reading.line}→`)) return batch
   }
   if (!reading.requestedBy) return null
+
+  const destCanonical = normalizeTankRef(reading.requestedBy)
+  if (destCanonical) {
+    for (const batch of activeBatches) {
+      if (normalizeTankRef(batch.tankId) === destCanonical) return batch
+    }
+  }
+
   const destNorm = reading.requestedBy.toLowerCase().replace(/[^a-z0-9]/g, '')
   for (const batch of activeBatches) {
     const tankNorm = batch.tankId.toLowerCase().replace(/[^a-z0-9]/g, '')
