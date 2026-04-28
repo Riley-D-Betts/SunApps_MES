@@ -107,8 +107,21 @@ async function main() {
   //     workOrderIssue record's field). If our item isn't a component, PATCH
   //     to add it before issuing.
   const wo = await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`)
+  console.log(`WO ${RECOVERY.nsWorkOrderId} top-level keys:`, Object.keys(wo || {}).join(', '))
+  console.log(`  status:`, wo?.status, '| orderStatus:', wo?.orderStatus?.refName || wo?.orderStatus, '| built:', wo?.built)
+  // Try several shapes — different NS configurations expose the BOM under
+  // different field names. We'll log all candidates and use whichever works.
+  const candidates = ['component', 'componentList', 'items', 'item', 'componentInventoryDetail']
+  for (const k of candidates) {
+    const v = wo?.[k]
+    if (v) console.log(`  wo.${k} type:`, typeof v, 'has items:', !!v.items, 'length:', v.items?.length || (Array.isArray(v) ? v.length : '-'))
+  }
+  // Save full JSON for offline inspection
+  require('fs').writeFileSync('./wo-4333064.json', JSON.stringify(wo, null, 2))
+  console.log(`  full WO JSON saved to ./wo-4333064.json`)
+
   const bomItems = wo?.component?.items || []
-  console.log(`WO ${RECOVERY.nsWorkOrderId} current BOM has ${bomItems.length} component(s):`)
+  console.log(`WO ${RECOVERY.nsWorkOrderId} current BOM (component.items) has ${bomItems.length} component(s):`)
   for (const c of bomItems) console.log(`  line ${c.line} item ${c.item?.id || c.item?.refName} qty ${c.quantity}`)
 
   const targetIdStr = String(RECOVERY.nsItemId)
