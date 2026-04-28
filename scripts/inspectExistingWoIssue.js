@@ -12,24 +12,17 @@
 const core = require('../clients/coreClient')
 
 async function main() {
-  // 1. Find recent WorkOrderIssue records via SuiteQL
-  console.log('=== Looking for recent workOrderIssue transactions ===')
-  const sql = `
-    SELECT TOP 5 id, tranid, trandate, createddate
-    FROM transaction
-    WHERE type = 'WorkOrdIssue'
-    ORDER BY createddate DESC
-  `
-  const ql = await core.suiteQL(sql)
-  const rows = ql?.body?.items || ql?.items || []
-  console.log(`Found ${rows.length} record(s):`)
-  for (const r of rows) console.log(`  id=${r.id} tranid=${r.tranid} date=${r.createddate}`)
+  // 1. List recent workOrderIssue records via the REST collection endpoint
+  //    (suiteql goes through a Core API URL with a routing bug at the moment)
+  console.log('=== Listing workOrderIssue records ===')
+  const list = await core.netsuiteGet(`/record/v1/workOrderIssue?limit=5`)
+  const rows = list?.body?.items || list?.items || []
+  console.log(`Found ${rows.length} record(s) in the first page:`)
+  for (const r of rows) console.log(`  id=${r.id} self=${r.links?.[0]?.href || '-'}`)
 
   if (rows.length === 0) {
-    console.log('No workOrderIssue records found via SuiteQL. Trying transactionType field instead...')
-    const sql2 = `SELECT TOP 5 id, tranid, createddate FROM transaction WHERE type IN ('WorkOrdIss','WrkOrdIss','WorkOrderIssue') ORDER BY createddate DESC`
-    const ql2 = await core.suiteQL(sql2)
-    console.log(JSON.stringify(ql2?.body || ql2, null, 2).slice(0, 1500))
+    console.log('\nFull response (no items):')
+    console.log(JSON.stringify(list?.body || list, null, 2).slice(0, 2000))
     return
   }
 
