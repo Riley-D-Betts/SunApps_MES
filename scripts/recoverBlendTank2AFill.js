@@ -142,30 +142,22 @@ async function main() {
   }
   const lineNumber = targetLineRow?.line || (await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`))?.body?.item?.items?.find(c => String(c.item?.id) === targetIdStr)?.line
 
-  // Fire the issue via the transform endpoint. The transform tries to issue
-  // every BOM line by default — for lot-tracked components on the BOM we
-  // haven't pre-staged inventory for, that fails with "Please configure the
-  // inventory detail in line N". Manufacturing's pattern handles this by
-  // listing every BOM line explicitly, with quantity 0 for the ones we're
-  // not consuming. We just want line `lineNumber` at `RECOVERY.totalLbs`.
-  const refetched = (await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`))?.body
-  const allLines = (refetched?.item?.items || []).map(c => c.line)
+  // Use the direct endpoint, NOT the transform — transform tries to issue
+  // every BOM line and demands inventory detail on lot-tracked lines we
+  // haven't staged (vitamins, citrate). Direct endpoint only consumes what
+  // we list. Item 5415 is now on the BOM (line 6, qty 0), so the previous
+  // "Invalid value for 'item'" error should be resolved.
   const issueBody = {
-    custbody_tran_last_modified_by: 'system',
-    component: {
-      items: allLines.map(ln => ({
-        lineNumber: ln,
-        quantity: ln === lineNumber ? RECOVERY.totalLbs : 0,
-      })),
+    transaction: { id: RECOVERY.nsWorkOrderId },
+    item: {
+      items: [{
+        item: { id: targetIdStr },
+        quantity: RECOVERY.totalLbs,
+      }],
     },
   }
-  console.log(`Issue body component lines:`, issueBody.component.items.map(i => `L${i.lineNumber}=${i.quantity}`).join(', '))
-
-  console.log(`POSTing transform/workOrderIssue with line ${lineNumber} × ${RECOVERY.totalLbs} lb`)
-  const issueResp = await core.netsuitePost(
-    `/record/v1/workOrder/${RECOVERY.nsWorkOrderId}/!transform/workOrderIssue`,
-    issueBody
-  )
+  console.log(`POSTing direct workOrderIssue: item ${targetIdStr} × ${RECOVERY.totalLbs} lb against WO ${RECOVERY.nsWorkOrderId}`)
+  const issueResp = await core.netsuitePost('/record/v1/workOrderIssue', issueBody)
   let nsIssueId = issueResp?.body?.id || issueResp?.id || null
   if (!nsIssueId && issueResp?.headers?.location) {
     const m = String(issueResp.headers.location).match(/\/(\d+)$/)
