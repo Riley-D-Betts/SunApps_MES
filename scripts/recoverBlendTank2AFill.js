@@ -142,23 +142,16 @@ async function main() {
   }
   const lineNumber = targetLineRow?.line || (await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`))?.body?.item?.items?.find(c => String(c.item?.id) === targetIdStr)?.line
 
-  // Fire the issue via the transform endpoint — this is the pattern that
-  // works against SunTado's NS in SunApps_Manufacturing/services/workOrderService.js.
+  // Fire the issue via the transform endpoint. Item 5415 is itemType=Assembly
+  // (not bin-tracked) — passing binnumber gets rejected with "Invalid Field
+  // Value". Manufacturing's pattern only includes componentinventorydetail
+  // for lot-tracked items; for everything else, just lineNumber + quantity.
   const issueBody = {
     custbody_tran_last_modified_by: 'system',
     component: {
       items: [{
         lineNumber,
         quantity: RECOVERY.totalLbs,
-        componentinventorydetail: {
-          inventoryassignment: {
-            items: [{
-              status: 1,
-              quantity: RECOVERY.totalLbs,
-              binnumber: { id: RECOVERY.binId },
-            }],
-          },
-        },
       }],
     },
   }
