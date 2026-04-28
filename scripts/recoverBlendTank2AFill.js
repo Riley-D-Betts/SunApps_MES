@@ -142,19 +142,24 @@ async function main() {
   }
   const lineNumber = targetLineRow?.line || (await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`))?.body?.item?.items?.find(c => String(c.item?.id) === targetIdStr)?.line
 
-  // Fire the issue via the transform endpoint. Item 5415 is itemType=Assembly
-  // (not bin-tracked) — passing binnumber gets rejected with "Invalid Field
-  // Value". Manufacturing's pattern only includes componentinventorydetail
-  // for lot-tracked items; for everything else, just lineNumber + quantity.
+  // Fire the issue via the transform endpoint. The transform tries to issue
+  // every BOM line by default — for lot-tracked components on the BOM we
+  // haven't pre-staged inventory for, that fails with "Please configure the
+  // inventory detail in line N". Manufacturing's pattern handles this by
+  // listing every BOM line explicitly, with quantity 0 for the ones we're
+  // not consuming. We just want line `lineNumber` at `RECOVERY.totalLbs`.
+  const refetched = (await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`))?.body
+  const allLines = (refetched?.item?.items || []).map(c => c.line)
   const issueBody = {
     custbody_tran_last_modified_by: 'system',
     component: {
-      items: [{
-        lineNumber,
-        quantity: RECOVERY.totalLbs,
-      }],
+      items: allLines.map(ln => ({
+        lineNumber: ln,
+        quantity: ln === lineNumber ? RECOVERY.totalLbs : 0,
+      })),
     },
   }
+  console.log(`Issue body component lines:`, issueBody.component.items.map(i => `L${i.lineNumber}=${i.quantity}`).join(', '))
 
   console.log(`POSTing transform/workOrderIssue with line ${lineNumber} × ${RECOVERY.totalLbs} lb`)
   const issueResp = await core.netsuitePost(
