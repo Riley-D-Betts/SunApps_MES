@@ -142,28 +142,22 @@ async function main() {
   }
   const lineNumber = targetLineRow?.line || (await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`))?.body?.item?.items?.find(c => String(c.item?.id) === targetIdStr)?.line
 
-  // Use the direct endpoint, mirroring SunApps_Manufacturing's
-  // createWorkOrderIssueSimple. Body shape:
-  //   {
-  //     transaction: { id },
-  //     custbody_tran_last_modified_by: 'system',
-  //     [optional custbody_woi_line: { id: ... }],
-  //     item: { items: [{ item: { id }, quantity }] }
-  //   }
-  // Manufacturing always sets custbody_woi_line — it's the production line
-  // ID. We don't know what value to use for blend tanks, so trying without
-  // it first; if NS demands it, we'll get a more specific error.
+  // Use the direct endpoint with `line` referencing the WO's BOM sublist
+  // position. Without `line`, NS rejects with "Invalid value for ... 'item'"
+  // even when the inventory item IS on the BOM. The `line` ties the issue
+  // row to the specific BOM component being consumed.
   const issueBody = {
     transaction: { id: RECOVERY.nsWorkOrderId },
     custbody_tran_last_modified_by: 'system',
     item: {
       items: [{
+        line: lineNumber,                 // BOM line on the WO (e.g. 6)
         item: { id: targetIdStr },
         quantity: RECOVERY.totalLbs,
       }],
     },
   }
-  console.log(`POSTing direct workOrderIssue: item ${targetIdStr} × ${RECOVERY.totalLbs} lb against WO ${RECOVERY.nsWorkOrderId}`)
+  console.log(`POSTing direct workOrderIssue: line ${lineNumber}, item ${targetIdStr} × ${RECOVERY.totalLbs} lb against WO ${RECOVERY.nsWorkOrderId}`)
   console.log(`Body:`, JSON.stringify(issueBody))
   const issueResp = await core.netsuitePost('/record/v1/workOrderIssue', issueBody)
   let nsIssueId = issueResp?.body?.id || issueResp?.id || null
