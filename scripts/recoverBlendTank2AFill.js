@@ -92,30 +92,31 @@ async function main() {
   }
 
   // Fetch the WO's current BOM (always — diagnostics regardless of dry-run/confirm)
+  // The Core API wraps NS responses as { status, ok, body, headers, ... }
+  // so the actual NS payload is at .body, and the BOM sublist on a workOrder
+  // record is exposed under "item.items" (NOT "component.items" — that name
+  // applies to the workOrderIssue transform body, not the WO record itself).
   console.log('')
-  const wo = await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`)
-  console.log(`WO ${RECOVERY.nsWorkOrderId} top-level keys:`, Object.keys(wo || {}).join(', '))
-  console.log(`  status:`, wo?.status, '| orderStatus:', wo?.orderStatus?.refName || wo?.orderStatus, '| built:', wo?.built)
-  const candidates = ['component', 'componentList', 'items', 'item', 'componentInventoryDetail']
-  for (const k of candidates) {
-    const v = wo?.[k]
-    if (v) console.log(`  wo.${k} type:`, typeof v, 'has items:', !!v.items, 'length:', v.items?.length || (Array.isArray(v) ? v.length : '-'))
-  }
-  require('fs').writeFileSync('./wo-4333064.json', JSON.stringify(wo, null, 2))
-  console.log(`  full WO JSON saved to ./wo-4333064.json`)
+  const woWrap = await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`)
+  const wo = woWrap?.body || woWrap
+  console.log(`WO ${RECOVERY.nsWorkOrderId}: status=${wo?.status?.refName || wo?.status} orderStatus=${wo?.orderStatus?.refName} tranId=${wo?.tranId}`)
+  require('fs').writeFileSync('./wo-4333064.json', JSON.stringify(woWrap, null, 2))
 
-  const bomItems = wo?.component?.items || []
-  console.log(`WO ${RECOVERY.nsWorkOrderId} current BOM (component.items) has ${bomItems.length} component(s):`)
-  for (const c of bomItems) console.log(`  line ${c.line} item ${c.item?.id || c.item?.refName} qty ${c.quantity}`)
+  const bomItems = wo?.item?.items || []
+  console.log(`WO ${RECOVERY.nsWorkOrderId} BOM (item.items) has ${bomItems.length} component(s):`)
+  for (const c of bomItems) {
+    console.log(`  line ${c.line} item ${c.item?.id} (${c.item?.refName}) qty ${c.quantity}`)
+  }
 
   const targetIdStr = String(RECOVERY.nsItemId)
-  const onBom = bomItems.some(c => String(c.item?.id) === targetIdStr)
+  const targetLineRow = bomItems.find(c => String(c.item?.id) === targetIdStr)
+  const targetLineNumber = targetLineRow?.line || null
 
   console.log('')
-  console.log(`Plan: POST workOrderIssue { WO: ${RECOVERY.nsWorkOrderId}, item: ${RECOVERY.nsItemId}, qty: ${RECOVERY.totalLbs}, bin: ${RECOVERY.binId} }`)
+  console.log(`Plan: POST /record/v1/workOrder/${RECOVERY.nsWorkOrderId}/!transform/workOrderIssue`)
+  console.log(`      lineNumber: ${targetLineNumber || '(needs PATCH first)'}, qty: ${RECOVERY.totalLbs}`)
   console.log(`      Reassign ${orphans.length} orphan row(s) to batch ${RECOVERY.batchId}, mark completed`)
   console.log(`      Increment batch ${RECOVERY.batchId} cumulativeIssuedLbs by ${RECOVERY.totalLbs}`)
-  console.log(`      ${onBom ? 'Item already on BOM — no PATCH needed' : 'Item not on BOM — will PATCH to append'}`)
   console.log('')
 
   if (!confirm) {
@@ -123,44 +124,53 @@ async function main() {
     return
   }
 
-  if (!onBom) {
-    console.log(`Item ${RECOVERY.nsItemId} not on BOM — PATCHing WO to append it`)
-    // NS PATCH on sublists replaces the whole list, so we need the existing
-    // components + the new one. Strip read-only fields (links, refName, etc.)
-    // and keep just the writable shape.
+  if (!targetLineRow) {
+    console.log(`Item ${RECOVERY.nsItemId} not on BOM — PATCHing WO to append it (qty 0)`)
     const merged = bomItems.map(c => ({
       item: { id: String(c.item?.id) },
       quantity: c.quantity,
       ...(c.units?.id ? { units: { id: String(c.units.id) } } : {}),
     }))
     merged.push({ item: { id: targetIdStr }, quantity: 0 })
-    const patchBody = { component: { items: merged } }
-    const patchResult = await core.netsuitePatch(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}`, patchBody)
-    console.log(`  PATCH response: ${JSON.stringify(patchResult).slice(0, 200)}`)
-  } else {
-    console.log(`Item ${RECOVERY.nsItemId} already on BOM — skipping PATCH`)
+    await core.netsuitePatch(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}`, { item: { items: merged } })
+    console.log('  PATCH ok — re-fetching to get the new line number')
+    const refetched = (await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`))?.body
+    const newRow = (refetched?.item?.items || []).find(c => String(c.item?.id) === targetIdStr)
+    if (!newRow) throw new Error('PATCH succeeded but item still not on BOM')
+    console.log(`  added at line ${newRow.line}`)
+    targetLineRow.line = newRow.line   // unreachable since targetLineRow was null — kept for symmetry
   }
+  const lineNumber = targetLineRow?.line || (await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`))?.body?.item?.items?.find(c => String(c.item?.id) === targetIdStr)?.line
 
-  // 4b. Fire the NS workOrderIssue
-  const body = {
-    transaction: { id: RECOVERY.nsWorkOrderId },
-    item: {
+  // Fire the issue via the transform endpoint — this is the pattern that
+  // works against SunTado's NS in SunApps_Manufacturing/services/workOrderService.js.
+  const issueBody = {
+    custbody_tran_last_modified_by: 'system',
+    component: {
       items: [{
-        item: { id: targetIdStr },
+        lineNumber,
         quantity: RECOVERY.totalLbs,
-        inventorydetail: {
+        componentinventorydetail: {
           inventoryassignment: {
-            items: [{ quantity: RECOVERY.totalLbs, binnumber: { id: RECOVERY.binId } }],
+            items: [{
+              status: 1,
+              quantity: RECOVERY.totalLbs,
+              binnumber: { id: RECOVERY.binId },
+            }],
           },
         },
       }],
     },
   }
 
-  const nsResult = await core.netsuitePost('/record/v1/workOrderIssue', body)
-  let nsIssueId = nsResult?.id || null
-  if (!nsIssueId && nsResult?.headers?.location) {
-    const m = nsResult.headers.location.match(/\/(\d+)$/)
+  console.log(`POSTing transform/workOrderIssue with line ${lineNumber} × ${RECOVERY.totalLbs} lb`)
+  const issueResp = await core.netsuitePost(
+    `/record/v1/workOrder/${RECOVERY.nsWorkOrderId}/!transform/workOrderIssue`,
+    issueBody
+  )
+  let nsIssueId = issueResp?.body?.id || issueResp?.id || null
+  if (!nsIssueId && issueResp?.headers?.location) {
+    const m = String(issueResp.headers.location).match(/\/(\d+)$/)
     if (m) nsIssueId = m[1]
   }
   console.log(`NS issue posted: ${nsIssueId}`)
