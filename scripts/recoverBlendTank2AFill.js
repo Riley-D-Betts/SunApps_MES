@@ -102,12 +102,41 @@ async function main() {
     return
   }
 
-  // 4. Fire the NS workOrderIssue
+  // 4a. Fetch the WO's current BOM and check if our item is already there.
+  //     If not, PATCH the WO to add it (qty 0) — without this, NS rejects
+  //     the workOrderIssue with "Invalid value for ... 'item'".
+  const wo = await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`)
+  const bomItems = wo?.item?.items || []
+  console.log(`WO ${RECOVERY.nsWorkOrderId} current BOM has ${bomItems.length} component(s):`)
+  for (const c of bomItems) console.log(`  line ${c.line} item ${c.item?.id || c.item?.refName} qty ${c.quantity}`)
+
+  const targetIdStr = String(RECOVERY.nsItemId)
+  const onBom = bomItems.some(c => String(c.item?.id) === targetIdStr)
+
+  if (!onBom) {
+    console.log(`Item ${RECOVERY.nsItemId} not on BOM — PATCHing WO to append it`)
+    // PATCH replaces the sublist, so we need the existing items + the new one.
+    // Strip read-only fields NS rejects on write (links, refName, etc.) and
+    // include just the canonical { item, quantity, units } shape.
+    const merged = bomItems.map(c => ({
+      item: { id: String(c.item?.id) },
+      quantity: c.quantity,
+      ...(c.units?.id ? { units: { id: String(c.units.id) } } : {}),
+    }))
+    merged.push({ item: { id: targetIdStr }, quantity: 0 })
+    const patchBody = { item: { items: merged } }
+    const patchResult = await core.netsuitePatch(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}`, patchBody)
+    console.log(`  PATCH response: ${JSON.stringify(patchResult).slice(0, 200)}`)
+  } else {
+    console.log(`Item ${RECOVERY.nsItemId} already on BOM — skipping PATCH`)
+  }
+
+  // 4b. Fire the NS workOrderIssue
   const body = {
     transaction: { id: RECOVERY.nsWorkOrderId },
     item: {
       items: [{
-        item: { id: RECOVERY.nsItemId },
+        item: { id: targetIdStr },
         quantity: RECOVERY.totalLbs,
         inventorydetail: {
           inventoryassignment: {

@@ -39,6 +39,10 @@ function netsuitePost(path, body) {
   return request('POST', `/api/netsuite${path}`, body)
 }
 
+function netsuitePatch(path, body) {
+  return request('PATCH', `/api/netsuite${path}`, body)
+}
+
 function suiteQL(query) {
   return netsuitePost('/suiteql', { q: query })
 }
@@ -54,6 +58,7 @@ function sendStagingNotification(title, message) {
 module.exports = {
   netsuiteGet,
   netsuitePost,
+  netsuitePatch,
   suiteQL,
   callRestlet,
   sendStagingNotification,
