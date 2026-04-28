@@ -142,24 +142,40 @@ async function main() {
   }
   const lineNumber = targetLineRow?.line || (await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`))?.body?.item?.items?.find(c => String(c.item?.id) === targetIdStr)?.line
 
-  // Use the direct endpoint with `line` referencing the WO's BOM sublist
-  // position. Without `line`, NS rejects with "Invalid value for ... 'item'"
-  // even when the inventory item IS on the BOM. The `line` ties the issue
-  // row to the specific BOM component being consumed.
+  // Use the transform endpoint with the body shape NS actually accepts at
+  // SunTado: `component.items[]` keyed by `lineNumber` (NOT `item.items[]` —
+  // that field on a workOrderIssue refers to the FG/assembly singular
+  // reference, which is why every `item: {...}` body we sent got rejected
+  // with "Invalid value for ... 'item'").
+  //
+  // Also: for lot-tracked BOM lines (any item under
+  // /lotnumberedinventoryitem/{id} in the WO's GET response), NS demands a
+  // componentinventorydetail block even at qty 0. Empty inventoryassignment
+  // items satisfies the "you must declare your intent" validation.
+  const refetched = (await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`))?.body
+  const allBom = refetched?.item?.items || []
+  const componentItems = allBom.map(c => {
+    const isThisLine = c.line === lineNumber
+    const qty = isThisLine ? RECOVERY.totalLbs : 0
+    const isLotTracked = String(c.item?.links?.[0]?.href || '').includes('/lotnumberedinventoryitem/')
+    const entry = { lineNumber: c.line, quantity: qty }
+    if (isLotTracked && qty === 0) {
+      entry.componentinventorydetail = { inventoryassignment: { items: [] } }
+    }
+    return entry
+  })
   const issueBody = {
-    transaction: { id: RECOVERY.nsWorkOrderId },
     custbody_tran_last_modified_by: 'system',
-    item: {
-      items: [{
-        line: lineNumber,                 // BOM line on the WO (e.g. 6)
-        item: { id: targetIdStr },
-        quantity: RECOVERY.totalLbs,
-      }],
-    },
+    component: { items: componentItems },
   }
-  console.log(`POSTing direct workOrderIssue: line ${lineNumber}, item ${targetIdStr} × ${RECOVERY.totalLbs} lb against WO ${RECOVERY.nsWorkOrderId}`)
-  console.log(`Body:`, JSON.stringify(issueBody))
-  const issueResp = await core.netsuitePost('/record/v1/workOrderIssue', issueBody)
+  console.log(`POSTing transform/workOrderIssue body:`)
+  for (const i of componentItems) {
+    console.log(`  L${i.lineNumber}=${i.quantity}${i.componentinventorydetail ? ' (+empty inv detail)' : ''}`)
+  }
+  const issueResp = await core.netsuitePost(
+    `/record/v1/workOrder/${RECOVERY.nsWorkOrderId}/!transform/workOrderIssue`,
+    issueBody
+  )
   let nsIssueId = issueResp?.body?.id || issueResp?.id || null
   if (!nsIssueId && issueResp?.headers?.location) {
     const m = String(issueResp.headers.location).match(/\/(\d+)$/)
