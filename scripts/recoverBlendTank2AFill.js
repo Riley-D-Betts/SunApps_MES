@@ -152,13 +152,14 @@ async function main() {
   // Note `item` is a STRING (not { id: ... }) and `component` is the sublist
   // field name on a workOrderIssue (NOT `item` — that's the FG reference).
   const issueBody = {
-    transaction: { id: RECOVERY.nsWorkOrderId },        // parent WO (request side)
+    transaction: { id: RECOVERY.nsWorkOrderId },
     custbody_tran_last_modified_by: 'system',
-    component: {                                         // sublist field name
+    component: {
       items: [{
-        item: targetIdStr,                               // bare string id
+        item: targetIdStr,
         lineNumber,
         quantity: RECOVERY.totalLbs,
+        Status: '1',
       }],
     },
   }
