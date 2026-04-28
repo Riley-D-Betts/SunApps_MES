@@ -91,32 +91,16 @@ async function main() {
     console.log(`  id=${o.id} batchId=${o.blendTankBatchId} status=${o.status} totalLbs=${o.totalLbs} resetTime=${o.resetTime}`)
   }
 
+  // Fetch the WO's current BOM (always — diagnostics regardless of dry-run/confirm)
   console.log('')
-  console.log(`Plan: POST workOrderIssue { WO: ${RECOVERY.nsWorkOrderId}, item: ${RECOVERY.nsItemId}, qty: ${RECOVERY.totalLbs}, bin: ${RECOVERY.binId} }`)
-  console.log(`      Reassign ${orphans.length} orphan row(s) to batch ${RECOVERY.batchId}, mark completed`)
-  console.log(`      Increment batch ${RECOVERY.batchId} cumulativeIssuedLbs by ${RECOVERY.totalLbs}`)
-  console.log('')
-
-  if (!confirm) {
-    console.log('DRY RUN. Re-run with --confirm to actually post to NetSuite + update DB.')
-    return
-  }
-
-  // 4a. Fetch the WO's current BOM and check if our item is already there.
-  //     The BOM sublist on workOrder is "component" (not "item" — that's the
-  //     workOrderIssue record's field). If our item isn't a component, PATCH
-  //     to add it before issuing.
   const wo = await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`)
   console.log(`WO ${RECOVERY.nsWorkOrderId} top-level keys:`, Object.keys(wo || {}).join(', '))
   console.log(`  status:`, wo?.status, '| orderStatus:', wo?.orderStatus?.refName || wo?.orderStatus, '| built:', wo?.built)
-  // Try several shapes — different NS configurations expose the BOM under
-  // different field names. We'll log all candidates and use whichever works.
   const candidates = ['component', 'componentList', 'items', 'item', 'componentInventoryDetail']
   for (const k of candidates) {
     const v = wo?.[k]
     if (v) console.log(`  wo.${k} type:`, typeof v, 'has items:', !!v.items, 'length:', v.items?.length || (Array.isArray(v) ? v.length : '-'))
   }
-  // Save full JSON for offline inspection
   require('fs').writeFileSync('./wo-4333064.json', JSON.stringify(wo, null, 2))
   console.log(`  full WO JSON saved to ./wo-4333064.json`)
 
@@ -126,6 +110,18 @@ async function main() {
 
   const targetIdStr = String(RECOVERY.nsItemId)
   const onBom = bomItems.some(c => String(c.item?.id) === targetIdStr)
+
+  console.log('')
+  console.log(`Plan: POST workOrderIssue { WO: ${RECOVERY.nsWorkOrderId}, item: ${RECOVERY.nsItemId}, qty: ${RECOVERY.totalLbs}, bin: ${RECOVERY.binId} }`)
+  console.log(`      Reassign ${orphans.length} orphan row(s) to batch ${RECOVERY.batchId}, mark completed`)
+  console.log(`      Increment batch ${RECOVERY.batchId} cumulativeIssuedLbs by ${RECOVERY.totalLbs}`)
+  console.log(`      ${onBom ? 'Item already on BOM — no PATCH needed' : 'Item not on BOM — will PATCH to append'}`)
+  console.log('')
+
+  if (!confirm) {
+    console.log('DRY RUN. Re-run with --confirm to actually post to NetSuite + update DB.')
+    return
+  }
 
   if (!onBom) {
     console.log(`Item ${RECOVERY.nsItemId} not on BOM — PATCHing WO to append it`)
