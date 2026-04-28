@@ -7,8 +7,10 @@ let lastSummary = null
 
 /**
  * Tick that drives blend-tank WO issues + completions on a fixed cadence.
- * Production runs every 5 min (TICK_CRON='*/5 * * * *'); sandbox can drop to
- * '*/30 * * * * *' for testing. Each tick:
+ * Cadence is governed by TICK_CRON (see config/index.js — production every
+ * 5 min; sandbox can drop to every 30 sec for testing).
+ *
+ * Each tick:
  *   1. Finds active blend-tank batches.
  *   2. For each, issues a workOrderIssue per-line for the totalizer delta
  *      since the previous tick.
