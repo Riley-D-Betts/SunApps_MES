@@ -103,10 +103,11 @@ async function main() {
   }
 
   // 4a. Fetch the WO's current BOM and check if our item is already there.
-  //     If not, PATCH the WO to add it (qty 0) — without this, NS rejects
-  //     the workOrderIssue with "Invalid value for ... 'item'".
+  //     The BOM sublist on workOrder is "component" (not "item" — that's the
+  //     workOrderIssue record's field). If our item isn't a component, PATCH
+  //     to add it before issuing.
   const wo = await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`)
-  const bomItems = wo?.item?.items || []
+  const bomItems = wo?.component?.items || []
   console.log(`WO ${RECOVERY.nsWorkOrderId} current BOM has ${bomItems.length} component(s):`)
   for (const c of bomItems) console.log(`  line ${c.line} item ${c.item?.id || c.item?.refName} qty ${c.quantity}`)
 
@@ -115,16 +116,16 @@ async function main() {
 
   if (!onBom) {
     console.log(`Item ${RECOVERY.nsItemId} not on BOM — PATCHing WO to append it`)
-    // PATCH replaces the sublist, so we need the existing items + the new one.
-    // Strip read-only fields NS rejects on write (links, refName, etc.) and
-    // include just the canonical { item, quantity, units } shape.
+    // NS PATCH on sublists replaces the whole list, so we need the existing
+    // components + the new one. Strip read-only fields (links, refName, etc.)
+    // and keep just the writable shape.
     const merged = bomItems.map(c => ({
       item: { id: String(c.item?.id) },
       quantity: c.quantity,
       ...(c.units?.id ? { units: { id: String(c.units.id) } } : {}),
     }))
     merged.push({ item: { id: targetIdStr }, quantity: 0 })
-    const patchBody = { item: { items: merged } }
+    const patchBody = { component: { items: merged } }
     const patchResult = await core.netsuitePatch(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}`, patchBody)
     console.log(`  PATCH response: ${JSON.stringify(patchResult).slice(0, 200)}`)
   } else {
