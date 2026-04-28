@@ -160,7 +160,14 @@ async function main() {
     const isLotTracked = String(c.item?.links?.[0]?.href || '').includes('/lotnumberedinventoryitem/')
     const entry = { lineNumber: c.line, quantity: qty }
     if (isLotTracked && qty === 0) {
-      entry.componentinventorydetail = { inventoryassignment: { items: [] } }
+      // NS demands at least one inventoryassignment entry on lot-tracked lines.
+      // A single placeholder with quantity 0 + status=1 (Good) satisfies the
+      // sublist-not-empty validation without actually consuming any lot.
+      entry.componentinventorydetail = {
+        inventoryassignment: {
+          items: [{ inventoryStatus: { id: '1' }, quantity: 0 }],
+        },
+      }
     }
     return entry
   })
