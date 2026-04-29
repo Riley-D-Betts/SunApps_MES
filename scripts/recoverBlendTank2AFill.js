@@ -146,9 +146,23 @@ async function main() {
       bomItems.push(newRow)
     }
 
+    const targetLine = (targetLineRow || bomItems.find(c => String(c.item?.id) === targetIdStr)).line
     const issueBody = {
       component: {
-        items: [{ lineNumber: (targetLineRow || bomItems.find(c => String(c.item?.id) === targetIdStr)).line, quantity: RECOVERY.totalLbs }],
+        items: bomItems.map(c => {
+          if (c.line === targetLine) {
+            return {
+              lineNumber: c.line,
+              quantity: RECOVERY.totalLbs,
+              componentinventorydetail: {
+                inventoryassignment: {
+                  items: [{ quantity: RECOVERY.totalLbs, binnumber: String(RECOVERY.binId) }],
+                },
+              },
+            }
+          }
+          return { lineNumber: c.line, quantity: 0 }
+        }),
       },
     }
     console.log(`POSTing transform/workOrderIssue body:`, JSON.stringify(issueBody))

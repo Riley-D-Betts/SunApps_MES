@@ -5,6 +5,60 @@ const lineMapper = require('./lineIngredientMapper')
 const config = require('../config')
 const db = require('../models')
 
+// Per-process BOM cache keyed by nsWorkOrderId. Fetched once per WO and reused
+// across ticks. Cleared when the batch closes.
+const _bomCache = new Map()
+
+async function fetchWoBomLines(nsWorkOrderId) {
+  if (_bomCache.has(nsWorkOrderId)) return _bomCache.get(nsWorkOrderId)
+  const wrap = await core.netsuiteGet(`/record/v1/workOrder/${nsWorkOrderId}?expandSubResources=true`)
+  const wo = wrap?.body || wrap
+  const lines = (wo?.item?.items || []).map(c => ({ line: c.line, itemId: String(c.item?.id) }))
+  _bomCache.set(nsWorkOrderId, lines)
+  return lines
+}
+
+function clearBomCache(nsWorkOrderId) {
+  _bomCache.delete(nsWorkOrderId)
+}
+
+// Build the transform body for a workOrderIssue that issues qty lbs of one
+// non-lot-tracked item from a specific bin. All other BOM lines are zeroed out
+// so the transform doesn't auto-fill them and demand lot detail.
+function buildWoIssueBody(bomLines, targetItemId, quantity, binId) {
+  const targetIdStr = String(targetItemId)
+  const binIdStr = String(binId)
+  return {
+    component: {
+      items: bomLines.map(c => {
+        if (c.itemId === targetIdStr) {
+          return {
+            lineNumber: c.line,
+            quantity,
+            componentinventorydetail: {
+              inventoryassignment: {
+                items: [{ quantity, binnumber: binIdStr }],
+              },
+            },
+          }
+        }
+        return { lineNumber: c.line, quantity: 0 }
+      }),
+    },
+  }
+}
+
+function extractNsIssueId(nsResult) {
+  if (nsResult?.body?.id) return String(nsResult.body.id)
+  if (nsResult?.id) return String(nsResult.id)
+  const loc = nsResult?.headers?.location
+  if (loc) {
+    const m = String(loc).match(/\/(\d+)$/)
+    if (m) return m[1]
+  }
+  return null
+}
+
 async function processWOStart(data) {
   const { tankId, productName, batchSize, fromEntName, toEntName, detectedAt } = data
 
@@ -176,6 +230,7 @@ async function processWOEnd(data) {
   await record.reload()
 
   await record.update({ status: 'completed', completedAt: detectedAt || new Date() })
+  if (record.nsWorkOrderId) clearBomCache(record.nsWorkOrderId)
   await db.MesProcessingLog.create({
     eventType: 'blend_tank_wo_complete',
     sourceId: `${tankId}:${record.productName}`,
@@ -300,30 +355,13 @@ async function processLineFlow(data) {
     return { success: true, inflowId: inflowRecord.id, status: 'pending_ns' }
   }
 
-  const body = {
-    transaction: { id: targetBatch.nsWorkOrderId },
-    item: {
-      items: [{
-        item: { id: component.id },
-        quantity: delta,
-        inventorydetail: {
-          inventoryassignment: {
-            items: [{ quantity: delta, binnumber: { id: binId } }],
-          },
-        },
-      }],
-    },
-  }
+  const bomLines = await fetchWoBomLines(targetBatch.nsWorkOrderId)
+  const body = buildWoIssueBody(bomLines, component.id, delta, binId)
 
   try {
     console.log(`[BlendTankMesService] tail-catcher ${line} → WO ${targetBatch.nsWorkOrderId} (${targetBatch.tankId}): ${delta.toFixed(1)} lb (peak ${totalLbs.toFixed(1)}, tick had issued ${lastIssued.toFixed(1)})`)
-    const nsResult = await core.netsuitePost('/record/v1/workOrderIssue', body)
-
-    let nsIssueId = nsResult?.id || null
-    if (!nsIssueId && nsResult?.headers?.location) {
-      const m = nsResult.headers.location.match(/\/(\d+)$/)
-      if (m) nsIssueId = m[1]
-    }
+    const nsResult = await core.netsuitePost(`/record/v1/workOrder/${targetBatch.nsWorkOrderId}/!transform/workOrderIssue`, body)
+    const nsIssueId = extractNsIssueId(nsResult)
 
     await inflowRecord.update({ nsIssueId: nsIssueId ? String(nsIssueId) : null, status: 'completed' })
     // Bring the pipe state up to the peak so the next tick doesn't re-issue
@@ -605,30 +643,13 @@ async function tickIssuesForBatch(batch, lineReadings) {
       continue
     }
 
-    const body = {
-      transaction: { id: batch.nsWorkOrderId },
-      item: {
-        items: [{
-          item: { id: component.id },
-          quantity: delta,
-          inventorydetail: {
-            inventoryassignment: {
-              items: [{ quantity: delta, binnumber: { id: binId } }],
-            },
-          },
-        }],
-      },
-    }
+    const bomLines = await fetchWoBomLines(batch.nsWorkOrderId)
+    const body = buildWoIssueBody(bomLines, component.id, delta, binId)
 
     try {
       console.log(`[BlendTankMesService] tick issue ${reading.line} → WO ${batch.nsWorkOrderId} (${batch.tankId}): ${delta.toFixed(1)} lb "${reading.productName || component.name}" (NS ${component.id}, ${component.resolvedFrom})`)
-      const nsResult = await core.netsuitePost('/record/v1/workOrderIssue', body)
-
-      let nsIssueId = nsResult?.id || null
-      if (!nsIssueId && nsResult?.headers?.location) {
-        const m = nsResult.headers.location.match(/\/(\d+)$/)
-        if (m) nsIssueId = m[1]
-      }
+      const nsResult = await core.netsuitePost(`/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderIssue`, body)
+      const nsIssueId = extractNsIssueId(nsResult)
 
       // Persist baseline + cumulative totals only after NS confirms the issue
       await pipeState.update({ lastIssuedTotalizerLbs: reading.totalizerLbs, lastIssueAt: observedAt })
