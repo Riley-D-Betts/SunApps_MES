@@ -14,6 +14,7 @@ async function fetchWoBomLines(nsWorkOrderId) {
   const wrap = await core.netsuiteGet(`/record/v1/workOrder/${nsWorkOrderId}?expandSubResources=true`)
   const wo = wrap?.body || wrap
   const lines = (wo?.item?.items || []).map(c => ({ line: c.line, itemId: String(c.item?.id) }))
+  console.log(`[BlendTankMesService] BOM for WO ${nsWorkOrderId}: ${lines.map(l => `line${l.line}=item${l.itemId}`).join(', ') || '(empty)'}`)
   _bomCache.set(nsWorkOrderId, lines)
   return lines
 }
@@ -156,7 +157,8 @@ async function processWOStart(data) {
         nsWorkOrderId = match[1]
         try {
           const woDetail = await core.netsuiteGet(`/record/v1/workOrder/${nsWorkOrderId}?fields=tranId`)
-          nsWorkOrderNumber = woDetail?.tranId || woDetail?.tranid || null
+          const woBody = woDetail?.body || woDetail
+          nsWorkOrderNumber = woBody?.tranId || woBody?.tranid || null
         } catch (e) {
           console.warn(`[BlendTankMesService] Could not fetch WO details: ${e.message}`)
         }
