@@ -738,7 +738,7 @@ async function tickCompletionForBatch(batch) {
       quantity: Math.round(chunkQty * 1000) / 1000,
       receiptInventoryNumber: `${lotBase}-${String(lotIdx).padStart(3, '0')}`,
     }
-    if (completionBinId) entry.binnumber = { id: completionBinId }
+    if (completionBinId) entry.binnumber = String(completionBinId)
     assignmentItems.push(entry)
     remaining -= chunkQty
     lotIdx++
