@@ -719,26 +719,11 @@ async function tickCompletionForBatch(batch) {
 
   // Same destination-bin logic as processWOEnd: UHT-direct WOs land in a surge
   // tank (toEntName = ST81-84); blend tanks land in the tank itself.
-  const completionDest = (batch.toEntName && /^ST\d+$/.test(batch.toEntName))
-    ? batch.toEntName
-    : batch.tankId
-  const completionBinId = itemConfig.getBinId(completionDest)
-  const lotNumber = `${batch.tankId.replace(/[→\s]/g, '_')}-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`
-
-  const completionItem = { quantity: target, receiptInventoryNumber: lotNumber }
-  if (completionBinId) {
-    completionItem.binnumber = { id: completionBinId }
-  } else {
-    console.warn(`[BlendTankMesService] tick completion: no NS bin for "${completionDest}" — completing without bin`)
-  }
-
+  // Omit inventorydetail — let NS auto-assign lot/bin. If the FG item requires
+  // explicit lot assignment NS will return "configure inventory detail" and we
+  // can add it back with chunked quantities to avoid the per-lot pallet limit.
   const body = {
     quantity: target,
-    inventorydetail: {
-      inventoryassignment: {
-        items: [completionItem],
-      },
-    },
   }
 
   try {
