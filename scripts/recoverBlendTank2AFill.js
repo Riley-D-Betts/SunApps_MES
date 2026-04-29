@@ -141,14 +141,63 @@ async function main() {
     bomItems.push(newRow)
   }
 
-  // Build component list: include ALL BOM lines so the transform doesn't try
-  // to auto-resolve lot detail for non-issued lines. Only the target line gets
-  // the actual qty; everything else is zeroed out. This matches the shape used
-  // by createBatchWorkOrderIssue in SunApps_Manufacturing.
-  const componentItems = bomItems.map(c => ({
-    lineNumber: c.line,
-    quantity: String(c.item?.id) === targetIdStr ? RECOVERY.totalLbs : 0,
-  }))
+  // For lot-tracked BOM lines we're zeroing out, NS still requires inventory
+  // detail. Look up one valid lot per lot-tracked item so we can reference it
+  // with quantity 0 (no actual inventory movement).
+  async function findAnyLotId(itemId) {
+    try {
+      const res = await core.suiteQL(
+        `SELECT id FROM inventoryNumber WHERE item = ${itemId} AND quantityonhand > 0 ROWNUM 1`
+      )
+      const rows = res?.body?.items || res?.items || []
+      return rows[0]?.id ? String(rows[0].id) : null
+    } catch (e) {
+      console.warn(`  SuiteQL lot lookup for item ${itemId} failed: ${e.message}`)
+      return null
+    }
+  }
+
+  const componentItems = []
+  for (const c of bomItems) {
+    const lineItemId = String(c.item?.id)
+    const isTarget = lineItemId === targetIdStr
+    const entry = { lineNumber: c.line, quantity: isTarget ? RECOVERY.totalLbs : 0 }
+
+    if (!isTarget && c.isSerialized) {
+      // lot-tracked flag from NS BOM row
+      const lotId = await findAnyLotId(lineItemId)
+      if (lotId) {
+        entry.componentinventorydetail = {
+          inventoryassignment: { items: [{ status: 1, quantity: 0, issueinventorynumber: lotId }] }
+        }
+        console.log(`  line ${c.line} item ${lineItemId}: lot-tracked (isSerialized), using lot ${lotId}`)
+      } else {
+        console.warn(`  line ${c.line} item ${lineItemId}: lot-tracked but no inventory found — NS may reject`)
+      }
+    }
+
+    componentItems.push(entry)
+  }
+
+  // If NS still complains about a specific line, hard-code it as lot-tracked here:
+  // (run dry-run to see which lines NS flags)
+  const LOT_TRACKED_ITEMS = ['530', '7235']  // Vitamin A, Trisodium Citrate — known lot-tracked
+  for (const entry of componentItems) {
+    if (entry.componentinventorydetail) continue  // already handled
+    const bomRow = bomItems.find(c => c.line === entry.lineNumber)
+    const lineItemId = String(bomRow?.item?.id)
+    if (LOT_TRACKED_ITEMS.includes(lineItemId) && entry.quantity === 0) {
+      const lotId = await findAnyLotId(lineItemId)
+      if (lotId) {
+        entry.componentinventorydetail = {
+          inventoryassignment: { items: [{ status: 1, quantity: 0, issueinventorynumber: lotId }] }
+        }
+        console.log(`  line ${entry.lineNumber} item ${lineItemId}: lot-tracked (hardcoded), using lot ${lotId}`)
+      } else {
+        console.warn(`  line ${entry.lineNumber} item ${lineItemId}: no inventory found — NS may reject`)
+      }
+    }
+  }
 
   const issueBody = {
     custbody_tran_last_modified_by: 'system',
