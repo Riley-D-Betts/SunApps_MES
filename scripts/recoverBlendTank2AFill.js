@@ -39,6 +39,8 @@ const db = require('../models')
 const core = require('../clients/coreClient')
 
 const confirm = process.argv.includes('--confirm')
+const manualIssueArg = process.argv.find(a => a.startsWith('--nsIssueId='))
+const manualNsIssueId = manualIssueArg ? manualIssueArg.split('=')[1] : null
 
 const RECOVERY = {
   batchId: 1726,
@@ -119,47 +121,50 @@ async function main() {
   console.log(`      Increment batch ${RECOVERY.batchId} cumulativeIssuedLbs by ${RECOVERY.totalLbs}`)
   console.log('')
 
-  if (!confirm) {
-    console.log('DRY RUN. Re-run with --confirm to actually post to NetSuite + update DB.')
+  if (!confirm && !manualNsIssueId) {
+    console.log('DRY RUN. Re-run with --confirm to POST to NetSuite, or --nsIssueId=<id> to skip the POST and reconcile a manually-created issue.')
     return
   }
 
-  if (!targetLineRow) {
-    console.log(`Item ${RECOVERY.nsItemId} not on BOM — PATCHing WO to append it (qty 0)`)
-    const merged = bomItems.map(c => ({
-      item: { id: String(c.item?.id) },
-      quantity: c.quantity,
-      ...(c.units?.id ? { units: { id: String(c.units.id) } } : {}),
-    }))
-    merged.push({ item: { id: targetIdStr }, quantity: 0 })
-    await core.netsuitePatch(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}`, { item: { items: merged } })
-    console.log('  PATCH ok — re-fetching to get the new line number')
-    const refetched = (await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`))?.body
-    const newRow = (refetched?.item?.items || []).find(c => String(c.item?.id) === targetIdStr)
-    if (!newRow) throw new Error('PATCH succeeded but item still not on BOM')
-    console.log(`  added at line ${newRow.line}`)
-    bomItems.push(newRow)
-  }
+  let nsIssueId = manualNsIssueId || null
 
-  // Raw milk is not lot-tracked — a single-line component body is all NS needs.
-  // Other BOM lines (vitamins, citrate) are omitted; the transform only processes
-  // what we explicitly list.
-  const issueBody = {
-    component: {
-      items: [{ lineNumber: targetLineRow.line, quantity: RECOVERY.totalLbs }],
-    },
+  if (!nsIssueId) {
+    if (!targetLineRow) {
+      console.log(`Item ${RECOVERY.nsItemId} not on BOM — PATCHing WO to append it (qty 0)`)
+      const merged = bomItems.map(c => ({
+        item: { id: String(c.item?.id) },
+        quantity: c.quantity,
+        ...(c.units?.id ? { units: { id: String(c.units.id) } } : {}),
+      }))
+      merged.push({ item: { id: targetIdStr }, quantity: 0 })
+      await core.netsuitePatch(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}`, { item: { items: merged } })
+      console.log('  PATCH ok — re-fetching to get the new line number')
+      const refetched = (await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`))?.body
+      const newRow = (refetched?.item?.items || []).find(c => String(c.item?.id) === targetIdStr)
+      if (!newRow) throw new Error('PATCH succeeded but item still not on BOM')
+      console.log(`  added at line ${newRow.line}`)
+      bomItems.push(newRow)
+    }
+
+    const issueBody = {
+      component: {
+        items: [{ lineNumber: (targetLineRow || bomItems.find(c => String(c.item?.id) === targetIdStr)).line, quantity: RECOVERY.totalLbs }],
+      },
+    }
+    console.log(`POSTing transform/workOrderIssue body:`, JSON.stringify(issueBody))
+    const issueResp = await core.netsuitePost(
+      `/record/v1/workOrder/${RECOVERY.nsWorkOrderId}/!transform/workOrderIssue`,
+      issueBody
+    )
+    nsIssueId = issueResp?.body?.id || issueResp?.id || null
+    if (!nsIssueId && issueResp?.headers?.location) {
+      const m = String(issueResp.headers.location).match(/\/(\d+)$/)
+      if (m) nsIssueId = m[1]
+    }
+    console.log(`NS issue posted: ${nsIssueId}`)
+  } else {
+    console.log(`Using manually-created NS issue id: ${nsIssueId}`)
   }
-  console.log(`POSTing transform/workOrderIssue body:`, JSON.stringify(issueBody))
-  const issueResp = await core.netsuitePost(
-    `/record/v1/workOrder/${RECOVERY.nsWorkOrderId}/!transform/workOrderIssue`,
-    issueBody
-  )
-  let nsIssueId = issueResp?.body?.id || issueResp?.id || null
-  if (!nsIssueId && issueResp?.headers?.location) {
-    const m = String(issueResp.headers.location).match(/\/(\d+)$/)
-    if (m) nsIssueId = m[1]
-  }
-  console.log(`NS issue posted: ${nsIssueId}`)
 
   // 5. Update orphans → completed
   for (const o of orphans) {
