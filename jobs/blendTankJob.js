@@ -5,16 +5,20 @@ const statusStore = require('../services/statusStore')
 const WEIGHT_THRESHOLD_LBS = 500
 const EMPTY_THRESHOLD_LBS = 100
 const LINE_RESET_THRESHOLD_LBS = 100
+// Minimum time a batch must be alive before the "tank emptied" BATCH END can fire.
+// Prevents a false end when the scale reads 0 at the start of a fill (milk not yet
+// in the tank) before the WO creation has finished and before any real weight lands.
+const MIN_BATCH_DURATION_MS = 120_000
 
 function validStr(val) {
   return val && val !== 'None' && val !== 'none' ? val : null
 }
 
 const tankState = {
-  BlendTank1A: { productName: null, batchActive: false, seeded: false },
-  BlendTank1B: { productName: null, batchActive: false, seeded: false },
-  BlendTank2A: { productName: null, batchActive: false, seeded: false },
-  BlendTank2B: { productName: null, batchActive: false, seeded: false },
+  BlendTank1A: { productName: null, batchActive: false, seeded: false, batchStartedAt: null },
+  BlendTank1B: { productName: null, batchActive: false, seeded: false, batchStartedAt: null },
+  BlendTank2A: { productName: null, batchActive: false, seeded: false, batchStartedAt: null },
+  BlendTank2B: { productName: null, batchActive: false, seeded: false, batchStartedAt: null },
 }
 
 const lineState = {
@@ -54,10 +58,15 @@ async function run(historian) {
       const hadProduct = !!prev.productName
       const hasProduct = !!validStr(productName)
 
-      if (prev.batchActive && hasProduct && weightLbs < EMPTY_THRESHOLD_LBS) {
+      const batchAgeMs = prev.batchStartedAt ? Date.now() - prev.batchStartedAt : Infinity
+      if (prev.batchActive && hasProduct && weightLbs < EMPTY_THRESHOLD_LBS && batchAgeMs < MIN_BATCH_DURATION_MS) {
+        console.log(`[BlendTankJob] Suppressing false BATCH END on ${tankId}: weight=${Math.round(weightLbs)} lb but batch only ${Math.round(batchAgeMs / 1000)}s old`)
+      }
+      if (prev.batchActive && hasProduct && weightLbs < EMPTY_THRESHOLD_LBS && batchAgeMs >= MIN_BATCH_DURATION_MS) {
         console.log(`[BlendTankJob] BATCH END (tank emptied) on ${tankId}: "${prev.productName}" (${Math.round(weightLbs)} lb)`)
         statusStore.pushEvent('blendTank.batchEnd', `${tankId}: batch ended (emptied)`, { tankId, productName: prev.productName, weightLbs, reason: 'emptied' })
         prev.batchActive = false
+        prev.batchStartedAt = null
         try {
           await blendTankMesService.processWOEnd({ tankId, productName: prev.productName, detectedAt: new Date().toISOString() })
         } catch (err) {
@@ -70,6 +79,7 @@ async function run(historian) {
           console.log(`[BlendTankJob] BATCH END (product change) on ${tankId}: "${prev.productName}"`)
           statusStore.pushEvent('blendTank.batchEnd', `${tankId}: batch ended (product change)`, { tankId, productName: prev.productName, reason: 'product_change' })
           prev.batchActive = false
+          prev.batchStartedAt = null
           try {
             await blendTankMesService.processWOEnd({ tankId, productName: prev.productName, detectedAt: new Date().toISOString() })
           } catch (err) {
@@ -80,6 +90,7 @@ async function run(historian) {
         console.log(`[BlendTankJob] BATCH START detected on ${tankId}: "${productName}"`)
         statusStore.pushEvent('blendTank.batchStart', `${tankId}: "${productName}" started`, { tankId, productName, batchSize, fromEntName, toEntName })
         prev.batchActive = true
+        prev.batchStartedAt = Date.now()
         try {
           await blendTankMesService.processWOStart({ tankId, productName, batchSize, fromEntName, toEntName, detectedAt: new Date().toISOString() })
         } catch (err) {
@@ -91,6 +102,7 @@ async function run(historian) {
         console.log(`[BlendTankJob] BATCH START (weight confirmed) on ${tankId}: "${productName}" (${Math.round(weightLbs).toLocaleString()} lb)`)
         statusStore.pushEvent('blendTank.batchStart', `${tankId}: "${productName}" started (weight)`, { tankId, productName, weightLbs, batchSize })
         prev.batchActive = true
+        prev.batchStartedAt = Date.now()
         try {
           await blendTankMesService.processWOStart({ tankId, productName, batchSize, fromEntName, toEntName, detectedAt: new Date().toISOString() })
         } catch (err) {
@@ -102,6 +114,7 @@ async function run(historian) {
         console.log(`[BlendTankJob] BATCH END (NOTE_STRING cleared) on ${tankId}: "${prev.productName}"`)
         statusStore.pushEvent('blendTank.batchEnd', `${tankId}: batch ended (NOTE cleared)`, { tankId, productName: prev.productName, reason: 'note_cleared' })
         prev.batchActive = false
+        prev.batchStartedAt = null
         try {
           await blendTankMesService.processWOEnd({ tankId, productName: prev.productName, detectedAt: new Date().toISOString() })
         } catch (err) {
