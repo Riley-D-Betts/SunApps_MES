@@ -138,32 +138,25 @@ async function main() {
     const newRow = (refetched?.item?.items || []).find(c => String(c.item?.id) === targetIdStr)
     if (!newRow) throw new Error('PATCH succeeded but item still not on BOM')
     console.log(`  added at line ${newRow.line}`)
-    targetLineRow.line = newRow.line   // unreachable since targetLineRow was null — kept for symmetry
+    bomItems.push(newRow)
   }
-  const lineNumber = targetLineRow?.line || (await core.netsuiteGet(`/record/v1/workOrder/${RECOVERY.nsWorkOrderId}?expandSubResources=true`))?.body?.item?.items?.find(c => String(c.item?.id) === targetIdStr)?.line
 
-  // The direct /record/v1/workOrderIssue endpoint at SunTado's NS rejects
-  // any creation attempt with "Transaction can only be created from a work
-  // order" — both `transaction: { id }` and `createdFrom: { id }` are
-  // rejected. Forced to use transform.
-  //
-  // Transform's default merge behavior pre-populates ALL BOM lines (which
-  // demands inventory detail for lot-tracked vitamins/citrate that we
-  // haven't staged). The `?replace=component` query param flips it to
-  // "consume only what I list" — exactly what we want.
+  // Build component list: include ALL BOM lines so the transform doesn't try
+  // to auto-resolve lot detail for non-issued lines. Only the target line gets
+  // the actual qty; everything else is zeroed out. This matches the shape used
+  // by createBatchWorkOrderIssue in SunApps_Manufacturing.
+  const componentItems = bomItems.map(c => ({
+    lineNumber: c.line,
+    quantity: String(c.item?.id) === targetIdStr ? RECOVERY.totalLbs : 0,
+  }))
+
   const issueBody = {
     custbody_tran_last_modified_by: 'system',
-    component: {
-      items: [{
-        item: targetIdStr,
-        lineNumber,
-        quantity: RECOVERY.totalLbs,
-      }],
-    },
+    component: { items: componentItems },
   }
-  console.log(`POSTing transform/workOrderIssue?replace=component body:`, JSON.stringify(issueBody))
+  console.log(`POSTing transform/workOrderIssue body:`, JSON.stringify(issueBody))
   const issueResp = await core.netsuitePost(
-    `/record/v1/workOrder/${RECOVERY.nsWorkOrderId}/!transform/workOrderIssue?replace=component`,
+    `/record/v1/workOrder/${RECOVERY.nsWorkOrderId}/!transform/workOrderIssue`,
     issueBody
   )
   let nsIssueId = issueResp?.body?.id || issueResp?.id || null
