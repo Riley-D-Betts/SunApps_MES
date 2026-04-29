@@ -37,9 +37,7 @@ function buildWoIssueBody(bomLines, targetItemId, quantity, binId) {
             lineNumber: c.line,
             quantity,
             componentinventorydetail: {
-              inventoryassignment: {
-                items: [{ quantity, binnumber: binIdStr }],
-              },
+              inventoryassignment: { items: [{ quantity, binnumber: binIdStr }] },
             },
           }
         }
@@ -620,11 +618,12 @@ async function tickIssuesForBatch(batch, lineReadings) {
     }
 
     // Update the always-track-rate fields even when we don't fire an issue, so
-    // the frontend has a fresh "current totalizer" snapshot.
-    await pipeState.update({
-      lastTotalizerLbs: reading.totalizerLbs,
-      lastObservedAt: observedAt,
-    })
+    // the frontend has a fresh "current totalizer" snapshot. Also persist the
+    // product/silo context so a restart can recover a missed reset.
+    const contextUpdate = { lastTotalizerLbs: reading.totalizerLbs, lastObservedAt: observedAt }
+    if (reading.productName) contextUpdate.lastProductName = reading.productName
+    if (reading.siloName) contextUpdate.lastSiloName = reading.siloName
+    await pipeState.update(contextUpdate)
 
     if (delta < config.MES_MIN_ISSUE_LBS) continue
     if (config.MES_DRY_RUN) {
@@ -698,6 +697,63 @@ async function tickIssuesForBatch(batch, lineReadings) {
         errorMessage: err.message,
       })
       // Don't update the baseline — the same delta will retry on next tick
+    }
+  }
+
+  // Catch-up pass: any pipe state for this batch where lastTotalizerLbs was
+  // recorded before a reset but the line was idle during the tick above (so it
+  // wasn't in matchingLines). Common after a service restart when a line reset
+  // while the process was down. Uses stored lastProductName/lastSiloName.
+  if (batch.nsWorkOrderId) {
+    const activeLinesSet = new Set(matchingLines.map(r => r.line))
+    const allPipeStates = await db.MesPipeIssueState.findAll({ where: { blendTankBatchId: batch.id } })
+    for (const ps of allPipeStates) {
+      if (activeLinesSet.has(ps.line)) continue  // already handled above
+      const stored = parseFloat(ps.lastTotalizerLbs) || 0
+      const issued = parseFloat(ps.lastIssuedTotalizerLbs) || 0
+      const catchUpDelta = stored - issued
+      if (catchUpDelta < config.MES_MIN_ISSUE_LBS) continue
+      if (!ps.lastProductName || !ps.lastSiloName) {
+        console.warn(`[BlendTankMesService] tick catch-up ${ps.line} → ${batch.tankId}: ${catchUpDelta.toFixed(1)} lb unissued but no stored product/silo — skipping`)
+        continue
+      }
+      const syntheticReading = { line: ps.line, productName: ps.lastProductName, siloName: ps.lastSiloName, totalizerLbs: stored }
+      const component = resolveLineComponent(syntheticReading)
+      if (!component.id) {
+        console.warn(`[BlendTankMesService] tick catch-up ${ps.line}: no NS item for "${ps.lastProductName}" — skipping`)
+        continue
+      }
+      const binId = itemConfig.getBinId(ps.lastSiloName)
+      if (!binId) {
+        console.warn(`[BlendTankMesService] tick catch-up ${ps.line}: no bin for "${ps.lastSiloName}" — skipping`)
+        continue
+      }
+      const bomLines = await fetchWoBomLines(batch.nsWorkOrderId)
+      const body = buildWoIssueBody(bomLines, component.id, catchUpDelta, binId)
+      const observedAt = new Date()
+      try {
+        console.log(`[BlendTankMesService] tick catch-up ${ps.line} → WO ${batch.nsWorkOrderId} (${batch.tankId}): ${catchUpDelta.toFixed(1)} lb "${ps.lastProductName}" (NS ${component.id})`)
+        const nsResult = await core.netsuitePost(`/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderIssue`, body)
+        const nsIssueId = extractNsIssueId(nsResult)
+        await ps.update({ lastIssuedTotalizerLbs: stored, lastIssueAt: observedAt })
+        await batch.increment({ cumulativeIssuedLbs: catchUpDelta })
+        await batch.update({ lastIssueAt: observedAt })
+        await db.MesBlendTankInflow.create({
+          blendTankBatchId: batch.id, line: ps.line,
+          ingredientType: ps.lastProductName, totalLbs: catchUpDelta,
+          nsItemId: String(component.id), nsIssueId: nsIssueId ? String(nsIssueId) : null,
+          status: 'completed', resetTime: observedAt,
+        })
+        await db.MesProcessingLog.create({
+          eventType: 'blend_tank_tick_catchup', sourceId: batch.nsWorkOrderId,
+          nsTransactionType: 'workOrderIssue', nsTransactionId: nsIssueId,
+          payload: JSON.stringify({ batchId: batch.id, line: ps.line, catchUpDelta, stored, issued, component }),
+          result: JSON.stringify({ nsIssueId }), success: true,
+        })
+        issuesFired++
+      } catch (err) {
+        console.error(`[BlendTankMesService] tick catch-up failed for ${ps.line} → WO ${batch.nsWorkOrderId}:`, err.message)
+      }
     }
   }
 

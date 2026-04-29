@@ -36,6 +36,14 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATE,
         allowNull: true,
       },
+      lastProductName: {
+        type: DataTypes.STRING(200),
+        allowNull: true,
+      },
+      lastSiloName: {
+        type: DataTypes.STRING(100),
+        allowNull: true,
+      },
       createdAt: {
         type: DataTypes.DATE,
         allowNull: false,

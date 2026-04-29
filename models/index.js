@@ -43,6 +43,15 @@ db.ensureRuntimeSchema = async function () {
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lastCompletionAt' AND Object_ID = Object_ID(N'MesBlendTankBatches'))
       ALTER TABLE MesBlendTankBatches ADD lastCompletionAt DATETIME2 NULL;
   `)
+  // MesPipeIssueStates: product/silo context for restart recovery
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lastProductName' AND Object_ID = Object_ID(N'MesPipeIssueStates'))
+      ALTER TABLE MesPipeIssueStates ADD lastProductName NVARCHAR(200) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lastSiloName' AND Object_ID = Object_ID(N'MesPipeIssueStates'))
+      ALTER TABLE MesPipeIssueStates ADD lastSiloName NVARCHAR(100) NULL;
+  `)
 }
 
 module.exports = db
