@@ -719,12 +719,41 @@ async function tickCompletionForBatch(batch) {
 
   // Same destination-bin logic as processWOEnd: UHT-direct WOs land in a surge
   // tank (toEntName = ST81-84); blend tanks land in the tank itself.
-  // Omit inventorydetail — let NS auto-assign lot/bin. If the FG item requires
-  // explicit lot assignment NS will return "configure inventory detail" and we
-  // can add it back with chunked quantities to avoid the per-lot pallet limit.
+  const completionDest = (batch.toEntName && /^ST\d+$/.test(batch.toEntName))
+    ? batch.toEntName
+    : batch.tankId
+  const completionBinId = itemConfig.getBinId(completionDest)
+
+  // NS FG items are lot-tracked; inventorydetail is required. NS also enforces a
+  // per-lot pallet quantity limit — split into chunks so each entry stays under
+  // it. Tune MAX_COMPLETION_CHUNK_LBS if NS rejects with "Pallet Quantity too high".
+  const MAX_COMPLETION_CHUNK_LBS = 2000
+  const lotBase = `${batch.tankId.replace(/[→\s]/g, '_')}-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`
+  const assignmentItems = []
+  let remaining = target
+  let lotIdx = 1
+  while (remaining > 0.001) {
+    const chunkQty = Math.min(remaining, MAX_COMPLETION_CHUNK_LBS)
+    const entry = {
+      quantity: Math.round(chunkQty * 1000) / 1000,
+      receiptInventoryNumber: `${lotBase}-${String(lotIdx).padStart(3, '0')}`,
+    }
+    if (completionBinId) entry.binnumber = { id: completionBinId }
+    assignmentItems.push(entry)
+    remaining -= chunkQty
+    lotIdx++
+  }
+
   const body = {
     quantity: target,
+    inventorydetail: {
+      inventoryassignment: {
+        items: assignmentItems,
+      },
+    },
   }
+
+  console.log(`[BlendTankMesService] tick completion inventory: ${assignmentItems.length} lot(s) × ≤${MAX_COMPLETION_CHUNK_LBS} lb → bin ${completionBinId || 'none'}`)
 
   try {
     console.log(`[BlendTankMesService] tick completion WO ${batch.nsWorkOrderId} (${batch.tankId}): ${target.toFixed(1)} lb (cumulative ${cumulativeCompleted.toFixed(1)} → ${cumulativeIssued.toFixed(1)})`)
