@@ -724,7 +724,12 @@ async function tickCompletionForBatch(batch) {
     : batch.tankId
   const completionBinId = itemConfig.getBinId(completionDest)
 
-  const lotNumber = `${batch.tankId.replace(/[→\s]/g, '_')}-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`
+  const now = new Date()
+  const mm = String(now.getMonth() + 1).padStart(2, '0')
+  const dd = String(now.getDate()).padStart(2, '0')
+  const yy = String(now.getFullYear()).slice(-2)
+  const woNum = String(batch.nsWorkOrderNumber || '').replace(/\D/g, '')
+  const lotNumber = `${mm}${dd}${yy}${woNum}`
   const assignmentEntry = { quantity: Math.round(target * 1000) / 1000, receiptInventoryNumber: lotNumber }
   if (completionBinId) assignmentEntry.binnumber = String(completionBinId)
 
