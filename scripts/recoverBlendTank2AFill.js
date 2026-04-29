@@ -50,7 +50,7 @@ const RECOVERY = {
   productName: 'Conventional Low Fat 1%',
   siloName: 'MSilo1',
   binId: 1006,                 // Silo-Raw-1
-  nsItemId: 5415,              // Raw Conventional 1% (RAW_ITEMS.CONV_1 in mesItemConfig)
+  nsItemId: 5417,              // Raw Conventional Milk — used instead of 5415 (no bin stock for 1%)
   resetTimeIso: '2026-04-28T17:43:31.697Z',
 }
 
