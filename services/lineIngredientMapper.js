@@ -86,6 +86,8 @@ const LINE_PRODUCT_MAP = {
   // A2 variants
   'raw organic a2 milk':         { id: 5403, name: 'Raw Organic A2 Milk' },
   'organic a2 milk':             { id: 5403, name: 'Raw Organic A2 Milk' },
+  'raw a2 organic':              { id: 5403, name: 'Raw Organic A2 Milk' },
+  'a2 organic':                  { id: 5403, name: 'Raw Organic A2 Milk' },
   'raw organic a2 0%':           { id: 5482, name: 'Raw Organic 0%' },          // no separate A2 0% item — use organic 0%
   'raw organic grade a (a2/a2) milk': { id: 5406, name: 'Raw Organic Grade A (A2/A2) Milk' },
 }

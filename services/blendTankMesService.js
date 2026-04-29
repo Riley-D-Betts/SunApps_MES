@@ -474,13 +474,18 @@ async function issueIngredient(batchId, data) {
 
 /**
  * Resolve the NS component item for a line reading. Prefer the historian-reported
- * product name (most accurate), fall back to line prefix (CL = cream, ML = skim).
+ * product name (most accurate), fall back to line prefix (CL = cream, ML = skim)
+ * only when no productName is available at all.
  */
 function resolveLineComponent(reading) {
   if (reading.productName) {
     const m = lineMapper.resolveLineProduct(reading.productName)
     if (m) return { ...m, resolvedFrom: 'scada' }
+    // productName known but no mapper match — return null so callers skip gracefully
+    // rather than issuing against the wrong BOM item.
+    return { id: null, name: reading.productName, resolvedFrom: 'unknown' }
   }
+  // No productName at all — last-resort line-prefix guess
   const fallback = reading.line.startsWith('CL') ? itemConfig.CREAM_ITEM_CONV : itemConfig.SKIM_ITEM_CONV
   return { ...fallback, resolvedFrom: 'line-prefix' }
 }
