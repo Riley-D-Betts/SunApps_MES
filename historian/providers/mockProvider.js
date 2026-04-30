@@ -152,8 +152,11 @@ class MockProvider extends BaseProvider {
         currentWO: running ? `UHT-WO-${2000 + i}` : '',
         currentItem: running ? (i === 0 ? '300015' : '300042') : '',
         galActual: running ? Math.floor(Math.random() * 50000) : 0,
+        flowGpm: running ? 50 + Math.random() * 30 : 0,
         stepNum,
         mode,
+        recipeText: running ? ['White Milk', '1% Low Fat', '2% Reduced Fat', 'Heavy Whip'][i % 4] : '',
+        woState: running ? 'RUNNING' : '',
         fromEntName: running ? (i === 0 ? 'BlendTank1A' : 'BlendTank2A') : '',
         toEntName: running ? (i === 0 ? 'ST81' : 'ST83') : '',
       }

@@ -96,12 +96,16 @@ const TAGS = {
   UHT_JOB_RUNNING:    '.JobRunning',
   UHT_CURRENT_WO:     '.CurrentWO',
   UHT_CURRENT_ITEM:   '.CurrentItem',
-  UHT_GAL_ACTUAL:     '.GalActual',
   UHT_STEP_NUM:       '.StepNum',
   UHT_PROD_STEP:      '.Prod_Step',
   UHT_CIP_STEP:       '.CIP_Step',
   UHT_FROM_ENT:       '.FromEntName',
   UHT_TO_ENT:         '.ToEntName',
+  UHT_RECIPE_TEXT:    '.Recipe_Text',           // string — recipe name e.g. "White Milk"
+  UHT_WO_STATE:       '.CurrentWOState',        // string — WO state text from PLC
+  UHT_PROD_TOTAL:     '.FT1202TotalProd',       // analog — live production-gallons totalizer
+  UHT_CIP_TOTAL:      '.FT1202TotalCIP',        // analog — live CIP-gallons totalizer
+  UHT_OUTLET_FLOW:    '.FT3201_Flow',            // analog — live outlet flow GPM
 
   // Surge tank tags. Two different prefixes are used:
   //   * Status / product / state bits live under single-prefix `ThermaRoute.ST{N}_*`
@@ -639,8 +643,10 @@ class RestProvider extends BaseProvider {
   async getUhtStatus() {
     const uhts = ['UHT1', 'UHT2']
 
-    // Per-UHT FQN list. Slots 0-9 are the same shape across UHTs; slots 10-12
-    // are the three Mode discrete bits (separator differs per UHT).
+    // Per-UHT FQN list. Slots 0-13 are shared shape; slots 14-16 are the
+    // three Mode discrete bits whose separator differs per UHT (`.` on UHT1,
+    // `_` on UHT2). GalActual was dropped — it's a setpoint, not a live
+    // totalizer; FT1202TotalProd/CIP actually count up during a run.
     const fqnsForUht = (u) => {
       const sep = u === 'UHT2' ? '_' : '.'
       return [
@@ -648,18 +654,22 @@ class RestProvider extends BaseProvider {
         `${u}${TAGS.UHT_JOB_RUNNING}`,   // 1
         `${u}${TAGS.UHT_CURRENT_WO}`,    // 2
         `${u}${TAGS.UHT_CURRENT_ITEM}`,  // 3
-        `${u}${TAGS.UHT_GAL_ACTUAL}`,    // 4
-        `${u}${TAGS.UHT_STEP_NUM}`,      // 5
-        `${u}${TAGS.UHT_PROD_STEP}`,     // 6
-        `${u}${TAGS.UHT_CIP_STEP}`,      // 7
-        `${u}${TAGS.UHT_FROM_ENT}`,      // 8
-        `${u}${TAGS.UHT_TO_ENT}`,        // 9
-        `${u}.Mode${sep}Process`,         // 10
-        `${u}.Mode${sep}CIP`,             // 11
-        `${u}.Mode${sep}DD${sep}INH`,     // 12
+        `${u}${TAGS.UHT_STEP_NUM}`,      // 4
+        `${u}${TAGS.UHT_PROD_STEP}`,     // 5
+        `${u}${TAGS.UHT_CIP_STEP}`,      // 6
+        `${u}${TAGS.UHT_FROM_ENT}`,      // 7
+        `${u}${TAGS.UHT_TO_ENT}`,        // 8
+        `${u}${TAGS.UHT_RECIPE_TEXT}`,   // 9
+        `${u}${TAGS.UHT_WO_STATE}`,      // 10
+        `${u}${TAGS.UHT_PROD_TOTAL}`,    // 11
+        `${u}${TAGS.UHT_CIP_TOTAL}`,     // 12
+        `${u}${TAGS.UHT_OUTLET_FLOW}`,   // 13
+        `${u}.Mode${sep}Process`,         // 14
+        `${u}.Mode${sep}CIP`,             // 15
+        `${u}.Mode${sep}DD${sep}INH`,     // 16
       ]
     }
-    const perUht = 13
+    const perUht = 17
     const fqns = uhts.flatMap(fqnsForUht)
     const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
 
@@ -668,9 +678,9 @@ class RestProvider extends BaseProvider {
       const val = (idx) => values[offset + idx]?.Value ?? 0
       const txt = (idx) => values[offset + idx]?.Text ?? ''
 
-      const modeProcess = !!val(10)
-      const modeCip     = !!val(11)
-      const modeDdInh   = !!val(12)
+      const modeProcess = !!val(14)
+      const modeCip     = !!val(15)
+      const modeDdInh   = !!val(16)
       let mode = 'IDLE'
       if (modeCip)         mode = 'CIP'
       else if (modeProcess) mode = 'PROCESS'
@@ -678,8 +688,12 @@ class RestProvider extends BaseProvider {
 
       // Pick the step number that matches the active mode so the UI never
       // shows a stale CIP step while running production (and vice versa).
-      const stepNumRaw = val(5)
-      const stepNum = mode === 'CIP' ? val(7) : (mode === 'PROCESS' ? val(6) : stepNumRaw)
+      const stepNumRaw = val(4)
+      const stepNum = mode === 'CIP' ? val(6) : (mode === 'PROCESS' ? val(5) : stepNumRaw)
+
+      // Pick the matching totalizer for the mode — production gallons during
+      // a run, CIP gallons during a wash.
+      const galActual = mode === 'CIP' ? val(12) : val(11)
 
       return {
         uhtId,
@@ -687,11 +701,14 @@ class RestProvider extends BaseProvider {
         jobRunning: !!val(1),
         currentWO: txt(2),
         currentItem: txt(3),
-        galActual: val(4),
+        galActual,
+        flowGpm: val(13),
         stepNum,
         mode,
-        fromEntName: txt(8),
-        toEntName: txt(9),
+        recipeText: txt(9),
+        woState: txt(10),
+        fromEntName: txt(7),
+        toEntName: txt(8),
       }
     })
   }

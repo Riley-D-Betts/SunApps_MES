@@ -119,8 +119,11 @@ class BaseProvider {
    *   currentWO: string,
    *   currentItem: string,
    *   galActual: number,
+   *   flowGpm: number,
    *   stepNum: number,
    *   mode: 'PROCESS' | 'CIP' | 'DD_INH' | 'IDLE',
+   *   recipeText: string,
+   *   woState: string,
    *   fromEntName: string,
    *   toEntName: string
    * }>>}
