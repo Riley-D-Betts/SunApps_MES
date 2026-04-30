@@ -119,7 +119,10 @@ class BaseProvider {
    *   currentWO: string,
    *   currentItem: string,
    *   galActual: number,
-   *   stepNum: number
+   *   stepNum: number,
+   *   mode: 'PROCESS' | 'CIP' | 'DD_INH' | 'IDLE',
+   *   fromEntName: string,
+   *   toEntName: string
    * }>>}
    */
   async getUhtStatus() {
@@ -127,11 +130,24 @@ class BaseProvider {
   }
 
   /**
+   * Resolve which surge tank each UHT is currently routed to (operator-set
+   * Connection_Code matrix). Returns null per UHT if no route is connected.
+   * @returns {Promise<{ UHT1: string | null, UHT2: string | null }>}
+   */
+  async getUhtSurgeTankRouting() {
+    throw new Error('getUhtSurgeTankRouting() not implemented')
+  }
+
+  /**
    * Get live status for the four aseptic surge tanks (ST81-84).
+   * `pollDeltaGal` is the signed change in mainGallons since the previous
+   * poll (positive = inflow from UHT, negative = outflow to filler). Null
+   * on the first poll after process start.
    * @returns {Promise<Array<{
    *   tankId: string,
    *   mainLevelPct: number,
    *   mainGallons: number,
+   *   pollDeltaGal: number | null,
    *   productDesc: string,
    *   state: number,
    *   empty: boolean,

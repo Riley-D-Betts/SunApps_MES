@@ -140,6 +140,11 @@ class MockProvider extends BaseProvider {
   async getUhtStatus() {
     return ['UHT1', 'UHT2'].map((uhtId, i) => {
       const running = Math.random() > 0.3
+      const isCip = !running && Math.random() > 0.5
+      const mode = running ? 'PROCESS' : (isCip ? 'CIP' : 'IDLE')
+      const stepNum = mode === 'PROCESS' ? 4 + Math.floor(Math.random() * 8)
+        : mode === 'CIP' ? 1 + Math.floor(Math.random() * 6)
+        : 0
       return {
         uhtId,
         active: running,
@@ -147,19 +152,35 @@ class MockProvider extends BaseProvider {
         currentWO: running ? `UHT-WO-${2000 + i}` : '',
         currentItem: running ? (i === 0 ? '300015' : '300042') : '',
         galActual: running ? Math.floor(Math.random() * 50000) : 0,
-        stepNum: running ? Math.floor(Math.random() * 30) + 1 : 0,
+        stepNum,
+        mode,
+        fromEntName: running ? (i === 0 ? 'BlendTank1A' : 'BlendTank2A') : '',
+        toEntName: running ? (i === 0 ? 'ST81' : 'ST83') : '',
       }
     })
   }
 
+  async getUhtSurgeTankRouting() {
+    return {
+      UHT1: ['ST81', 'ST82'][this._blendTankCycle % 2],
+      UHT2: ['ST83', 'ST84'][this._blendTankCycle % 2],
+    }
+  }
+
   async getSurgeTankStatus() {
+    if (!this._prevSurgeGal) this._prevSurgeGal = { ST81: null, ST82: null, ST83: null, ST84: null }
     return ['ST81', 'ST82', 'ST83', 'ST84'].map((tankId, i) => {
       const filling = Math.random() > 0.5
       const mainLevelPct = filling ? Math.floor(Math.random() * 100) : 0
+      const mainGallons = Math.round(mainLevelPct * 50)  // ~5000 gal capacity per surge tank
+      const prev = this._prevSurgeGal[tankId]
+      const pollDeltaGal = prev == null ? null : mainGallons - prev
+      this._prevSurgeGal[tankId] = mainGallons
       return {
         tankId,
         mainLevelPct,
-        mainGallons: Math.round(mainLevelPct * 50),  // ~5000 gal capacity per surge tank
+        mainGallons,
+        pollDeltaGal,
         productDesc: filling ? ['Marcels 1%', 'KS 2% org', 'Conv 3.25%', 'Horizon whole'][i] : '',
         state: filling ? 5 + Math.floor(Math.random() * 10) : 1,
         empty: mainLevelPct < 2,

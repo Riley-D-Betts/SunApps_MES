@@ -89,13 +89,19 @@ const TAGS = {
   SILO_DENSITY:       '.ProductDensity',  // suffix on UPPERCASE prefix (PPG)
   SILO_PRODUCT_INDEX: '.IndexSelectRead', // suffix on UPPERCASE prefix — the 1-40 code from the Standardization HMI Product Config table
 
-  // UHT tags (per-UHT prefix, e.g. UHT1)
+  // UHT tags (per-UHT prefix, e.g. UHT1).
+  // NOTE: UHT1 separates Mode bits with `.` (Mode.CIP) while UHT2 uses `_`
+  // (Mode_CIP). The mode FQN list is built per-UHT in getUhtStatus().
   UHT_ACTIVE:         '.Active',
   UHT_JOB_RUNNING:    '.JobRunning',
   UHT_CURRENT_WO:     '.CurrentWO',
   UHT_CURRENT_ITEM:   '.CurrentItem',
   UHT_GAL_ACTUAL:     '.GalActual',
   UHT_STEP_NUM:       '.StepNum',
+  UHT_PROD_STEP:      '.Prod_Step',
+  UHT_CIP_STEP:       '.CIP_Step',
+  UHT_FROM_ENT:       '.FromEntName',
+  UHT_TO_ENT:         '.ToEntName',
 
   // Surge tank tags. Two different prefixes are used:
   //   * Status / product / state bits live under single-prefix `ThermaRoute.ST{N}_*`
@@ -130,6 +136,11 @@ class RestProvider extends BaseProvider {
     // Track previous totalized flow readings for delta calculation (bulk milk)
     this._prevCreamTotal = null
     this._prevSkimTotal = null
+
+    // Per-surge-tank previous gallons for inflow delta tracking. Populated on
+    // first poll, then each subsequent poll computes (current - prev) so the
+    // dashboard can show "+X gal this tick" per tank.
+    this._prevSurgeGal = { ST81: null, ST82: null, ST83: null, ST84: null }
   }
 
   // ── OData helpers ──────────────────────────────────────────────────
@@ -618,27 +629,57 @@ class RestProvider extends BaseProvider {
 
   /**
    * Read current status for both UHT pasteurizers.
-   * Exposes the run/step state plus the current WO and item.
+   * Exposes the run/step state, current WO/item, the routed source/destination
+   * vessels (FromEntName/ToEntName), and a derived mode label (PROCESS/CIP/
+   * DD_INH/IDLE) computed from the three Mode discrete bits.
+   *
+   * UHT1 names mode bits as `Mode.CIP` (dot); UHT2 uses `Mode_CIP` (underscore).
+   * The suffix list is built per-UHT so the right separator is used.
    */
   async getUhtStatus() {
     const uhts = ['UHT1', 'UHT2']
-    const suffixes = [
-      TAGS.UHT_ACTIVE,        // 0 — Discrete
-      TAGS.UHT_JOB_RUNNING,   // 1 — Discrete
-      TAGS.UHT_CURRENT_WO,    // 2 — String
-      TAGS.UHT_CURRENT_ITEM,  // 3 — String
-      TAGS.UHT_GAL_ACTUAL,    // 4 — Analog (gal)
-      TAGS.UHT_STEP_NUM,      // 5 — Analog (step number)
-    ]
 
-    const fqns = uhts.flatMap(u => suffixes.map(s => `${u}${s}`))
+    // Per-UHT FQN list. Slots 0-9 are the same shape across UHTs; slots 10-12
+    // are the three Mode discrete bits (separator differs per UHT).
+    const fqnsForUht = (u) => {
+      const sep = u === 'UHT2' ? '_' : '.'
+      return [
+        `${u}${TAGS.UHT_ACTIVE}`,        // 0
+        `${u}${TAGS.UHT_JOB_RUNNING}`,   // 1
+        `${u}${TAGS.UHT_CURRENT_WO}`,    // 2
+        `${u}${TAGS.UHT_CURRENT_ITEM}`,  // 3
+        `${u}${TAGS.UHT_GAL_ACTUAL}`,    // 4
+        `${u}${TAGS.UHT_STEP_NUM}`,      // 5
+        `${u}${TAGS.UHT_PROD_STEP}`,     // 6
+        `${u}${TAGS.UHT_CIP_STEP}`,      // 7
+        `${u}${TAGS.UHT_FROM_ENT}`,      // 8
+        `${u}${TAGS.UHT_TO_ENT}`,        // 9
+        `${u}.Mode${sep}Process`,         // 10
+        `${u}.Mode${sep}CIP`,             // 11
+        `${u}.Mode${sep}DD${sep}INH`,     // 12
+      ]
+    }
+    const perUht = 13
+    const fqns = uhts.flatMap(fqnsForUht)
     const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
 
-    const perUht = suffixes.length
     return uhts.map((uhtId, i) => {
       const offset = i * perUht
       const val = (idx) => values[offset + idx]?.Value ?? 0
       const txt = (idx) => values[offset + idx]?.Text ?? ''
+
+      const modeProcess = !!val(10)
+      const modeCip     = !!val(11)
+      const modeDdInh   = !!val(12)
+      let mode = 'IDLE'
+      if (modeCip)         mode = 'CIP'
+      else if (modeProcess) mode = 'PROCESS'
+      else if (modeDdInh)   mode = 'DD_INH'
+
+      // Pick the step number that matches the active mode so the UI never
+      // shows a stale CIP step while running production (and vice versa).
+      const stepNumRaw = val(5)
+      const stepNum = mode === 'CIP' ? val(7) : (mode === 'PROCESS' ? val(6) : stepNumRaw)
 
       return {
         uhtId,
@@ -647,9 +688,37 @@ class RestProvider extends BaseProvider {
         currentWO: txt(2),
         currentItem: txt(3),
         galActual: val(4),
-        stepNum: val(5),
+        stepNum,
+        mode,
+        fromEntName: txt(8),
+        toEntName: txt(9),
       }
     })
+  }
+
+  /**
+   * Resolve the current UHT → Surge tank routing for both UHTs in a single
+   * batch of 8 tag reads. The plant exposes a Connection_Code per (UHT, ST)
+   * pair; whichever has a non-zero code is the operator's selected route.
+   *
+   * Returns: { UHT1: 'ST81' | null, UHT2: 'ST83' | null }
+   */
+  async getUhtSurgeTankRouting() {
+    const uhts = ['UHT1', 'UHT2']
+    const sts = ['ST81', 'ST82', 'ST83', 'ST84']
+    const fqns = uhts.flatMap(u => sts.map(st =>
+      TAGS.UHT_ST_CONNECTION_FQN.replace('{UHT}', u).replace('{ST}', st)
+    ))
+    const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
+
+    const out = { UHT1: null, UHT2: null }
+    uhts.forEach((u, ui) => {
+      for (let si = 0; si < sts.length; si++) {
+        const code = values[ui * 4 + si]?.Value ?? 0
+        if (code !== 0) { out[u] = sts[si]; break }
+      }
+    })
+    return out
   }
 
   /**
@@ -689,10 +758,18 @@ class RestProvider extends BaseProvider {
       const val = (idx) => values[offset + idx]?.Value ?? 0
       const txt = (idx) => values[offset + idx]?.Text ?? ''
 
+      const mainGallons = val(1)
+      // Inflow delta — positive means UHT pushed more milk in since last
+      // poll, negative means filler pulled more out. Null on first poll.
+      const prevGal = this._prevSurgeGal[t.tankId]
+      const pollDeltaGal = prevGal == null ? null : mainGallons - prevGal
+      this._prevSurgeGal[t.tankId] = mainGallons
+
       return {
         tankId: t.tankId,
         mainLevelPct: val(0),
-        mainGallons: val(1),
+        mainGallons,
+        pollDeltaGal,
         productDesc: txt(2),
         state: val(3),
         empty: !!val(4),
