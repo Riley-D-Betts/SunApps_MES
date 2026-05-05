@@ -7873,7 +7873,7 @@
   },
   {
     "FQN": "BlendTank1B.100LT.SCL_LBS",
-    "Description": "BT2A_100LT.SCL_LBS",
+    "Description": "BT1B_100LT.SCL_LBS",
     "EngUnit": "lb",
     "TagType": "Analog"
   },
@@ -68725,7 +68725,7 @@
   },
   {
     "FQN": "MSEP_CV1010_P100.CV",
-    "Description": "",
+    "Description": "A modulating valve object that utilizes a combination of the \"VALVE\" UDT and PID_BLOCK UDT. Control Variable",
     "EngUnit": "None",
     "TagType": "Analog"
   },
@@ -68743,7 +68743,7 @@
   },
   {
     "FQN": "MSEP_CV1010_P100.PV",
-    "Description": "",
+    "Description": "A modulating valve object that utilizes a combination of the \"VALVE\" UDT and PID_BLOCK UDT. Process Variable",
     "EngUnit": "None",
     "TagType": "Analog"
   },
@@ -68875,7 +68875,7 @@
   },
   {
     "FQN": "MSEP_LT0102_P100.VALUE",
-    "Description": "",
+    "Description": "Value",
     "EngUnit": "%",
     "TagType": "Analog"
   },
@@ -69145,7 +69145,7 @@
   },
   {
     "FQN": "MSEP_TT0104_P100.VALUE",
-    "Description": "",
+    "Description": "Value",
     "EngUnit": "°F",
     "TagType": "Analog"
   },
@@ -98190,6 +98190,30 @@
     "TagType": "Discrete"
   },
   {
+    "FQN": "ThermaRoute.PT1169",
+    "Description": "Route 11 Purge Air",
+    "EngUnit": "PSI",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "ThermaRoute.PT1269",
+    "Description": "Route 12 Air Purge Pressure",
+    "EngUnit": "psi",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "ThermaRoute.PT1369",
+    "Description": "Route 13 Purge Air Pressure",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "ThermaRoute.PT1469",
+    "Description": "Route 14 Purge Air",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
     "FQN": "ThermaRoute.ST80_TCV0125_ManualPB",
     "Description": "ST80 TCV0125 ManualPB",
     "EngUnit": "",
@@ -116896,6 +116920,18 @@
     "Description": "TR84 F4 Z3 ZoneFault",
     "EngUnit": "",
     "TagType": "Discrete"
+  },
+  {
+    "FQN": "ThermaRoute.TT1101",
+    "Description": "TT1101",
+    "EngUnit": "°F",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "ThermaRoute.TT2101",
+    "Description": "TT2201",
+    "EngUnit": "°F",
+    "TagType": "Analog"
   },
   {
     "FQN": "ThermaRoute.UHT1_ST81_Connection_Code",

@@ -1,79 +1,89 @@
-// Discover all tags from Historian API, paginating through all results
-const http = require('http');
+#!/usr/bin/env node
+/**
+ * Discover all tags from the Historian API and write scripts/all-tags.json.
+ *
+ * Usage:  node scripts/discoverTags.js
+ */
 
-const BASE = 'http://10.4.9.23:32569/Historian/v2';
-const AUTH = 'Basic ' + Buffer.from('MES\\bchesley:qOX2BCo7uQ1-xl').toString('base64');
+const path = require('path')
+const fs = require('fs')
+const dotenv = require('dotenv')
+const httpntlm = require('httpntlm')
 
-function fetchNtlm(url) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    const options = {
-      hostname: u.hostname,
-      port: u.port,
-      path: u.pathname + u.search,
-      headers: { 'Accept': 'application/json' }
-    };
-    http.get(options, res => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve({ status: res.statusCode, data }));
-    }).on('error', reject);
-  });
+dotenv.config({ path: path.resolve(__dirname, '../.env') })
+
+const BASE_URL = process.env.HISTORIAN_BASE_URL
+const DOMAIN = process.env.HISTORIAN_DOMAIN || ''
+const USERNAME = process.env.HISTORIAN_USERNAME
+const PASSWORD = process.env.HISTORIAN_PASSWORD
+
+if (!BASE_URL || !USERNAME || !PASSWORD) {
+  console.error('Missing HISTORIAN_BASE_URL, HISTORIAN_USERNAME, or HISTORIAN_PASSWORD in .env')
+  process.exit(1)
 }
 
-// Use child_process to call curl with NTLM since http module can't do NTLM
-const { execSync } = require('child_process');
-
-function curlNtlm(url) {
-  const result = execSync(
-    `curl -s --max-time 30 --ntlm -u "MES\\bchesley:qOX2BCo7uQ1-xl" "${url}"`,
-    { maxBuffer: 10 * 1024 * 1024, shell: 'cmd.exe' }
-  );
-  const text = result.toString().trim();
-  if (!text) throw new Error(`Empty response from ${url}`);
-  return JSON.parse(text);
+function ntlmGet(url) {
+  return new Promise((resolve, reject) => {
+    httpntlm.get({
+      url,
+      domain: DOMAIN,
+      username: USERNAME,
+      password: PASSWORD,
+      headers: { 'Accept': 'application/json' },
+    }, (err, res) => {
+      if (err) return reject(err)
+      if (res.statusCode !== 200) {
+        return reject(new Error(`Historian API ${res.statusCode}: ${String(res.body).slice(0, 300)}`))
+      }
+      try {
+        const body = String(res.body).replace(/^﻿/, '')
+        resolve(JSON.parse(body))
+      } catch (e) {
+        reject(new Error(`Invalid JSON: ${String(res.body).slice(0, 300)}`))
+      }
+    })
+  })
 }
 
 async function main() {
-  const allTags = [];
-  let url = `${BASE}/Tags?$select=FQN,Description,TagType,EngUnit`;
-  let page = 1;
+  const allTags = []
+  let url = `${BASE_URL}/Tags?$select=FQN,Description,TagType,EngUnit`
+  let page = 1
 
   while (url) {
-    console.log(`Fetching page ${page}...`);
-    const data = curlNtlm(url);
-    allTags.push(...data.value);
-    url = data['@odata.nextLink'] || null;
-    page++;
+    console.log(`Fetching page ${page}...`)
+    const data = await ntlmGet(url)
+    allTags.push(...data.value)
+    url = data['@odata.nextLink'] || null
+    page++
   }
 
-  console.log(`\nTotal tags: ${allTags.length}\n`);
+  console.log(`\nTotal tags: ${allTags.length}\n`)
 
-  // Group by prefix
-  const prefixes = {};
+  // Group by prefix and print summary
+  const prefixes = {}
   allTags.forEach(t => {
-    const p = t.FQN.split('.')[0];
-    if (!prefixes[p]) prefixes[p] = [];
-    prefixes[p].push(t);
-  });
+    const p = t.FQN.split('.')[0]
+    if (!prefixes[p]) prefixes[p] = []
+    prefixes[p].push(t)
+  })
 
-  // Print summary
-  console.log('=== EQUIPMENT PREFIXES ===');
+  console.log('=== EQUIPMENT PREFIXES ===')
   Object.entries(prefixes)
     .sort((a, b) => a[0].localeCompare(b[0]))
     .forEach(([name, tags]) => {
-      console.log(`\n${name} (${tags.length} tags):`);
+      console.log(`\n${name} (${tags.length} tags):`)
       tags.forEach(t => {
-        console.log(`  ${t.FQN.padEnd(55)} ${t.TagType.padEnd(10)} ${(t.EngUnit || '').padEnd(12)} ${t.Description}`);
-      });
-    });
+        console.log(`  ${t.FQN.padEnd(55)} ${t.TagType.padEnd(10)} ${(t.EngUnit || '').padEnd(12)} ${t.Description}`)
+      })
+    })
 
-  // Also write JSON for reference
-  require('fs').writeFileSync(
-    'scripts/all-tags.json',
-    JSON.stringify(allTags, null, 2)
-  );
-  console.log('\nSaved full tag list to scripts/all-tags.json');
+  const outPath = path.resolve(__dirname, 'all-tags.json')
+  fs.writeFileSync(outPath, JSON.stringify(allTags, null, 2))
+  console.log(`\nSaved full tag list to ${outPath}`)
 }
 
-main().catch(console.error);
+main().catch(err => {
+  console.error('Fatal error:', err)
+  process.exit(1)
+})
