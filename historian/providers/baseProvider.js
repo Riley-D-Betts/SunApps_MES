@@ -121,6 +121,7 @@ class BaseProvider {
    *   galActual: number,
    *   flowGpm: number,
    *   stepNum: number,
+   *   stepName: string,
    *   mode: 'PROCESS' | 'CIP' | 'DD_INH' | 'IDLE',
    *   recipeText: string,
    *   woState: string,

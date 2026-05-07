@@ -1,4 +1,5 @@
 const BaseProvider = require('./baseProvider')
+const { PROCESS_STEP_NAMES, CIP_STEP_NAMES } = require('./uhtStepNames')
 
 /**
  * Mock provider for development and testing.
@@ -145,6 +146,10 @@ class MockProvider extends BaseProvider {
       const stepNum = mode === 'PROCESS' ? 4 + Math.floor(Math.random() * 8)
         : mode === 'CIP' ? 1 + Math.floor(Math.random() * 6)
         : 0
+      const stepName = mode === 'CIP'
+        ? (CIP_STEP_NAMES[stepNum] ?? `CIP Step ${stepNum}`)
+        : (PROCESS_STEP_NAMES[stepNum] ?? `Step ${stepNum}`)
+
       return {
         uhtId,
         active: running,
@@ -154,6 +159,7 @@ class MockProvider extends BaseProvider {
         galActual: running ? Math.floor(Math.random() * 50000) : 0,
         flowGpm: running ? 50 + Math.random() * 30 : 0,
         stepNum,
+        stepName,
         mode,
         recipeText: running ? ['White Milk', '1% Low Fat', '2% Reduced Fat', 'Heavy Whip'][i % 4] : '',
         woState: running ? 'RUNNING' : '',

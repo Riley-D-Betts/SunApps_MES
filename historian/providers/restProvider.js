@@ -1,6 +1,7 @@
 const BaseProvider = require('./baseProvider')
 const config = require('../../config')
 const httpntlm = require('httpntlm')
+const { PROCESS_STEP_NAMES, CIP_STEP_NAMES } = require('./uhtStepNames')
 
 /**
  * REST provider for the on-premise AVEVA Historian OData v2 API.
@@ -720,6 +721,9 @@ class RestProvider extends BaseProvider {
       this._uhtPrevMode[uhtId] = mode
 
       const galActual = mode === 'CIP' ? val(12) : this._uhtMilkGal[uhtId]
+      const stepName = mode === 'CIP'
+        ? (CIP_STEP_NAMES[stepNum] ?? `CIP Step ${stepNum}`)
+        : (PROCESS_STEP_NAMES[stepNum] ?? `Step ${stepNum}`)
 
       return {
         uhtId,
@@ -730,6 +734,7 @@ class RestProvider extends BaseProvider {
         galActual,
         flowGpm: val(13),
         stepNum,
+        stepName,
         mode,
         recipeText: txt(9),
         woState: txt(10),
