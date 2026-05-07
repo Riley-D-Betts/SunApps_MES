@@ -46,7 +46,8 @@
       "Bash(npm test *)",
       "Bash(npx jest *)",
       "Bash(gh run *)",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(dir -R -Attributes !h)"
     ]
   }
 }

@@ -16,15 +16,24 @@ async function run(historian) {
       historian.getUhtSurgeTankRouting(),
     ])
 
-    // Decorate UHTs with their routed surge tank, and surge tanks with the
-    // UHT that's connected to them (reverse map). Operators only ever route
-    // one UHT per surge tank at a time, so the matrix is sparse — at most
-    // 2 of the 4 surge tanks have a connectedUht at any moment.
+    // Decorate UHTs with their active surge tank and surge tanks with their UHT.
+    // routing is { UHT1: ['ST81','ST82'], UHT2: ['ST83','ST84'] } — each UHT is
+    // permanently plumbed to two tanks. Active tank = whichever of the pair has
+    // the highest positive level-delta this tick (level-delta > 0 means it's
+    // being filled). Both connected tanks map back to the same UHT for the
+    // reverse lookup (connectedUht on the surge tank object).
     const stToUht = {}
-    for (const [uht, st] of Object.entries(routing || {})) {
-      if (st) stToUht[st] = uht
+    const uhtActiveTank = {}
+    for (const [uhtId, connectedTanks] of Object.entries(routing || {})) {
+      if (!connectedTanks) continue
+      const best = connectedTanks
+        .map(tid => surgeTanks.find(s => s.tankId === tid))
+        .filter(Boolean)
+        .reduce((a, b) => ((b.pollDeltaGal ?? -Infinity) > (a?.pollDeltaGal ?? -Infinity) ? b : a), null)
+      uhtActiveTank[uhtId] = (best?.pollDeltaGal > 0 ? best.tankId : null) ?? connectedTanks[0]
+      for (const tid of connectedTanks) stToUht[tid] = uhtId
     }
-    const uhtsDecorated = uhts.map(u => ({ ...u, destSurgeTankId: routing?.[u.uhtId] || null }))
+    const uhtsDecorated = uhts.map(u => ({ ...u, destSurgeTankId: uhtActiveTank[u.uhtId] || null }))
     const surgeTanksDecorated = surgeTanks.map(s => ({ ...s, connectedUht: stToUht[s.tankId] || null }))
 
     const durationMs = Date.now() - pollStart

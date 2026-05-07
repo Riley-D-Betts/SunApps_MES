@@ -103,9 +103,9 @@ const TAGS = {
   UHT_TO_ENT:         '.ToEntName',
   UHT_RECIPE_TEXT:    '.Recipe_Text',           // string — recipe name e.g. "White Milk"
   UHT_WO_STATE:       '.CurrentWOState',        // string — WO state text from PLC
-  UHT_PROD_TOTAL:     '.FT1202TotalProd',       // analog — live production-gallons totalizer
-  UHT_CIP_TOTAL:      '.FT1202TotalCIP',        // analog — live CIP-gallons totalizer
-  UHT_OUTLET_FLOW:    '.FT3201_Flow',            // analog — live outlet flow GPM
+  UHT_PROD_TOTAL:     '.FT1202TotalProd',       // analog — process WATER totalizer during production (not milk)
+  UHT_CIP_TOTAL:      '.FT1202TotalCIP',        // analog — CIP water gallons totalizer
+  UHT_INLET_FLOW:     '.FT1102_Output',          // analog — timing flow meter, milk inlet GPM
 
   // Surge tank tags. Two different prefixes are used:
   //   * Status / product / state bits live under single-prefix `ThermaRoute.ST{N}_*`
@@ -145,6 +145,14 @@ class RestProvider extends BaseProvider {
     // first poll, then each subsequent poll computes (current - prev) so the
     // dashboard can show "+X gal this tick" per tank.
     this._prevSurgeGal = { ST81: null, ST82: null, ST83: null, ST84: null }
+
+    // Software milk-flow totalizer per UHT. Since FT1102 only exposes a live
+    // GPM rate (no hardware totalizer exists), we integrate it over time while
+    // the UHT is in PROCESS mode. Resets to 0 on each IDLE→PROCESS transition
+    // so galActual reflects the current run only.
+    this._uhtMilkGal  = { UHT1: 0, UHT2: 0 }
+    this._uhtPollMs   = { UHT1: null, UHT2: null }
+    this._uhtPrevMode = { UHT1: 'IDLE', UHT2: 'IDLE' }
   }
 
   // ── OData helpers ──────────────────────────────────────────────────
@@ -639,14 +647,18 @@ class RestProvider extends BaseProvider {
    *
    * UHT1 names mode bits as `Mode.CIP` (dot); UHT2 uses `Mode_CIP` (underscore).
    * The suffix list is built per-UHT so the right separator is used.
+   *
+   * galActual: in PROCESS mode this is a software-integrated milk gallon total
+   * (FT1102_Output × elapsed time), reset on each new run. In CIP mode it is
+   * the hardware FT1202TotalCIP water counter. FT1202TotalProd is process water
+   * (not milk) so it is fetched but not exposed.
    */
   async getUhtStatus() {
     const uhts = ['UHT1', 'UHT2']
 
     // Per-UHT FQN list. Slots 0-13 are shared shape; slots 14-16 are the
     // three Mode discrete bits whose separator differs per UHT (`.` on UHT1,
-    // `_` on UHT2). GalActual was dropped — it's a setpoint, not a live
-    // totalizer; FT1202TotalProd/CIP actually count up during a run.
+    // `_` on UHT2).
     const fqnsForUht = (u) => {
       const sep = u === 'UHT2' ? '_' : '.'
       return [
@@ -661,9 +673,9 @@ class RestProvider extends BaseProvider {
         `${u}${TAGS.UHT_TO_ENT}`,        // 8
         `${u}${TAGS.UHT_RECIPE_TEXT}`,   // 9
         `${u}${TAGS.UHT_WO_STATE}`,      // 10
-        `${u}${TAGS.UHT_PROD_TOTAL}`,    // 11
-        `${u}${TAGS.UHT_CIP_TOTAL}`,     // 12
-        `${u}${TAGS.UHT_OUTLET_FLOW}`,   // 13
+        `${u}${TAGS.UHT_PROD_TOTAL}`,    // 11 — process water, fetched but not used for milk
+        `${u}${TAGS.UHT_CIP_TOTAL}`,     // 12 — CIP water totalizer
+        `${u}${TAGS.UHT_INLET_FLOW}`,    // 13 — FT1102_Output, milk inlet GPM
         `${u}.Mode${sep}Process`,         // 14
         `${u}.Mode${sep}CIP`,             // 15
         `${u}.Mode${sep}DD${sep}INH`,     // 16
@@ -682,18 +694,32 @@ class RestProvider extends BaseProvider {
       const modeCip     = !!val(15)
       const modeDdInh   = !!val(16)
       let mode = 'IDLE'
-      if (modeCip)         mode = 'CIP'
+      if (modeCip)          mode = 'CIP'
       else if (modeProcess) mode = 'PROCESS'
       else if (modeDdInh)   mode = 'DD_INH'
 
       // Pick the step number that matches the active mode so the UI never
       // shows a stale CIP step while running production (and vice versa).
-      const stepNumRaw = val(4)
-      const stepNum = mode === 'CIP' ? val(6) : (mode === 'PROCESS' ? val(5) : stepNumRaw)
+      const stepNum = mode === 'CIP' ? val(6) : (mode === 'PROCESS' ? val(5) : val(4))
 
-      // Pick the matching totalizer for the mode — production gallons during
-      // a run, CIP gallons during a wash.
-      const galActual = mode === 'CIP' ? val(12) : val(11)
+      // Software-integrate milk flow (FT1102_Output, slot 13) while in PROCESS.
+      // Reset accumulator on each IDLE/CIP→PROCESS transition so galActual
+      // reflects only the current run's milk volume.
+      const nowMs = Date.now()
+      const prevMode   = this._uhtPrevMode[uhtId]
+      const lastPollMs = this._uhtPollMs[uhtId]
+      if (mode === 'PROCESS') {
+        if (prevMode !== 'PROCESS') {
+          this._uhtMilkGal[uhtId] = 0
+        } else if (lastPollMs != null) {
+          const elapsedMin = (nowMs - lastPollMs) / 60000
+          this._uhtMilkGal[uhtId] += val(13) * elapsedMin
+        }
+      }
+      this._uhtPollMs[uhtId]   = nowMs
+      this._uhtPrevMode[uhtId] = mode
+
+      const galActual = mode === 'CIP' ? val(12) : this._uhtMilkGal[uhtId]
 
       return {
         uhtId,
@@ -715,10 +741,14 @@ class RestProvider extends BaseProvider {
 
   /**
    * Resolve the current UHT → Surge tank routing for both UHTs in a single
-   * batch of 8 tag reads. The plant exposes a Connection_Code per (UHT, ST)
-   * pair; whichever has a non-zero code is the operator's selected route.
+   * batch of 8 tag reads. Connection_Code === 1 means the UHT is physically
+   * plumbed to that surge tank. UHT1 connects to ST81+ST82; UHT2 to ST83+ST84.
    *
-   * Returns: { UHT1: 'ST81' | null, UHT2: 'ST83' | null }
+   * Returns: { UHT1: string[] | null, UHT2: string[] | null }
+   * e.g. { UHT1: ['ST81','ST82'], UHT2: ['ST83','ST84'] }
+   *
+   * The caller is responsible for determining which of the connected tanks is
+   * actively being filled (use level-delta from getSurgeTankStatus pollDeltaGal).
    */
   async getUhtSurgeTankRouting() {
     const uhts = ['UHT1', 'UHT2']
@@ -728,12 +758,10 @@ class RestProvider extends BaseProvider {
     ))
     const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
 
-    const out = { UHT1: null, UHT2: null }
+    const out = {}
     uhts.forEach((u, ui) => {
-      for (let si = 0; si < sts.length; si++) {
-        const code = values[ui * 4 + si]?.Value ?? 0
-        if (code !== 0) { out[u] = sts[si]; break }
-      }
+      const connected = sts.filter((_, si) => (values[ui * 4 + si]?.Value ?? 0) === 1)
+      out[u] = connected.length > 0 ? connected : null
     })
     return out
   }
@@ -798,11 +826,17 @@ class RestProvider extends BaseProvider {
   }
 
   /**
-   * Resolve which surge tank (ST81-84) a given UHT is currently routed to.
-   * Reads the four `ThermaRoute.{UHT}_{ST}_Connection_Code` tags and picks
-   * whichever has a non-zero code — that's the operator's selected route.
-   * Also returns the surge tank's productDesc so the caller can use it as
-   * the FG for a UHT-direct WO. Returns null if no surge tank is connected.
+   * Resolve which surge tank a given UHT is actively filling right now.
+   *
+   * Reads Connection_Code for all four (UHT, ST) pairs to find which tanks
+   * are plumbed to this UHT (code === 1). Then fetches current gallons for
+   * each connected tank and uses level-delta vs the last known reading to
+   * identify the one that is rising — that's the active fill tank. Falls back
+   * to the first connected tank if none is rising (e.g. between runs).
+   *
+   * Also returns the full connectedTanks list and the active tank's productDesc
+   * so the caller can use it as the FG product name for a UHT-direct WO.
+   * Returns null if no surge tank is connected to this UHT.
    */
   async getUhtDestinationSurgeTank(uhtId) {
     if (!/^UHT[12]$/i.test(uhtId)) return null
@@ -811,29 +845,36 @@ class RestProvider extends BaseProvider {
       TAGS.UHT_ST_CONNECTION_FQN.replace('{UHT}', uhtId.toUpperCase()).replace('{ST}', st)
     )
     const codeValues = await Promise.all(codeFqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
-    let connectedIdx = -1
-    let connectedCode = 0
-    for (let i = 0; i < sts.length; i++) {
-      const code = codeValues[i]?.Value ?? 0
-      if (code !== 0) {
-        connectedIdx = i
-        connectedCode = code
-        break
-      }
-    }
-    if (connectedIdx < 0) return null
 
-    const tankId = sts[connectedIdx]
-    const num = connectedIdx + 1
-    const productFqn = `ThermaRoute.${tankId}${TAGS.ST_PRODUCT_DESC}`
-    const levelFqn = TAGS.ST_MAIN_LEVEL_FQN.replace('{TID}', tankId).replace('{N}', num)
+    const connectedTanks = sts.filter((_, i) => (codeValues[i]?.Value ?? 0) === 1)
+    if (connectedTanks.length === 0) return null
+
+    // Fetch current gallons for each connected tank
+    const galValues = await Promise.all(connectedTanks.map(tid => {
+      const n = sts.indexOf(tid) + 1
+      const fqn = TAGS.ST_MAIN_GAL_FQN.replace('{TID}', tid).replace('{N}', n)
+      return this._getCurrentValue(fqn, { verbose: false })
+    }))
+
+    // Active tank = connected tank with the highest positive level delta
+    let activeTank = connectedTanks[0]
+    let bestDelta = -Infinity
+    connectedTanks.forEach((tid, i) => {
+      const currentGal = galValues[i]?.Value ?? 0
+      const delta = this._prevSurgeGal[tid] == null ? 0 : currentGal - this._prevSurgeGal[tid]
+      this._prevSurgeGal[tid] = currentGal
+      if (delta > bestDelta) { bestDelta = delta; activeTank = tid }
+    })
+    const surgeTankId = bestDelta > 0 ? activeTank : connectedTanks[0]
+
+    const tankN = sts.indexOf(surgeTankId) + 1
     const [productPv, levelPv] = await Promise.all([
-      this._getCurrentValue(productFqn, { verbose: false }),
-      this._getCurrentValue(levelFqn, { verbose: false }),
+      this._getCurrentValue(`ThermaRoute.${surgeTankId}${TAGS.ST_PRODUCT_DESC}`, { verbose: false }),
+      this._getCurrentValue(TAGS.ST_MAIN_LEVEL_FQN.replace('{TID}', surgeTankId).replace('{N}', tankN), { verbose: false }),
     ])
     return {
-      surgeTankId: tankId,
-      connectionCode: connectedCode,
+      surgeTankId,
+      connectedTanks,
       productDesc: productPv?.Text || '',
       mainLevelPct: levelPv?.Value || 0,
     }

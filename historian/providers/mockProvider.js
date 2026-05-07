@@ -165,8 +165,8 @@ class MockProvider extends BaseProvider {
 
   async getUhtSurgeTankRouting() {
     return {
-      UHT1: ['ST81', 'ST82'][this._blendTankCycle % 2],
-      UHT2: ['ST83', 'ST84'][this._blendTankCycle % 2],
+      UHT1: ['ST81', 'ST82'],
+      UHT2: ['ST83', 'ST84'],
     }
   }
 

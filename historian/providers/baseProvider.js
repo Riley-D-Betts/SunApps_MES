@@ -133,9 +133,11 @@ class BaseProvider {
   }
 
   /**
-   * Resolve which surge tank each UHT is currently routed to (operator-set
-   * Connection_Code matrix). Returns null per UHT if no route is connected.
-   * @returns {Promise<{ UHT1: string | null, UHT2: string | null }>}
+   * Resolve which surge tanks each UHT is plumbed to (Connection_Code === 1).
+   * UHT1 connects to ST81+ST82; UHT2 to ST83+ST84. Returns null per UHT if
+   * no tanks are connected. The caller determines the actively filling tank
+   * via level-delta from getSurgeTankStatus pollDeltaGal.
+   * @returns {Promise<{ UHT1: string[] | null, UHT2: string[] | null }>}
    */
   async getUhtSurgeTankRouting() {
     throw new Error('getUhtSurgeTankRouting() not implemented')
