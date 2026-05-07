@@ -159,7 +159,9 @@ class BaseProvider {
    *   empty: boolean,
    *   connected: boolean,
    *   sterProdBarrOK: boolean,
-   *   fillingOK: boolean
+   *   fillingOK: boolean,
+   *   activeFill: boolean,
+   *   connectedUht: string | null
    * }>>}
    */
   async getSurgeTankStatus() {

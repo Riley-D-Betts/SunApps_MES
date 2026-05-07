@@ -30,11 +30,23 @@ async function run(historian) {
         .map(tid => surgeTanks.find(s => s.tankId === tid))
         .filter(Boolean)
         .reduce((a, b) => ((b.pollDeltaGal ?? -Infinity) > (a?.pollDeltaGal ?? -Infinity) ? b : a), null)
-      uhtActiveTank[uhtId] = (best?.pollDeltaGal > 0 ? best.tankId : null) ?? connectedTanks[0]
+      // Require >5 gal delta to distinguish genuine fill from sensor noise (~4 gal/tick).
+      uhtActiveTank[uhtId] = (best?.pollDeltaGal > 5 ? best.tankId : null) ?? connectedTanks[0]
       for (const tid of connectedTanks) stToUht[tid] = uhtId
     }
+    // activeFillTanks: the single tank per UHT pair that is confirmed rising this tick.
+    const activeFillTanks = new Set(
+      Object.values(uhtActiveTank).filter(tid => {
+        const tank = surgeTanks.find(s => s.tankId === tid)
+        return tank?.pollDeltaGal > 5
+      })
+    )
     const uhtsDecorated = uhts.map(u => ({ ...u, destSurgeTankId: uhtActiveTank[u.uhtId] || null }))
-    const surgeTanksDecorated = surgeTanks.map(s => ({ ...s, connectedUht: stToUht[s.tankId] || null }))
+    const surgeTanksDecorated = surgeTanks.map(s => ({
+      ...s,
+      connectedUht: stToUht[s.tankId] || null,
+      activeFill: activeFillTanks.has(s.tankId),
+    }))
 
     const durationMs = Date.now() - pollStart
 
