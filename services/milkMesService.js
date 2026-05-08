@@ -194,9 +194,12 @@ async function processSeparationBatch(data) {
       custbody_milk_destinations: destsRaw.join(', '),
     }
 
+    const bomId = itemConfig.getSeparationBomId(sourceItem.id, skimDest?.productIndex)
+    if (bomId) body.billOfMaterials = { id: bomId }
+
     if (sourceBinId) {
-      body.inventorydetail = {
-        inventoryassignment: {
+      body.inventoryDetail = {
+        inventoryAssignment: {
           items: [{ quantity: inputVolume, binnumber: { id: sourceBinId } }],
         },
       }
@@ -205,10 +208,10 @@ async function processSeparationBatch(data) {
     const componentItems = []
     if (needCream && creamDest.item.id) {
       componentItems.push({
-        item: { id: creamDest.item.id },
+        item: creamDest.item.id,
         quantity: creamVolume,
-        inventorydetail: creamDest.binId ? {
-          inventoryassignment: {
+        componentInventoryDetail: creamDest.binId ? {
+          inventoryAssignment: {
             items: [{
               quantity: creamVolume,
               receiptInventoryNumber: creamLot,
@@ -220,10 +223,10 @@ async function processSeparationBatch(data) {
     }
     if (needSkim && skimDest.item.id) {
       componentItems.push({
-        item: { id: skimDest.item.id },
+        item: skimDest.item.id,
         quantity: skimVolume,
-        inventorydetail: skimDest.binId ? {
-          inventoryassignment: {
+        componentInventoryDetail: skimDest.binId ? {
+          inventoryAssignment: {
             items: [{
               quantity: skimVolume,
               receiptInventoryNumber: skimLot,
@@ -250,15 +253,19 @@ async function processSeparationBatch(data) {
     try {
       nsResult = await core.netsuitePost('/record/v1/assemblyUnbuild', body)
     } catch (err) {
-      if (err.message?.includes('404') || err.message?.includes('not found')) {
-        console.warn('[MilkMesService] assemblyUnbuild REST endpoint not available, trying RESTlet')
+      const isNotFound = err.message?.includes('404') || err.message?.includes('not found')
+      const isInvalidItem = err.message?.includes('INVALID_VALUE') && err.message?.includes('"item"')
+      if (isNotFound || isInvalidItem) {
+        console.warn(`[MilkMesService] assemblyUnbuild REST failed (${isInvalidItem ? 'invalid item type' : 'endpoint not found'}), trying RESTlet`)
         nsResult = await core.callRestlet('customscript_sa_milk_unbuild', 'customdeploy_sa_milk_unbuild', body)
       } else {
         throw err
       }
     }
 
-    const nsTransactionId = nsResult?.body?.id || nsResult?.body?.unbuildId || nsResult?.id || null
+    const locHeader = nsResult?.headers?.location || nsResult?.headers?.Location || ''
+    const locId = locHeader.match(/\/(\d+)(?:\?.*)?$/)?.[1] || null
+    const nsTransactionId = nsResult?.body?.id || nsResult?.body?.unbuildId || nsResult?.id || locId || null
 
     await record.update({ status: 'completed', nsTransactionId, processedAt: new Date() })
     await db.MesProcessingLog.create({

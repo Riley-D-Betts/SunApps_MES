@@ -44,6 +44,27 @@ const RAW_ITEMS = {
 
 const WASTE_ALERT_THRESHOLD = 5
 
+// Maps '<assemblyItemId>_<skimProductIndex>' → NS BOM ID for assemblyUnbuild.
+// Each BOM represents one fat-level output; the skim destination's productIndex
+// determines which BOM (and therefore which component items) NS should use.
+const SEPARATION_BOM_MAP = {
+  '5417_1': 335,  // Conventional → 3.5%
+  '5417_2': 334,  // Conventional → 3.25%
+  '5417_3': 333,  // Conventional → 2%
+  '5417_4': 332,  // Conventional → 1%
+  '5417_5': 251,  // Conventional → Fat Free / Skim
+  '5404_6': 339,  // Organic → 3.5%
+  '5404_7': 338,  // Organic → 3.25%
+  '5404_8': 337,  // Organic → 2%
+  '5404_9': 336,  // Organic → 1%
+  '5404_10': 252, // Organic → Fat Free / Skim
+}
+
+function getSeparationBomId(assemblyItemId, skimProductIndex) {
+  if (!assemblyItemId || !skimProductIndex) return null
+  return SEPARATION_BOM_MAP[`${assemblyItemId}_${skimProductIndex}`] || null
+}
+
 const BLEND_TANK_ITEM_MAP = {}
 
 // NS bin IDs for each silo and blend tank at location 23 (bin names: Silo-Raw-N, Silo-Cream-N, Blend-NA/B)
@@ -228,6 +249,8 @@ async function resolveNSItemByMesCode(mesItemCode) {
 }
 
 module.exports = {
+  SEPARATION_BOM_MAP,
+  getSeparationBomId,
   SILO_ITEM_MAP,
   HISTORIAN_ITEM_MAP,
   BLEND_TANK_ITEM_MAP,

@@ -29,8 +29,10 @@ async function createSeparationUnbuild(data) {
     const result = await core.netsuitePost('/record/v1/assemblyUnbuild', body)
     return { success: true, unbuildId: result?.id || null, response: result }
   } catch (err) {
-    if (err.message?.includes('404') || err.message?.includes('not found')) {
-      console.warn('[MilkService] assemblyUnbuild REST endpoint not available, trying RESTlet fallback')
+    const isNotFound = err.message?.includes('404') || err.message?.includes('not found')
+    const isInvalidItem = err.message?.includes('INVALID_VALUE') && err.message?.includes('"item"')
+    if (isNotFound || isInvalidItem) {
+      console.warn(`[MilkService] assemblyUnbuild REST failed (${isInvalidItem ? 'invalid item type' : 'endpoint not found'}), trying RESTlet fallback`)
       const result = await core.callRestlet('customscript_sa_milk_unbuild', 'customdeploy_sa_milk_unbuild', body)
       return { success: true, unbuildId: result?.id || result?.unbuildId || null, response: result }
     }
