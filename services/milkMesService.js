@@ -178,15 +178,26 @@ async function processSeparationBatch(data) {
       return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'pending_ns', gaps, summary: { ...summary, status: 'pending_ns', gaps } }
     }
 
-    const lotDate = new Date().toISOString().slice(0, 10).replace(/-/g, '')
-    const creamLot = `${sourceSilo}-${lotDate}-CR`
-    const skimLot = `${sourceSilo}-${lotDate}-SK`
+    // Pick the BOM for this source + skim fat level. The BOM's component items
+    // are the processed product items (e.g. Organic 2% = 5410, Organic Cream = 5483),
+    // NOT the source silo's raw-milk item. We send the BOM AND component items
+    // using those BOM-matching item IDs so NS updates the BOM lines with exact
+    // quantities instead of trying to add new lines to a static sublist.
+    const skimProductIndex = skimDest?.productIndex
+    const bomId = itemConfig.getSeparationBomId(sourceItem.id, skimProductIndex)
+    if (!bomId) throw new Error(`No BOM mapped for source=${sourceItem.id} skim productIndex=${skimProductIndex}`)
+
+    // Cream item: 5483 for organic source (5404), 5480 for conventional (5417)
+    const creamItemId = sourceItem.id === 5404 ? 5483 : 5480
+    const skimItem = itemConfig.getItemByProductIndex(skimProductIndex)
+    if (needSkim && !skimItem.id) throw new Error(`No NS item for skim productIndex=${skimProductIndex}`)
 
     const body = {
       item: sourceItem.id ? { id: sourceItem.id } : undefined,
       quantity: inputVolume,
       location: { id: 23 },
       subsidiary: { id: 2 },
+      billOfMaterials: { id: bomId },
       custbody_milk_source_silo: sourceSilo,
       custbody_milk_batch_start: batchStart,
       custbody_milk_batch_end: batchEnd,
@@ -194,54 +205,10 @@ async function processSeparationBatch(data) {
       custbody_milk_destinations: destsRaw.join(', '),
     }
 
-    if (sourceBinId) {
-      body.inventoryDetail = {
-        inventoryAssignment: {
-          items: [{ quantity: inputVolume, binnumber: { id: sourceBinId } }],
-        },
-      }
-    }
-
     const componentItems = []
-    if (needCream && creamDest.item.id) {
-      componentItems.push({
-        item: creamDest.item.id,
-        quantity: creamVolume,
-        componentInventoryDetail: creamDest.binId ? {
-          inventoryAssignment: {
-            items: [{
-              quantity: creamVolume,
-              receiptInventoryNumber: creamLot,
-              binnumber: { id: creamDest.binId },
-            }],
-          },
-        } : undefined,
-      })
-    }
-    if (needSkim && skimDest.item.id) {
-      componentItems.push({
-        item: skimDest.item.id,
-        quantity: skimVolume,
-        componentInventoryDetail: skimDest.binId ? {
-          inventoryAssignment: {
-            items: [{
-              quantity: skimVolume,
-              receiptInventoryNumber: skimLot,
-              binnumber: { id: skimDest.binId },
-            }],
-          },
-        } : undefined,
-      })
-    }
-    if (componentItems.length > 0) {
-      body.component = { items: componentItems }
-      // BOM omitted when component items present — specifying a BOM locks the
-      // sublist and the REST API cannot then set componentInventoryDetail.
-      // The RESTlet fallback handles the BOM-required case via N/record dynamic mode.
-    } else {
-      const bomId = itemConfig.getSeparationBomId(sourceItem.id, skimDest?.productIndex)
-      if (bomId) body.billOfMaterials = { id: bomId }
-    }
+    if (needCream) componentItems.push({ item: creamItemId,  quantity: creamVolume })
+    if (needSkim)  componentItems.push({ item: skimItem.id, quantity: skimVolume  })
+    if (componentItems.length > 0) body.component = { items: componentItems }
 
     if (config.MES_DRY_RUN) {
       console.log(`[MilkMesService] DRY RUN — batch ${batchId} saved, skipping NS unbuild. Payload:\n${JSON.stringify(body, null, 2)}`)
@@ -254,21 +221,7 @@ async function processSeparationBatch(data) {
       return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'dry_run', wastePercent: parseFloat(wastePercent.toFixed(2)), summary: { ...summary, status: 'dry_run' } }
     }
 
-    let nsResult
-    try {
-      nsResult = await core.netsuitePost('/record/v1/assemblyUnbuild', body)
-    } catch (err) {
-      const isNotFound = err.message?.includes('404') || err.message?.includes('not found')
-      const isInvalidItem = err.message?.includes('INVALID_VALUE') && err.message?.includes('item')
-      const isComponentError = err.message?.includes('USER_ERROR') && err.message?.includes('component')
-      if (isComponentError || isNotFound || isInvalidItem) {
-        const reason = isComponentError ? 'component sublist (BOM-controlled, REST cannot set lot detail)' : isInvalidItem ? 'invalid item type' : 'endpoint not found'
-        console.warn(`[MilkMesService] assemblyUnbuild REST failed (${reason}), trying RESTlet`)
-        nsResult = await core.callRestlet('customscript_sa_milk_unbuild_rl', 'customdeploy1', body)
-      } else {
-        throw err
-      }
-    }
+    const nsResult = await core.netsuitePost('/record/v1/assemblyUnbuild', body)
 
     const locHeader = nsResult?.headers?.location || nsResult?.headers?.Location || ''
     const locId = locHeader.match(/\/(\d+)(?:\?.*)?$/)?.[1] || null

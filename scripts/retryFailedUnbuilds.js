@@ -63,15 +63,26 @@ async function fireUnbuild(row) {
 
   const destsRaw = isLegacy ? parsed : (parsed.raw || [])
 
-  const lotDate = new Date().toISOString().slice(0, 10).replace(/-/g, '')
-  const creamLot = `${sourceSilo}-${lotDate}-CR`
-  const skimLot  = `${sourceSilo}-${lotDate}-SK`
+  // The BOM defines exactly which product items the unbuild should produce.
+  // We must send those same item IDs (NOT the source silo's raw-milk item IDs)
+  // so NS updates existing BOM lines with our exact quantities instead of trying
+  // to add new lines to a static sublist.
+  const skimProductIndex = skimDest?.productIndex
+  const bomId = itemConfig.getSeparationBomId(sourceItem.id, skimProductIndex)
+  if (!bomId) throw new Error(`No BOM mapped for source=${sourceItem.id} skim productIndex=${skimProductIndex}`)
+
+  // Cream item: 5483 for organic source (5404), 5480 for conventional (5417)
+  const creamItemId = sourceItem.id === 5404 ? 5483 : 5480
+  // Skim item: look up by productIndex (e.g. 8 → 5410 Organic 2%)
+  const skimItem = itemConfig.getItemByProductIndex(skimProductIndex)
+  if (needSkim && !skimItem.id) throw new Error(`No NS item for skim productIndex=${skimProductIndex}`)
 
   const body = {
     item: { id: sourceItem.id },
     quantity: inputVolume,
     location: { id: 23 },
     subsidiary: { id: 2 },
+    billOfMaterials: { id: bomId },
     custbody_milk_source_silo: sourceSilo,
     custbody_milk_batch_start: row.batchStart,
     custbody_milk_batch_end: row.batchEnd,
@@ -79,70 +90,14 @@ async function fireUnbuild(row) {
     custbody_milk_destinations: destsRaw.join(', '),
   }
 
-  if (sourceBinId) {
-    body.inventoryDetail = {
-      inventoryAssignment: {
-        items: [{ quantity: inputVolume, binnumber: { id: sourceBinId } }],
-      },
-    }
-  }
-
-  // Build explicit component items. When component items are present, omit
-  // billOfMaterials — specifying a BOM locks the component sublist and NS rejects
-  // any attempt to set componentInventoryDetail on those lines via REST.
   const componentItems = []
-  if (needCream && creamDest.item?.id) {
-    componentItems.push({
-      item: creamDest.item.id,
-      quantity: creamVolume,
-      componentInventoryDetail: creamDest.binId ? {
-        inventoryAssignment: {
-          items: [{ quantity: creamVolume, receiptInventoryNumber: creamLot, binnumber: { id: creamDest.binId } }],
-        },
-      } : undefined,
-    })
-  }
-  if (needSkim && skimDest.item?.id) {
-    componentItems.push({
-      item: skimDest.item.id,
-      quantity: skimVolume,
-      componentInventoryDetail: skimDest.binId ? {
-        inventoryAssignment: {
-          items: [{ quantity: skimVolume, receiptInventoryNumber: skimLot, binnumber: { id: skimDest.binId } }],
-        },
-      } : undefined,
-    })
-  }
-  if (componentItems.length > 0) {
-    body.component = { items: componentItems }
-    // BOM omitted intentionally — specifying it locks the sublist (REST limitation)
-  } else {
-    // No explicit components: include BOM so NS knows which fat-level items to create
-    const bomId = itemConfig.getSeparationBomId(sourceItem.id, skimDest?.productIndex)
-    if (bomId) body.billOfMaterials = { id: bomId }
-  }
+  if (needCream) componentItems.push({ item: creamItemId,  quantity: creamVolume })
+  if (needSkim)  componentItems.push({ item: skimItem.id, quantity: skimVolume  })
+  if (componentItems.length > 0) body.component = { items: componentItems }
 
   console.log('  Request body:', JSON.stringify(body, null, 2))
 
-  let nsResult
-  try {
-    nsResult = await core.netsuitePost('/record/v1/assemblyUnbuild', body)
-  } catch (err) {
-    console.log('  NS error:', err.message)
-    const isComponentError = err.message?.includes('USER_ERROR') && err.message?.includes('component')
-    const isInvalidItem = err.message?.includes('INVALID_VALUE') && err.message?.includes('item')
-    const isNotFound = err.message?.includes('404') || err.message?.includes('not found')
-    if (isComponentError || isInvalidItem || isNotFound) {
-      // NS REST cannot set componentInventoryDetail on BOM-controlled sublists.
-      // The RESTlet uses N/record dynamic mode which bypasses this restriction.
-      // TODO: fix the SunApps_Gateway route for /api/netsuite/restlet — it currently
-      //       routes to the NS record API instead of the RESTlet endpoint.
-      console.log('  Falling back to RESTlet (requires gateway fix in SunApps_Gateway)')
-      nsResult = await core.callRestlet('customscript_sa_milk_unbuild_rl', 'customdeploy1', body)
-    } else {
-      throw err
-    }
-  }
+  const nsResult = await core.netsuitePost('/record/v1/assemblyUnbuild', body)
 
   const locHeader = nsResult?.headers?.location || nsResult?.headers?.Location || ''
   const locId = locHeader.match(/\/(\d+)(?:\?.*)?$/)?.[1] || null
