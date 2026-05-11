@@ -194,9 +194,6 @@ async function processSeparationBatch(data) {
       custbody_milk_destinations: destsRaw.join(', '),
     }
 
-    const bomId = itemConfig.getSeparationBomId(sourceItem.id, skimDest?.productIndex)
-    if (bomId) body.billOfMaterials = { id: bomId }
-
     if (sourceBinId) {
       body.inventoryDetail = {
         inventoryAssignment: {
@@ -236,7 +233,15 @@ async function processSeparationBatch(data) {
         } : undefined,
       })
     }
-    if (componentItems.length > 0) body.component = { items: componentItems }
+    if (componentItems.length > 0) {
+      body.component = { items: componentItems }
+      // BOM omitted when component items present — specifying a BOM locks the
+      // sublist and the REST API cannot then set componentInventoryDetail.
+      // The RESTlet fallback handles the BOM-required case via N/record dynamic mode.
+    } else {
+      const bomId = itemConfig.getSeparationBomId(sourceItem.id, skimDest?.productIndex)
+      if (bomId) body.billOfMaterials = { id: bomId }
+    }
 
     if (config.MES_DRY_RUN) {
       console.log(`[MilkMesService] DRY RUN — batch ${batchId} saved, skipping NS unbuild. Payload:\n${JSON.stringify(body, null, 2)}`)
@@ -256,14 +261,9 @@ async function processSeparationBatch(data) {
       const isNotFound = err.message?.includes('404') || err.message?.includes('not found')
       const isInvalidItem = err.message?.includes('INVALID_VALUE') && err.message?.includes('item')
       const isComponentError = err.message?.includes('USER_ERROR') && err.message?.includes('component')
-      if (isComponentError && body.component) {
-        // NS BOM controls the component sublist — retry without it and let NS fill quantities from BOM
-        console.warn('[MilkMesService] assemblyUnbuild REST failed (component sublist is static) — retrying without component field')
-        const bodyNoComponent = { ...body }
-        delete bodyNoComponent.component
-        nsResult = await core.netsuitePost('/record/v1/assemblyUnbuild', bodyNoComponent)
-      } else if (isNotFound || isInvalidItem) {
-        console.warn(`[MilkMesService] assemblyUnbuild REST failed (${isInvalidItem ? 'invalid item type' : 'endpoint not found'}), trying RESTlet`)
+      if (isComponentError || isNotFound || isInvalidItem) {
+        const reason = isComponentError ? 'component sublist (BOM-controlled, REST cannot set lot detail)' : isInvalidItem ? 'invalid item type' : 'endpoint not found'
+        console.warn(`[MilkMesService] assemblyUnbuild REST failed (${reason}), trying RESTlet`)
         nsResult = await core.callRestlet('customscript_sa_milk_unbuild', 'customdeploy_sa_milk_unbuild', body)
       } else {
         throw err

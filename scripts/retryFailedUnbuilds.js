@@ -79,9 +79,6 @@ async function fireUnbuild(row) {
     custbody_milk_destinations: destsRaw.join(', '),
   }
 
-  const bomId = itemConfig.getSeparationBomId(sourceItem.id, skimDest?.productIndex)
-  if (bomId) body.billOfMaterials = { id: bomId }
-
   if (sourceBinId) {
     body.inventoryDetail = {
       inventoryAssignment: {
@@ -90,6 +87,9 @@ async function fireUnbuild(row) {
     }
   }
 
+  // Build explicit component items. When component items are present, omit
+  // billOfMaterials — specifying a BOM locks the component sublist and NS rejects
+  // any attempt to set componentInventoryDetail on those lines via REST.
   const componentItems = []
   if (needCream && creamDest.item?.id) {
     componentItems.push({
@@ -113,18 +113,31 @@ async function fireUnbuild(row) {
       } : undefined,
     })
   }
-  if (componentItems.length > 0) body.component = { items: componentItems }
+  if (componentItems.length > 0) {
+    body.component = { items: componentItems }
+    // BOM omitted intentionally — specifying it locks the sublist (REST limitation)
+  } else {
+    // No explicit components: include BOM so NS knows which fat-level items to create
+    const bomId = itemConfig.getSeparationBomId(sourceItem.id, skimDest?.productIndex)
+    if (bomId) body.billOfMaterials = { id: bomId }
+  }
+
+  console.log('  Request body:', JSON.stringify(body, null, 2))
 
   let nsResult
   try {
     nsResult = await core.netsuitePost('/record/v1/assemblyUnbuild', body)
   } catch (err) {
+    console.log('  NS error:', err.message)
+    const isComponentError = err.message?.includes('USER_ERROR') && err.message?.includes('component')
     const isInvalidItem = err.message?.includes('INVALID_VALUE') && err.message?.includes('item')
     const isNotFound = err.message?.includes('404') || err.message?.includes('not found')
-    const isComponentError = err.message?.includes('USER_ERROR') && err.message?.includes('component')
-    if (isInvalidItem || isNotFound || isComponentError) {
-      const reason = isComponentError ? 'component sublist' : isInvalidItem ? 'INVALID_VALUE/item' : '404'
-      console.log(`  REST failed (${reason}) — trying RESTlet`)
+    if (isComponentError || isInvalidItem || isNotFound) {
+      // NS REST cannot set componentInventoryDetail on BOM-controlled sublists.
+      // The RESTlet uses N/record dynamic mode which bypasses this restriction.
+      // TODO: fix the SunApps_Gateway route for /api/netsuite/restlet — it currently
+      //       routes to the NS record API instead of the RESTlet endpoint.
+      console.log('  Falling back to RESTlet (requires gateway fix in SunApps_Gateway)')
       nsResult = await core.callRestlet('customscript_sa_milk_unbuild', 'customdeploy_sa_milk_unbuild', body)
     } else {
       throw err
