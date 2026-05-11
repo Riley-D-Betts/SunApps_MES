@@ -264,7 +264,7 @@ async function processSeparationBatch(data) {
       if (isComponentError || isNotFound || isInvalidItem) {
         const reason = isComponentError ? 'component sublist (BOM-controlled, REST cannot set lot detail)' : isInvalidItem ? 'invalid item type' : 'endpoint not found'
         console.warn(`[MilkMesService] assemblyUnbuild REST failed (${reason}), trying RESTlet`)
-        nsResult = await core.callRestlet('customscript_sa_milk_unbuild', 'customdeploy_sa_milk_unbuild', body)
+        nsResult = await core.callRestlet('customscript_sa_milk_unbuild_rl', 'customdeploy1', body)
       } else {
         throw err
       }

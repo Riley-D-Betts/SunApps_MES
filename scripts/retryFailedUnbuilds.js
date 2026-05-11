@@ -138,7 +138,7 @@ async function fireUnbuild(row) {
       // TODO: fix the SunApps_Gateway route for /api/netsuite/restlet — it currently
       //       routes to the NS record API instead of the RESTlet endpoint.
       console.log('  Falling back to RESTlet (requires gateway fix in SunApps_Gateway)')
-      nsResult = await core.callRestlet('customscript_sa_milk_unbuild', 'customdeploy_sa_milk_unbuild', body)
+      nsResult = await core.callRestlet('customscript_sa_milk_unbuild_rl', 'customdeploy1', body)
     } else {
       throw err
     }

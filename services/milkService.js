@@ -33,7 +33,7 @@ async function createSeparationUnbuild(data) {
     const isInvalidItem = err.message?.includes('INVALID_VALUE') && err.message?.includes('"item"')
     if (isNotFound || isInvalidItem) {
       console.warn(`[MilkService] assemblyUnbuild REST failed (${isInvalidItem ? 'invalid item type' : 'endpoint not found'}), trying RESTlet fallback`)
-      const result = await core.callRestlet('customscript_sa_milk_unbuild', 'customdeploy_sa_milk_unbuild', body)
+      const result = await core.callRestlet('customscript_sa_milk_unbuild_rl', 'customdeploy1', body)
       return { success: true, unbuildId: result?.id || result?.unbuildId || null, response: result }
     }
     throw err
