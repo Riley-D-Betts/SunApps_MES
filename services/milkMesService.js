@@ -205,9 +205,36 @@ async function processSeparationBatch(data) {
       custbody_milk_destinations: destsRaw.join(', '),
     }
 
+    // Source assembly item is bin-tracked — tell NS which bin to pull from.
+    if (sourceBinId) {
+      body.inventoryDetail = {
+        inventoryAssignment: {
+          items: [{ quantity: inputVolume, binnumber: { id: sourceBinId } }],
+        },
+      }
+    }
+
+    // Output items are bin-tracked (not lot-tracked), so each component line
+    // needs componentInventoryDetail with just binnumber — no lot/receiptInventoryNumber.
     const componentItems = []
-    if (needCream) componentItems.push({ item: creamItemId,  quantity: creamVolume })
-    if (needSkim)  componentItems.push({ item: skimItem.id, quantity: skimVolume  })
+    if (needCream) {
+      componentItems.push({
+        item: creamItemId,
+        quantity: creamVolume,
+        componentInventoryDetail: creamDest.binId ? {
+          inventoryAssignment: { items: [{ quantity: creamVolume, binnumber: { id: creamDest.binId } }] },
+        } : undefined,
+      })
+    }
+    if (needSkim) {
+      componentItems.push({
+        item: skimItem.id,
+        quantity: skimVolume,
+        componentInventoryDetail: skimDest.binId ? {
+          inventoryAssignment: { items: [{ quantity: skimVolume, binnumber: { id: skimDest.binId } }] },
+        } : undefined,
+      })
+    }
     if (componentItems.length > 0) body.component = { items: componentItems }
 
     if (config.MES_DRY_RUN) {

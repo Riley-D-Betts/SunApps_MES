@@ -19,6 +19,8 @@ const db = require('../models')
 const { sequelize } = require('../config')
 
 const confirm = process.argv.includes('--confirm')
+const limitArg = process.argv.find(a => a.startsWith('--limit='))
+const limit = limitArg ? parseInt(limitArg.split('=')[1], 10) : null
 
 async function fireUnbuild(row) {
   let parsed = {}
@@ -90,9 +92,36 @@ async function fireUnbuild(row) {
     custbody_milk_destinations: destsRaw.join(', '),
   }
 
+  // Source assembly item is bin-tracked — tell NS which bin to pull from.
+  if (sourceBinId) {
+    body.inventoryDetail = {
+      inventoryAssignment: {
+        items: [{ quantity: inputVolume, binnumber: { id: sourceBinId } }],
+      },
+    }
+  }
+
+  // Output items are bin-tracked (not lot-tracked), so each component line
+  // needs a componentInventoryDetail with just binnumber — no receiptInventoryNumber.
   const componentItems = []
-  if (needCream) componentItems.push({ item: creamItemId,  quantity: creamVolume })
-  if (needSkim)  componentItems.push({ item: skimItem.id, quantity: skimVolume  })
+  if (needCream) {
+    componentItems.push({
+      item: creamItemId,
+      quantity: creamVolume,
+      componentInventoryDetail: creamDest.binId ? {
+        inventoryAssignment: { items: [{ quantity: creamVolume, binnumber: { id: creamDest.binId } }] },
+      } : undefined,
+    })
+  }
+  if (needSkim) {
+    componentItems.push({
+      item: skimItem.id,
+      quantity: skimVolume,
+      componentInventoryDetail: skimDest.binId ? {
+        inventoryAssignment: { items: [{ quantity: skimVolume, binnumber: { id: skimDest.binId } }] },
+      } : undefined,
+    })
+  }
   if (componentItems.length > 0) body.component = { items: componentItems }
 
   console.log('  Request body:', JSON.stringify(body, null, 2))
@@ -106,9 +135,11 @@ async function fireUnbuild(row) {
 }
 
 async function main() {
+  const order = process.argv.includes('--newest-first') ? 'DESC' : 'ASC'
   const rows = await db.MesSeparationBatch.findAll({
     where: { status: 'error' },
-    order: [['createdAt', 'ASC']],
+    order: [['createdAt', order]],
+    limit: limit || undefined,
     raw: false,
   })
 
