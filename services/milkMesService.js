@@ -254,7 +254,7 @@ async function processSeparationBatch(data) {
       nsResult = await core.netsuitePost('/record/v1/assemblyUnbuild', body)
     } catch (err) {
       const isNotFound = err.message?.includes('404') || err.message?.includes('not found')
-      const isInvalidItem = err.message?.includes('INVALID_VALUE') && err.message?.includes('"item"')
+      const isInvalidItem = err.message?.includes('INVALID_VALUE') && err.message?.includes('item')
       if (isNotFound || isInvalidItem) {
         console.warn(`[MilkMesService] assemblyUnbuild REST failed (${isInvalidItem ? 'invalid item type' : 'endpoint not found'}), trying RESTlet`)
         nsResult = await core.callRestlet('customscript_sa_milk_unbuild', 'customdeploy_sa_milk_unbuild', body)
