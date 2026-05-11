@@ -18,7 +18,7 @@ async function main() {
     for (const d of dests.resolved || []) {
       console.log(`    - raw=${d.raw} silo=${d.silo} kind=${d.kind} idx=${d.productIndex} name="${d.productName}" nsItem=${d.item?.id} (${d.item?.name}) bin=${d.binId}`)
     }
-    console.log('  err:', (r.errorMessage || '').slice(0, 200))
+    console.log('  err:', r.errorMessage || '')
   }
   await db.sequelize.close()
 }

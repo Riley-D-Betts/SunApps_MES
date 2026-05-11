@@ -786,11 +786,12 @@ async function tickCompletionForBatch(batch) {
   const yy = String(now.getFullYear()).slice(-2)
   const woNum = String(batch.nsWorkOrderNumber || '').replace(/\D/g, '')
   const lotNumber = `${mm}${dd}${yy}${woNum}`
-  const assignmentEntry = { quantity: Math.round(target * 1000) / 1000, receiptInventoryNumber: lotNumber }
+  const roundedTarget = Math.round(target * 1000) / 1000
+  const assignmentEntry = { quantity: roundedTarget, receiptInventoryNumber: lotNumber }
   if (completionBinId) assignmentEntry.binnumber = String(completionBinId)
 
   const body = {
-    quantity: target,
+    quantity: roundedTarget,
     inventorydetail: {
       inventoryassignment: {
         items: [assignmentEntry],
