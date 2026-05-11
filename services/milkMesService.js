@@ -255,8 +255,10 @@ async function processSeparationBatch(data) {
     } catch (err) {
       const isNotFound = err.message?.includes('404') || err.message?.includes('not found')
       const isInvalidItem = err.message?.includes('INVALID_VALUE') && err.message?.includes('item')
-      if (isNotFound || isInvalidItem) {
-        console.warn(`[MilkMesService] assemblyUnbuild REST failed (${isInvalidItem ? 'invalid item type' : 'endpoint not found'}), trying RESTlet`)
+      const isComponentError = err.message?.includes('USER_ERROR') && err.message?.includes('component')
+      if (isNotFound || isInvalidItem || isComponentError) {
+        const reason = isComponentError ? 'component sublist' : isInvalidItem ? 'invalid item type' : 'endpoint not found'
+        console.warn(`[MilkMesService] assemblyUnbuild REST failed (${reason}), trying RESTlet`)
         nsResult = await core.callRestlet('customscript_sa_milk_unbuild', 'customdeploy_sa_milk_unbuild', body)
       } else {
         throw err

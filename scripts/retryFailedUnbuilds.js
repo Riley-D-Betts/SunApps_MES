@@ -28,20 +28,40 @@ async function fireUnbuild(row) {
   const inputVolume = parseFloat(row.inputVolume) || 0
   const creamVolume = parseFloat(row.creamVolume) || 0
   const skimVolume = parseFloat(row.skimVolume) || 0
-  const destsRaw = parsed.raw || []
-
-  const src = parsed.source || {}
-  const sourceItem = src.nsItemId ? { id: src.nsItemId } : { id: null }
+  // New format: { source, resolved, raw }. Legacy format: plain array of silo names.
+  const isLegacy = Array.isArray(parsed)
+  const src = (!isLegacy && parsed.source) || {}
   const sourceBinId = itemConfig.getBinId(sourceSilo)
 
-  const resolved = Array.isArray(parsed.resolved) ? parsed.resolved : []
+  // Source item: prefer stored nsItemId, fall back to SILO_ITEM_MAP by silo name.
+  const sourceItem = src.nsItemId
+    ? { id: src.nsItemId }
+    : itemConfig.getItem(row.itemId, sourceSilo)
+  if (!sourceItem.id) throw new Error(`Cannot resolve source NS item for batch ${row.batchId} (silo=${sourceSilo})`)
+
+  // Resolved destinations: new format has the full array; legacy format is a plain
+  // array of silo name strings — classify by prefix and look up from SILO_ITEM_MAP.
+  let resolved
+  if (!isLegacy && Array.isArray(parsed.resolved)) {
+    resolved = parsed.resolved
+  } else {
+    const legacyNames = isLegacy ? parsed : (parsed.raw || [])
+    resolved = legacyNames.map(raw => {
+      const silo = itemConfig.normalizeSiloName(raw)
+      const kind = itemConfig.classifySiloDestination(raw)
+      const item = silo ? itemConfig.getItem(null, silo) : { id: null, name: '' }
+      return { raw, silo, kind, binId: silo ? itemConfig.getBinId(silo) : null,
+               productIndex: 0, productName: '', item }
+    })
+  }
+
   const creamDest = resolved.find(d => d.kind === 'cream') || null
   const skimDest  = resolved.find(d => d.kind === 'skim' && (d.silo || d.raw) !== sourceSilo) || null
 
   const needCream = !!(creamDest && creamVolume > 0)
   const needSkim  = !!(skimDest  && skimVolume  > 0)
 
-  if (!sourceItem.id) throw new Error(`No source NS item ID stored for batch ${row.batchId}`)
+  const destsRaw = isLegacy ? parsed : (parsed.raw || [])
 
   const lotDate = new Date().toISOString().slice(0, 10).replace(/-/g, '')
   const creamLot = `${sourceSilo}-${lotDate}-CR`
@@ -101,8 +121,10 @@ async function fireUnbuild(row) {
   } catch (err) {
     const isInvalidItem = err.message?.includes('INVALID_VALUE') && err.message?.includes('item')
     const isNotFound = err.message?.includes('404') || err.message?.includes('not found')
-    if (isInvalidItem || isNotFound) {
-      console.log(`  REST failed (${isInvalidItem ? 'INVALID_VALUE/item' : '404'}) — trying RESTlet`)
+    const isComponentError = err.message?.includes('USER_ERROR') && err.message?.includes('component')
+    if (isInvalidItem || isNotFound || isComponentError) {
+      const reason = isComponentError ? 'component sublist' : isInvalidItem ? 'INVALID_VALUE/item' : '404'
+      console.log(`  REST failed (${reason}) — trying RESTlet`)
       nsResult = await core.callRestlet('customscript_sa_milk_unbuild', 'customdeploy_sa_milk_unbuild', body)
     } else {
       throw err
