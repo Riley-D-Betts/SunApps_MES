@@ -37,6 +37,21 @@ module.exports = {
   // this we just defer to the next tick so we don't spam NS with sub-pound noise.
   MES_MIN_ISSUE_LBS: parseFloat(process.env.MES_MIN_ISSUE_LBS || '10'),
   MES_MIN_COMPLETION_LBS: parseFloat(process.env.MES_MIN_COMPLETION_LBS || '1'),
+  // Test-input override for blend tank product selection. JSON object mapping
+  // tankId → raw NS item ID (e.g. '{"BlendTank1A":8344,"BlendTank2A":8347}').
+  // When set for a tank, processWOStart uses that item ID directly and skips
+  // the fuzzy product parser. Temporary scaffolding until the AVEVA tag for
+  // batch product is wired up; replace the env-var read with a historian-tag
+  // read at that point.
+  BLEND_TANK_OVERRIDES: (() => {
+    if (!process.env.BLEND_TANK_OVERRIDES) return {}
+    try {
+      return JSON.parse(process.env.BLEND_TANK_OVERRIDES)
+    } catch (e) {
+      console.warn(`[Config] Failed to parse BLEND_TANK_OVERRIDES: ${e.message}`)
+      return {}
+    }
+  })(),
   HISTORIAN_BASE_URL: process.env.HISTORIAN_BASE_URL,
   HISTORIAN_DOMAIN: process.env.HISTORIAN_DOMAIN || '',
   HISTORIAN_USERNAME: process.env.HISTORIAN_USERNAME,

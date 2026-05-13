@@ -86,10 +86,23 @@ async function processWOStart(data) {
     return { success: true, cooldown: true, tankId, productName, lastBatchAge: ageSec }
   }
 
-  const parsed = productParser.parseProductName(productName)
-  const assemblyItem = parsed
-    ? { id: parsed.nsId, name: parsed.name, confidence: parsed.confidence }
-    : { id: null, name: `Unrecognized: "${productName}"`, confidence: 'none' }
+  // Test-input override: if BLEND_TANK_OVERRIDES has an entry for this tank,
+  // use it directly and skip the parser. This is the temporary stand-in for
+  // the not-yet-available AVEVA product tag.
+  const overrideItemId = config.BLEND_TANK_OVERRIDES?.[tankId]
+  let parsed, assemblyItem
+  if (overrideItemId) {
+    const overrideCatalog = productParser.getProductByNsId(overrideItemId)
+    const overrideName = overrideCatalog?.name || `NS item ${overrideItemId}`
+    console.log(`[BlendTankMesService] OVERRIDE: ${tankId} → NS item ${overrideItemId} (${overrideName}) — skipping parser`)
+    parsed = { nsId: overrideItemId, name: overrideName, confidence: 'override', score: 0, parsed: { override: true, productName } }
+    assemblyItem = { id: overrideItemId, name: overrideName, confidence: 'override' }
+  } else {
+    parsed = productParser.parseProductName(productName)
+    assemblyItem = parsed
+      ? { id: parsed.nsId, name: parsed.name, confidence: parsed.confidence }
+      : { id: null, name: `Unrecognized: "${productName}"`, confidence: 'none' }
+  }
 
   console.log(`[BlendTankMesService] Processing batch start: ${tankId} / "${productName}"`)
   console.log(`  Parsed: ${assemblyItem.name} (NS ${assemblyItem.id}, confidence: ${assemblyItem.confidence})`)
