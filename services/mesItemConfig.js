@@ -15,14 +15,14 @@ const SILO_ITEM_MAP = {
 
 const CREAM_ITEM_CONV = { id: 5480, name: 'Raw Conventional Cream' }
 const CREAM_ITEM_ORG  = { id: 5483, name: 'Raw Organic Cream' }
-const SKIM_ITEM_CONV  = { id: 5477, name: 'Raw Conventional 0%' }
+const SKIM_ITEM_CONV  = { id: 8163, name: 'Raw Conventional 0% - Skim' }
 const SKIM_ITEM_ORG   = { id: 5482, name: 'Raw Organic 0%' }
 
 const CREAM_ITEM = CREAM_ITEM_CONV
 const SKIM_ITEM  = SKIM_ITEM_CONV
 
 const RAW_ITEMS = {
-  CONV_0:      { id: 5477, name: 'Raw Conventional 0%' },
+  CONV_0:      { id: 8163, name: 'Raw Conventional 0% - Skim' },
   CONV_1:      { id: 5415, name: 'Raw Conventional 1%' },
   CONV_2:      { id: 5412, name: 'Raw Conventional 2%' },
   CONV_3_25:   { id: 5413, name: 'Raw Conventional 3.25%' },
@@ -48,16 +48,16 @@ const WASTE_ALERT_THRESHOLD = 5
 // Each BOM represents one fat-level output; the skim destination's productIndex
 // determines which BOM (and therefore which component items) NS should use.
 const SEPARATION_BOM_MAP = {
-  '5417_1': 335,  // Conventional → 3.5%
-  '5417_2': 334,  // Conventional → 3.25%
-  '5417_3': 333,  // Conventional → 2%
-  '5417_4': 332,  // Conventional → 1%
-  '5417_5': 251,  // Conventional → Fat Free / Skim
-  '5404_6': 339,  // Organic → 3.5%
-  '5404_7': 338,  // Organic → 3.25%
-  '5404_8': 337,  // Organic → 2%
-  '5404_9': 336,  // Organic → 1%
-  '5404_10': 252, // Organic → Fat Free / Skim
+  '5417_1': 353,  // Conventional → 3.5%   (Raw Conventional Milk to 3.5% and Cream)
+  '5417_2': 351,  // Conventional → 3.25%  (Raw Conventional Milk to 3.25% and Cream)
+  '5417_3': 338,  // Conventional → 2%     (Raw Conventional Milk to 2% and Cream)
+  '5417_4': 337,  // Conventional → 1%     (Raw Conventional Milk to 1% and Cream)
+  '5417_5': 251,  // Conventional → Fat Free / Skim (Raw Conventional Milk to Skim and Cream)
+  '5404_6': 350,  // Organic → 3.5%   (Raw Organic Milk to 3.5% and cream)
+  '5404_7': 349,  // Organic → 3.25%  (Raw Organic Milk to 3.25% and cream)
+  '5404_8': 348,  // Organic → 2%     (Raw Organic Milk to 2% and cream)
+  '5404_9': 347,  // Organic → 1%     (Raw Organic Milk to 1% and cream)
+  '5404_10': 252, // Organic → Fat Free / Skim (Raw Organic Milk to skim and cream)
 }
 
 function getSeparationBomId(assemblyItemId, skimProductIndex) {
@@ -144,7 +144,7 @@ function classifySiloDestination(raw) {
 const HISTORIAN_ITEM_MAP = {
   '300015': { id: 5417, name: 'Raw Conventional Milk', nsType: 'Assembly' },
   '300016': { id: 5404, name: 'Raw Organic Milk', nsType: 'Assembly' },
-  '300005': { id: 5477, name: 'Raw Conventional 0%', nsType: 'InvtPart' },
+  '300005': { id: 8163, name: 'Raw Conventional 0% - Skim', nsType: 'InvtPart' },
   '300010': { id: 5482, name: 'Raw Organic 0%', nsType: 'InvtPart' },
   '300011': { id: 5480, name: 'Raw Conventional Cream', nsType: 'InvtPart' },
   '300012': { id: 5483, name: 'Raw Organic Cream', nsType: 'InvtPart' },
@@ -166,7 +166,7 @@ const PRODUCT_INDEX_ITEM_MAP = {
   2:  { id: 5413, name: 'Conventional Whole 3.25%' },
   3:  { id: 5412, name: 'Conventional Reduced Fat 2%' },
   4:  { id: 5415, name: 'Conventional Low Fat 1%' },
-  5:  { id: 5477, name: 'Conventional Fat Free' },
+  5:  { id: 8163, name: 'Conventional Fat Free' },
   6:  { id: 5401, name: 'Organic Whole 3.5%' },
   7:  { id: 5411, name: 'Organic Whole 3.25%' },
   8:  { id: 5410, name: 'Organic Reduced Fat 2%' },
