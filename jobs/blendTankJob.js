@@ -32,6 +32,38 @@ const lineState = {
 
 let lastPollTime = new Date()
 
+/**
+ * Restore in-memory tankState from any 'active' MesBlendTankBatch rows so a
+ * service restart picks up where it left off. See surgeTankJob.hydrateFromDb
+ * for the full rationale — same design here.
+ */
+async function hydrateFromDb(MesBlendTankBatch) {
+  try {
+    const rows = await MesBlendTankBatch.findAll({
+      where: { status: 'active' },
+      order: [['detectedAt', 'DESC']],
+    })
+    const newestByTank = {}
+    for (const r of rows) {
+      if (!newestByTank[r.tankId]) newestByTank[r.tankId] = r
+    }
+    for (const tankId of Object.keys(tankState)) {
+      const row = newestByTank[tankId]
+      if (!row) continue
+      tankState[tankId].productName = row.productName
+      tankState[tankId].batchActive = true
+      tankState[tankId].seeded = true
+      tankState[tankId].batchStartedAt = row.detectedAt ? new Date(row.detectedAt).getTime() : Date.now()
+      console.log(`[BlendTankJob] Hydrated ${tankId} from DB: "${row.productName}" (active since ${row.detectedAt})`)
+    }
+    console.log(`[BlendTankJob] Hydrated tankState from ${rows.length} active row(s)`)
+    return rows.length
+  } catch (err) {
+    console.error('[BlendTankJob] Hydration failed:', err.message)
+    return 0
+  }
+}
+
 async function run(historian) {
   const pollStart = Date.now()
   try {
@@ -43,9 +75,15 @@ async function run(historian) {
       if (!prev) continue
 
       if (!prev.seeded) {
+        // Don't seed an empty/null product — wait for a real value. If we
+        // seed empty here and the next poll returns the real product, it
+        // looks like a product-change and false-fires a new WO.
+        if (!productName) {
+          continue
+        }
         prev.productName = productName
         prev.seeded = true
-        console.log(`[BlendTankJob] Seeding ${tankId}: product="${productName || ''}"`)
+        console.log(`[BlendTankJob] Seeding ${tankId}: product="${productName}"`)
         continue
       }
 
@@ -214,4 +252,4 @@ function getLastPollTime() {
   return lastPollTime
 }
 
-module.exports = { run, getLastPollTime }
+module.exports = { run, getLastPollTime, hydrateFromDb }

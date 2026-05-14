@@ -27,6 +27,12 @@ sequelize.sync().then(async () => {
   await statusStore.hydrateTickState(db.MesBlendTankBatch, db.MesPipeIssueState, db.MesSurgeTankBatch, db.MesSurgeTankIssueState)
   await statusStore.hydrateRecentBlendBatches(db.MesBlendTankBatch)
   await statusStore.hydrateRecentSurgeBatches(db.MesSurgeTankBatch)
+  // Restore in-memory tank state so the cron jobs recognize batches that were
+  // already running before the restart. Without this, the first poll would
+  // see an empty in-memory state and either false-fire a new WO (if the
+  // product is set) or never close the orphaned DB row (if it later clears).
+  await blendTankJob.hydrateFromDb(db.MesBlendTankBatch)
+  await surgeTankJob.hydrateFromDb(db.MesSurgeTankBatch)
   console.log('Sequelize models synced.')
 })
 

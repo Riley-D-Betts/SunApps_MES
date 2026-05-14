@@ -25,6 +25,46 @@ const tankState = {
 let lastPollTime = new Date()
 
 /**
+ * Restore in-memory tankState from any 'active' MesSurgeTankBatch rows so a
+ * service restart picks up where it left off — no false starts (a returning
+ * product looks unchanged) and no orphaned active rows in the DB (a cleared
+ * or changed product still fires the correct END).
+ *
+ * DB is authoritative: if the live product on the next poll differs from the
+ * hydrated value, the normal product-change branch fires END for the stale
+ * batch and START for the new one. That's correct: it closes the old WO and
+ * opens a fresh one matching the operator's current intent.
+ */
+async function hydrateFromDb(MesSurgeTankBatch) {
+  try {
+    const rows = await MesSurgeTankBatch.findAll({
+      where: { status: 'active' },
+      order: [['detectedAt', 'DESC']],
+    })
+    const newestByTank = {}
+    for (const r of rows) {
+      if (!newestByTank[r.tankId]) newestByTank[r.tankId] = r
+    }
+    for (const tankId of Object.keys(tankState)) {
+      const row = newestByTank[tankId]
+      if (!row) continue
+      tankState[tankId].productName = row.productName
+      tankState[tankId].batchActive = true
+      tankState[tankId].seeded = true
+      tankState[tankId].batchStartedAt = row.detectedAt ? new Date(row.detectedAt).getTime() : Date.now()
+      tankState[tankId].feedingUhtId = row.feedingUhtId || null
+      tankState[tankId].feedingFromEntName = row.feedingFromEntName || null
+      console.log(`[SurgeTankJob] Hydrated ${tankId} from DB: "${row.productName}" (active since ${row.detectedAt})`)
+    }
+    console.log(`[SurgeTankJob] Hydrated tankState from ${rows.length} active row(s)`)
+    return rows.length
+  } catch (err) {
+    console.error('[SurgeTankJob] Hydration failed:', err.message)
+    return 0
+  }
+}
+
+/**
  * Resolve which UHT is currently feeding a given surge tank.
  * UHT1 is plumbed to ST81/ST82; UHT2 to ST83/ST84 — the Connection_Code tags
  * confirm the live state. Returns null if no UHT shows this ST connected.
@@ -56,9 +96,15 @@ async function run(historian) {
       const gallons = mainGallons || 0
 
       if (!prev.seeded) {
+        // Don't seed an empty/null product — wait for a real value. If we
+        // seed empty here and the next poll returns the real product, it
+        // looks like a product-change and false-fires a new WO.
+        if (!productName) {
+          continue
+        }
         prev.productName = productName
         prev.seeded = true
-        console.log(`[SurgeTankJob] Seeding ${tankId}: product="${productName || ''}"`)
+        console.log(`[SurgeTankJob] Seeding ${tankId}: product="${productName}"`)
         continue
       }
 
@@ -186,4 +232,4 @@ function getLastPollTime() {
   return lastPollTime
 }
 
-module.exports = { run, getLastPollTime }
+module.exports = { run, getLastPollTime, hydrateFromDb }
