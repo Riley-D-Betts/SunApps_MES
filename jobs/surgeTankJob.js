@@ -11,8 +11,29 @@ const EMPTY_THRESHOLD_GAL = 10
 // any real product has landed.
 const MIN_BATCH_DURATION_MS = 120_000
 
+// Sentinel productDesc values that look like real strings to the historian
+// but are not real product names. The PLC and operator entries can write any
+// of these to indicate "not in production"; treating any as a product
+// false-starts a WO. Compare lowercase so we catch case variants.
+const PRODUCT_SENTINELS = new Set(['', 'none', 'empty', 'cip', 'water', 'sterile', 'n/a', '-', '--'])
+
 function validStr(val) {
-  return val && val !== 'None' && val !== 'none' ? val : null
+  if (val == null) return null
+  const trimmed = String(val).trim()
+  if (!trimmed) return null
+  if (PRODUCT_SENTINELS.has(trimmed.toLowerCase())) return null
+  return val
+}
+
+// Tank is in CIP / non-sterile state and not eligible to start a batch.
+//   state === 4 is the confirmed CIP code (per SURGE_STATE_NAMES on the
+//     dashboard).
+//   sterProdBarrOK === false means the Sterile Product Barrier is down, so
+//     the tank cannot hold sterile product even if productDesc looks valid.
+function isCipMode(status) {
+  if (status?.state === 4) return true
+  if (status && status.sterProdBarrOK === false) return true
+  return false
 }
 
 const tankState = {
@@ -127,6 +148,8 @@ async function run(historian) {
         }
       }
 
+      const cip = isCipMode(status)
+
       if (hasProduct && productName !== prev.productName) {
         if (prev.batchActive && prev.productName) {
           console.log(`[SurgeTankJob] BATCH END (product change) on ${tankId}: "${prev.productName}"`)
@@ -138,6 +161,18 @@ async function run(historian) {
           } catch (err) {
             console.error(`[SurgeTankJob] processWOEnd failed for ${tankId}:`, err.message)
           }
+        }
+
+        // Don't start a WO when the tank is in CIP / non-sterile state — the
+        // productDesc may carry sterile-prep text the operator left from a
+        // previous run, and the tank cannot legitimately hold product. We
+        // still adopt the new productName as the latest seen value so the
+        // next legitimate change is detected normally.
+        if (cip) {
+          console.log(`[SurgeTankJob] SUPPRESS BATCH START on ${tankId} (CIP/non-sterile, state=${status.state}, sterProdBarrOK=${status.sterProdBarrOK}): "${productName}"`)
+          statusStore.pushEvent('surgeTank.batchStart.suppressed', `${tankId}: "${productName}" suppressed (CIP)`, { tankId, productName, state: status.state, sterProdBarrOK: status.sterProdBarrOK })
+          prev.productName = productName
+          continue
         }
 
         // Resolve the feeding source at start time so the batch carries it.
@@ -173,7 +208,7 @@ async function run(historian) {
       // Weight-confirmation fallback: product was already seeded but no
       // active batch yet, and gallons have crossed the threshold. Covers
       // the case where seeding ran during an in-progress fill.
-      if (hasProduct && !prev.batchActive && productName === prev.productName && gallons >= WEIGHT_THRESHOLD_GAL) {
+      if (hasProduct && !cip && !prev.batchActive && productName === prev.productName && gallons >= WEIGHT_THRESHOLD_GAL) {
         const feedingUhtId = resolveFeedingUht(tankId, routing)
         let feedingFromEntName = null
         if (feedingUhtId) {

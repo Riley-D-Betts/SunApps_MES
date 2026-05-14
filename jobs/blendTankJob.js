@@ -10,8 +10,18 @@ const LINE_RESET_THRESHOLD_LBS = 100
 // in the tank) before the WO creation has finished and before any real weight lands.
 const MIN_BATCH_DURATION_MS = 120_000
 
+// Sentinel NOTE_STRING values that look like real strings but indicate
+// "not in production." Operators (and the PLC defaults) write things like
+// "Empty" or "CIP" — treating those as a product false-starts a WO. The
+// match is case-insensitive against the trimmed value.
+const PRODUCT_SENTINELS = new Set(['', 'none', 'empty', 'cip', 'water', 'sterile', 'n/a', '-', '--'])
+
 function validStr(val) {
-  return val && val !== 'None' && val !== 'none' ? val : null
+  if (val == null) return null
+  const trimmed = String(val).trim()
+  if (!trimmed) return null
+  if (PRODUCT_SENTINELS.has(trimmed.toLowerCase())) return null
+  return val
 }
 
 const tankState = {
