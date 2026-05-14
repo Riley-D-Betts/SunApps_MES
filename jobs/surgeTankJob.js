@@ -199,7 +199,7 @@ async function run(historian) {
             feedingUhtId,
             feedingFromEntName,
             detectedAt: new Date().toISOString(),
-          })
+          }, historian)
         } catch (err) {
           console.error(`[SurgeTankJob] processWOStart failed for ${tankId}:`, err.message)
         }
@@ -231,7 +231,7 @@ async function run(historian) {
             feedingUhtId,
             feedingFromEntName,
             detectedAt: new Date().toISOString(),
-          })
+          }, historian)
         } catch (err) {
           console.error(`[SurgeTankJob] processWOStart failed for ${tankId}:`, err.message)
         }

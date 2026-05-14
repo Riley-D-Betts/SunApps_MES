@@ -15,7 +15,13 @@
  * When AVEVA ships the constrained surge-tank product input, the exact-match
  * branch will catch every real value and the fuzzy fallback becomes dead code
  * — at that point delete the catalog and keep only the map.
+ *
+ * Flip MES_PARSER_STRICT_MODE on (config/index.js) once FG_ITEM_MAP is fully
+ * populated; that disables the fuzzy branch and forces unrecognized inputs to
+ * pending_ns rather than silently scoring against the wrong item.
  */
+
+const config = require('../config')
 
 // ── Exact-match table (AVEVA standardized values) ───────────────────────
 // Add entries as the standardized list lands. Keys are case-sensitive and
@@ -247,6 +253,11 @@ function parseProductName(input) {
     }
   }
 
+  if (config.MES_PARSER_STRICT_MODE) {
+    console.warn(`[SurgeTankParser] STRICT mode: no FG_ITEM_MAP entry for "${input}" — returning null`)
+    return null
+  }
+
   const normalized = normalize(input)
   const brand = extractBrand(normalized)
   const fatPct = extractFatPct(normalized)
@@ -267,6 +278,7 @@ function parseProductName(input) {
   const confidence = best.score >= 15 ? 'high' : best.score >= 10 ? 'medium' : 'low'
   const ambiguous = scored.length > 1 && scored[0].score === scored[1].score
 
+  console.warn(`[SurgeTankParser] FUZZY fallback used for "${input}" — populate FG_ITEM_MAP to phase this out`)
   console.log(`[SurgeTankParser] "${input}" → ${best.name} (NS ${best.nsId}, score=${best.score}, confidence=${confidence}${ambiguous ? ', AMBIGUOUS' : ''})`)
   if (scored.length > 1) {
     console.log(`[SurgeTankParser]   Runner-up: ${scored[1].name} (NS ${scored[1].nsId}, score=${scored[1].score})`)

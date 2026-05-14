@@ -40,6 +40,13 @@ const RAW_ITEMS = {
   ORG_UF:      { id: 5402, name: 'Raw Organic UF Milk' },
   ORG_A2:      { id: 5403, name: 'Raw Organic A2 Milk' },
   ORG_A2_GRADE: { id: 5406, name: 'Raw Organic Grade A (A2/A2) Milk' },
+  ORG_A2_0:    { id: 5484, name: 'Raw Organic A2 0%' },
+  ORG_A2_1:    { id: 8366, name: 'Raw Organic A2 1%' },
+  ORG_A2_2:    { id: 8367, name: 'Raw Organic A2 2%' },
+  ORG_A2_3_25: { id: 8368, name: 'Raw Organic A2 3.25%' },
+  ORG_A2_3_5:  { id: 8369, name: 'Raw Organic A2 3.5%' },
+  ORG_A2_4:    { id: 8370, name: 'Raw Organic A2 4%' },
+  ORG_A2_CREAM:{ id: 8365, name: 'Raw Organic A2 Cream' },
 }
 
 const WASTE_ALERT_THRESHOLD = 5
@@ -58,6 +65,10 @@ const SEPARATION_BOM_MAP = {
   '5404_8': 348,  // Organic → 2%     (Raw Organic Milk to 2% and cream)
   '5404_9': 347,  // Organic → 1%     (Raw Organic Milk to 1% and cream)
   '5404_10': 252, // Organic → Fat Free / Skim (Raw Organic Milk to skim and cream)
+  // A2 separator only does skim separation; fat-level A2 milks come from a
+  // downstream blend WO (skim + A2 cream → fat-level). BOM 253 currently
+  // produces regular org cream (5483), not A2 cream (8365) — flag for NS fix.
+  '5403_25': 253, // Organic A2 → Fat Free / Skim (Raw Organic A2 Milk to A2 Skim and Cream)
 }
 
 function getSeparationBomId(assemblyItemId, skimProductIndex) {
@@ -150,6 +161,7 @@ const HISTORIAN_ITEM_MAP = {
   '300012': { id: 5483, name: 'Raw Organic Cream', nsType: 'InvtPart' },
   '300013': { id: 5405, name: 'Raw Conventional UF Milk', nsType: 'InvtPart' },
   '300017': { id: 5403, name: 'Raw Organic A2 Milk', nsType: 'Assembly' },
+  '300018': { id: 5484, name: 'Raw Organic A2 0%', nsType: 'InvtPart' },
   '205000': { id: 5406, name: 'Raw Organic Grade A (A2/A2) Milk', nsType: 'Assembly' },
 }
 
@@ -181,11 +193,63 @@ const PRODUCT_INDEX_ITEM_MAP = {
   19: { id: null, name: 'Water' },
   20: { id: null, name: 'Blowback' },
   21: { id: 5403, name: 'Raw A2 Organic' },
-  22: { id: null, name: 'A2 Organic Whole 3.25%' },
-  23: { id: null, name: 'A2 Organic Reduced Fat 2%' },
-  24: { id: null, name: 'A2 Organic Low Fat 1%' },
-  25: { id: null, name: 'A2 Organic Fat Free' },
-  26: { id: null, name: 'A2 Organic Cream' },
+  22: { id: 8368, name: 'A2 Organic Whole 3.25%' },
+  23: { id: 8367, name: 'A2 Organic Reduced Fat 2%' },
+  24: { id: 8366, name: 'A2 Organic Low Fat 1%' },
+  25: { id: 5484, name: 'A2 Organic Fat Free' },
+  26: { id: 8365, name: 'A2 Organic Cream' },
+}
+
+// Layer 2 → Layer 3 translation: each raw FG (blend tank assembly output) maps
+// to its FG sibling (surge tank assembly output, 1:1 pasteurize). Derived by
+// parallel-walking blendTankProductParser.PRODUCT_CATALOG (raw FG nsId) and
+// surgeTankProductParser.PRODUCT_CATALOG (FG nsId). Used by surge tank
+// resolveLayer3Component to (a) pick the canonical component for a blend-fed
+// surge WO and (b) decide whether to warn on a non-canonical feed.
+const RAW_FG_TO_FG_MAP = {
+  8333: 3278,  // Raw Alexandre Eco Dairy A2/A2 Organic 4% Whole Milk → Alexandre …
+  8362: 2793,  // Raw Conventional Milk 1% → Conventional Milk 1%
+  8361: 3471,  // Raw Conventional Milk 2% → Conventional Milk 2%
+  8360: 2808,  // Raw Conventional Milk 3.25% → Conventional Milk 3.25%
+  8359: 2645,  // Raw Conventional Milk 3.5% → Conventional Milk 3.5%
+  8358: 3223,  // Raw Conventional Whole Milk 3.25% (No Vitamins) → …
+  8357: 3395,  // Raw DFI Holiday Nog → DFI Holiday Nog
+  8356: 3493,  // Raw DFI Marcel's Modern Pantry Heavy Cream → …
+  8355: 2940,  // Raw DFI Marcel's Modern Pantry UHT Half & Half → …
+  8354: 3222,  // Raw DFI Marcels 0% Milk → DFI Marcels 0% Milk
+  8340: 3228,  // Raw DFI Marcels 1% Milk → DFI Marcels 1% Milk
+  8339: 4012,  // Raw DFI Marcels 2% Milk → DFI Marcels 2% Milk
+  8353: 3236,  // Raw DFI Marcels 3.25% Milk → DFI Marcels 3.25% Milk
+  8350: 3900,  // Raw ESL Half & Half → ESL Half & Half
+  8349: 3905,  // Raw ESL Heavy Whip Cream → ESL Heavy Whip Cream
+  8335: 5911,  // Raw Horizon Organic 2% Milk → Horizon Organic 2% Milk
+  8348: 5907,  // Raw Horizon Organic 3.25% Whole Milk → …
+  8347: 4495,  // Raw Kirkland 1% Organic Milk → Kirkland 1% Organic Milk
+  8346: 4501,  // Raw Kirkland 2% Organic Lac Free Milk → …
+  8344: 4498,  // Raw Kirkland 2% Organic Milk → Kirkland 2% Organic Milk
+  8343: 4548,  // Raw Kirkland Chocolate 2% Organic Milk - Aseptic → …
+  8342: 6420,  // Raw Kirkland Organic Whole Milk → Kirkland Organic Whole Milk
+  8364: 5510,  // Raw American Farmer Whole Milk → American Farmer Whole Milk
+  8363: 5314,  // Raw Barista Frappe Mix → Barista Frappe Mix
+  8336: 5317,  // Raw Kinera Chocolate → Kinera Chocolate
+  8334: 5003,  // Raw Kinera Strawberry → Kinera Strawberry
+  8352: 2889,  // Raw DG Half & Half → DG Half & Half
+  8351: 2790,  // Raw DG Heavy Cream → DG Heavy Cream
+  8341: 3926,  // Raw Organic Milk 0% Lac Free → Organic Milk 0% Lac Free
+}
+
+const FG_TO_RAW_FG_MAP = Object.fromEntries(
+  Object.entries(RAW_FG_TO_FG_MAP).map(([rawFg, fg]) => [String(fg), Number(rawFg)])
+)
+
+// Item IDs that represent raw bulk (pre-separator) milk. Used to distinguish
+// layer-2-skip (Layer 1 ran, post-separator content) from layer-1-and-2-skip
+// (Layer 1 also skipped, bulk milk piped straight to UHT) when a silo feeds
+// the UHT directly.
+const BULK_RAW_ITEM_IDS = new Set([5417, 5404, 5403, 5406])
+
+function isBulkRawId(id) {
+  return BULK_RAW_ITEM_IDS.has(Number(id))
 }
 
 function getItemByProductIndex(idx) {
@@ -259,6 +323,10 @@ module.exports = {
   SURGE_TANK_BIN_MAP,
   RAW_ITEMS,
   PRODUCT_INDEX_ITEM_MAP,
+  RAW_FG_TO_FG_MAP,
+  FG_TO_RAW_FG_MAP,
+  BULK_RAW_ITEM_IDS,
+  isBulkRawId,
   CREAM_ITEM,
   SKIM_ITEM,
   CREAM_ITEM_CONV,

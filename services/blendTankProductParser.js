@@ -1,14 +1,24 @@
 /**
  * Blend Tank Product Parser
- * Fuzzy-matches operator-entered product names (from Historian NOTE_STRING)
- * to NetSuite assembly items.
+ * Resolves blend-tank product strings to NetSuite RAW FG assembly items.
  *
- * Operator input is free-text and highly variable:
- *   "Marcels 1%", "Marcel's 1%", "marcels 1%", "marcels1%", "KS 2% org"
- *
- * The parser normalizes input, extracts brand/fat%/modifiers, and scores
- * against the known product catalog.
+ * Two lookup paths in order:
+ *   1. Exact match against RAW_FG_ITEM_MAP (for the standardized AVEVA select-
+ *      tag values that are coming "soon"). When MES_PARSER_STRICT_MODE is set,
+ *      this is the only path — unmatched inputs return null.
+ *   2. Fuzzy match against PRODUCT_CATALOG (legacy free-text path — same
+ *      brand/fat%/modifiers scoring used historically). Only runs when strict
+ *      mode is off; logs at warn level so we can audit usage.
  */
+
+const config = require('../config')
+
+// ── Exact-match table (AVEVA standardized values) ───────────────────────
+// Add entries as the standardized list lands. Keys are case-sensitive and
+// exactly as the historian writes them; values are raw FG NS item IDs.
+const RAW_FG_ITEM_MAP = {
+  // (Populate as the standardized list arrives.)
+}
 
 // ── Product catalog ─────────────────────────────────────────────────────
 // Each entry: { nsId, name, brand, fatPct, modifiers[] }
@@ -300,6 +310,25 @@ function scoreProduct(product, brand, fatPct, modifiers) {
 function parseProductName(input) {
   if (!input || typeof input !== 'string') return null
 
+  if (RAW_FG_ITEM_MAP[input] != null) {
+    const nsId = RAW_FG_ITEM_MAP[input]
+    const hit = PRODUCT_CATALOG.find(p => p.nsId === nsId)
+    return {
+      nsId,
+      name: hit?.name || input,
+      confidence: 'exact',
+      ambiguous: false,
+      score: 100,
+      parsed: { exactMatch: true, key: input },
+      alternatives: [],
+    }
+  }
+
+  if (config.MES_PARSER_STRICT_MODE) {
+    console.warn(`[ProductParser] STRICT mode: no RAW_FG_ITEM_MAP entry for "${input}" — returning null`)
+    return null
+  }
+
   const normalized = normalize(input)
   const brand = extractBrand(normalized)
   const fatPct = extractFatPct(normalized)
@@ -317,6 +346,8 @@ function parseProductName(input) {
     console.log(`[ProductParser] No match for "${input}" → parsed:`, parsed)
     return null
   }
+
+  console.warn(`[ProductParser] FUZZY fallback used for "${input}" — populate RAW_FG_ITEM_MAP to phase this out`)
 
   const best = scored[0]
   const confidence = best.score >= 15 ? 'high' : best.score >= 10 ? 'medium' : 'low'
@@ -359,4 +390,5 @@ module.exports = {
   getProductByNsId,
   getProductCatalog,
   PRODUCT_CATALOG,
+  RAW_FG_ITEM_MAP,
 }

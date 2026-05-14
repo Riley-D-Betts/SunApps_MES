@@ -52,6 +52,24 @@ db.ensureRuntimeSchema = async function () {
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lastSiloName' AND Object_ID = Object_ID(N'MesPipeIssueStates'))
       ALTER TABLE MesPipeIssueStates ADD lastSiloName NVARCHAR(100) NULL;
   `)
+
+  // MesSurgeTankBatches: Layer-3 component pinning + skip-path classification
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'componentItemId' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
+      ALTER TABLE MesSurgeTankBatches ADD componentItemId NVARCHAR(50) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'componentBinId' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
+      ALTER TABLE MesSurgeTankBatches ADD componentBinId INT NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'componentResolvedFrom' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
+      ALTER TABLE MesSurgeTankBatches ADD componentResolvedFrom NVARCHAR(40) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'layerSkipReason' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
+      ALTER TABLE MesSurgeTankBatches ADD layerSkipReason NVARCHAR(30) NULL;
+  `)
 }
 
 module.exports = db

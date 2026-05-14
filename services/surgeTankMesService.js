@@ -70,6 +70,113 @@ function isSiloRef(name) {
 }
 
 /**
+ * Decide the single component item that the surge tank's Layer-3 WO should
+ * consume, based on what's physically feeding the UHT at WO-create time.
+ * The result is pinned to MesSurgeTankBatch (componentItemId/Bin/...) and
+ * also sent as a custom one-line component list on the workOrder create body
+ * — every subsequent tick issue runs against this same item.
+ *
+ * Returns null if the source can't be resolved yet (caller defers and the
+ * batch lands as pending_ns until a re-check picks it up).
+ *
+ *   fgItem            — the Layer-3 assembly we're about to build (FG, e.g. 4498 Kirkland 2%)
+ *   data              — { feedingFromEntName, feedingUhtId } from the surge-tank job
+ *   historian         — provider for getMilkLineStatus()
+ *
+ * Cases:
+ *   A. feedingFromEntName is a blend tank → use the blend batch's mesItem (raw FG).
+ *      Compare against FG_TO_RAW_FG_MAP[fgItem.id] to flag canonical vs non-canonical.
+ *      Warn (but still issue) when the actual mesItem isn't a recognized raw FG.
+ *   B. feedingFromEntName is a silo → look at the milk line feeding our UHT;
+ *      if it carries a recognized post-separator product, that's a layer-2-skip;
+ *      if it's bulk raw milk (5417/5404/5403/5406), that's a layer-1-and-2-skip.
+ *      Last-resort: silo's static SILO_ITEM_MAP entry (bulk).
+ */
+async function resolveLayer3Component(data, historian, fgItem) {
+  const feedingFromEntName = data.feedingFromEntName
+  const feedingUhtId = data.feedingUhtId
+  if (!feedingFromEntName) return null
+
+  const fgItemId = fgItem?.id ? Number(fgItem.id) : null
+  const fgItemName = fgItem?.name || `NS ${fgItemId ?? 'unknown'}`
+
+  if (isBlendTankRef(feedingFromEntName)) {
+    const blendBatch = await db.MesBlendTankBatch.findOne({
+      where: { tankId: feedingFromEntName, status: 'active' },
+      order: [['detectedAt', 'DESC']],
+    })
+    if (!blendBatch?.mesItem) {
+      console.warn(`[SurgeTankMesService] resolveLayer3Component: no active blend batch on ${feedingFromEntName} — deferring`)
+      return null
+    }
+    const blendItemId = Number(blendBatch.mesItem)
+    const canonicalRaw = fgItemId ? itemConfig.FG_TO_RAW_FG_MAP[String(fgItemId)] : null
+    let resolvedFrom
+    if (canonicalRaw && blendItemId === Number(canonicalRaw)) {
+      resolvedFrom = 'blend-tank-canonical'
+    } else {
+      resolvedFrom = 'blend-tank-non-canonical'
+      const isKnownRawFg = blendItemId in itemConfig.RAW_FG_TO_FG_MAP
+      if (!isKnownRawFg) {
+        console.warn(`[SurgeTankMesService] Unfamiliar blend-tank feed: WO will issue NS item ${blendItemId} (from ${feedingFromEntName}) into ${fgItemName} — verify mass balance`)
+      } else {
+        console.warn(`[SurgeTankMesService] Non-canonical blend feed: ${feedingFromEntName} producing NS ${blendItemId} into ${fgItemName} (expected raw FG ${canonicalRaw ?? 'unknown'})`)
+      }
+    }
+    return {
+      itemId: String(blendItemId),
+      itemName: blendBatch.productName,
+      binId: itemConfig.getBinId(feedingFromEntName),
+      resolvedFrom,
+      layerSkipReason: null,
+    }
+  }
+
+  if (isSiloRef(feedingFromEntName)) {
+    const silo = itemConfig.normalizeSiloName(feedingFromEntName) || feedingFromEntName
+    if (feedingUhtId) {
+      try {
+        const lineReadings = await historian.getMilkLineStatus()
+        const feedingLine = lineReadings.find(r => {
+          const dest = String(r.requestedBy || '').toUpperCase()
+          return dest.includes(feedingUhtId.toUpperCase())
+        })
+        if (feedingLine?.productName) {
+          const lineItem = lineMapper.resolveLineProduct(feedingLine.productName)
+          if (lineItem?.id) {
+            const skipReason = itemConfig.isBulkRawId(lineItem.id) ? 'layer-1-and-2-skip' : 'layer-2-skip'
+            return {
+              itemId: String(lineItem.id),
+              itemName: lineItem.name,
+              binId: itemConfig.getBinId(feedingLine.siloName || silo),
+              resolvedFrom: 'silo-line-product',
+              layerSkipReason: skipReason,
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(`[SurgeTankMesService] resolveLayer3Component: line lookup failed — ${err.message}`)
+      }
+    }
+    const fallback = itemConfig.SILO_ITEM_MAP[silo]
+    if (!fallback) {
+      console.warn(`[SurgeTankMesService] resolveLayer3Component: no SILO_ITEM_MAP entry for ${silo}`)
+      return null
+    }
+    return {
+      itemId: String(fallback.id),
+      itemName: fallback.name,
+      binId: itemConfig.getBinId(silo),
+      resolvedFrom: 'silo-bulk-fallback',
+      layerSkipReason: 'layer-1-and-2-skip',
+    }
+  }
+
+  console.warn(`[SurgeTankMesService] resolveLayer3Component: unknown feeding source: ${feedingFromEntName}`)
+  return null
+}
+
+/**
  * Resolve the NS component item to issue against the surge-tank WO.
  *
  * Two paths:
@@ -84,6 +191,18 @@ function isSiloRef(name) {
  * resolves (caller will defer the tick and try again next time).
  */
 async function resolveSurgeTankComponent(batch, historian) {
+  // New path: tick uses the component pinned at WO-create. Skip every
+  // historian/blend-batch lookup the legacy resolver did — the answer is on
+  // the row already, and the WO's BOM has exactly this item.
+  if (batch.componentItemId) {
+    return {
+      itemId: String(batch.componentItemId),
+      itemName: batch.productName,
+      binId: batch.componentBinId != null ? Number(batch.componentBinId) : null,
+      resolvedFrom: batch.componentResolvedFrom || 'pinned',
+    }
+  }
+
   const feedingFromEntName = batch.feedingFromEntName
   const feedingUhtId = batch.feedingUhtId
   if (!feedingFromEntName) return null
@@ -149,7 +268,7 @@ async function resolveSurgeTankComponent(batch, historian) {
   return null
 }
 
-async function processWOStart(data) {
+async function processWOStart(data, historian) {
   const { tankId, productName, fgItemId, feedingUhtId, feedingFromEntName, detectedAt } = data
 
   if (!tankId) throw new Error('tankId is required')
@@ -198,12 +317,31 @@ async function processWOStart(data) {
   console.log(`  Parsed: ${assemblyItem.name} (NS ${assemblyItem.id}, confidence: ${assemblyItem.confidence})`)
   console.log(`  Feeding: ${feedingFromEntName || '?'} via ${feedingUhtId || '?'}`)
 
+  // Resolve the Layer-3 component (the single raw FG / silo-direct item this WO
+  // will consume). Pinning at create-time means the tick never re-resolves and
+  // the WO body carries a custom one-line component list scoped to exactly this.
+  let resolvedComponent = null
+  if (assemblyItem.id && historian) {
+    try {
+      resolvedComponent = await resolveLayer3Component(data, historian, assemblyItem)
+    } catch (err) {
+      console.warn(`[SurgeTankMesService] resolveLayer3Component threw — proceeding without pin: ${err.message}`)
+    }
+  }
+  if (resolvedComponent) {
+    console.log(`  Layer-3 component: NS ${resolvedComponent.itemId} (${resolvedComponent.itemName}) from ${resolvedComponent.resolvedFrom}${resolvedComponent.layerSkipReason ? ` [${resolvedComponent.layerSkipReason}]` : ''}`)
+  }
+
   const record = await db.MesSurgeTankBatch.create({
     tankId,
     productName,
     mesItem: parsed?.nsId ? String(parsed.nsId) : null,
     feedingUhtId: feedingUhtId || null,
     feedingFromEntName: feedingFromEntName || null,
+    componentItemId: resolvedComponent?.itemId || null,
+    componentBinId: resolvedComponent?.binId || null,
+    componentResolvedFrom: resolvedComponent?.resolvedFrom || null,
+    layerSkipReason: resolvedComponent?.layerSkipReason || null,
     parserConfidence: assemblyItem.confidence,
     status: 'active',
     detectedAt: detectedAt || new Date(),
@@ -242,6 +380,17 @@ async function processWOStart(data) {
       custbody_mes_product_name: productName,
       custbody_mes_source_entity: feedingFromEntName || null,
       custbody_mes_dest_entity: tankId,
+    }
+    // Custom one-line component list pins the WO's BOM to the resolved Layer-3
+    // component (raw FG / silo-direct). Without this, NS would default-populate
+    // the assembly's static BOM, which won't match in skip-paths.
+    if (resolvedComponent?.itemId) {
+      body.item = {
+        items: [{
+          item: { id: Number(resolvedComponent.itemId) },
+          quantity: 1,
+        }],
+      }
     }
 
     console.log(`[SurgeTankMesService] Creating NS WO for "${productName}" on ${tankId}`)
@@ -412,11 +561,10 @@ async function tickIssueForBatch(batch, historian) {
   }
 
   const bomLines = await fetchWoBomLines(batch.nsWorkOrderId)
-  const matchingBomLine = bomLines.find(c => c.itemId === component.itemId)
-  if (!matchingBomLine) {
-    console.warn(`[SurgeTankMesService] tick: component NS item ${component.itemId} (${component.itemName}) not on WO ${batch.nsWorkOrderId} BOM — deferring`)
-    return false
-  }
+  // Membership check intentionally removed: the WO was created with a custom
+  // one-line component list scoped to component.itemId in processWOStart, so
+  // by construction the BOM contains exactly this item. Legacy batches without
+  // a pinned component fall through to today's re-resolver path above.
 
   const body = buildWoIssueBody(bomLines, component.itemId, deltaLbs, component.binId)
 

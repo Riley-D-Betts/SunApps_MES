@@ -31,6 +31,29 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING(50),
         allowNull: true,
       },
+      // Layer-3 component pinned at WO-create by resolveLayer3Component. The
+      // surge WO is built with this as its sole custom component, so every
+      // tick issues against the same NS item without re-resolving.
+      componentItemId: {
+        type: DataTypes.STRING(50),
+        allowNull: true,
+      },
+      componentBinId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      // 'blend-tank-canonical' | 'blend-tank-non-canonical' | 'silo-line-product' | 'silo-bulk-fallback'
+      componentResolvedFrom: {
+        type: DataTypes.STRING(40),
+        allowNull: true,
+      },
+      // null = canonical 3-layer flow.
+      // 'layer-2-skip'         = Layer 1 ran (post-separator component), Layer 2 bypassed.
+      // 'layer-1-and-2-skip'   = bulk raw milk piped straight to UHT.
+      layerSkipReason: {
+        type: DataTypes.STRING(30),
+        allowNull: true,
+      },
       parserConfidence: {
         type: DataTypes.STRING(20),
         allowNull: true,

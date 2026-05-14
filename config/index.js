@@ -58,6 +58,13 @@ module.exports = {
   // When set, processWOStart uses that FG item ID directly and skips the parser.
   // Temporary scaffolding for sandbox testing until the AVEVA standardized
   // surge-tank product tag is wired up.
+  // When true, blend + surge tank product parsers only resolve via their
+  // exact-match tables (RAW_FG_ITEM_MAP / FG_ITEM_MAP) and skip the fuzzy
+  // brand/fat/modifier scoring. Flip this on once AVEVA delivers the
+  // constrained select-tag values and both maps are populated — unmatched
+  // batches will land as pending_ns rather than silently scoring against the
+  // wrong item.
+  MES_PARSER_STRICT_MODE: process.env.MES_PARSER_STRICT_MODE === 'true',
   SURGE_TANK_OVERRIDES: (() => {
     if (!process.env.SURGE_TANK_OVERRIDES) return {}
     try {
