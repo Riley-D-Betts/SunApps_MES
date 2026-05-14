@@ -8,9 +8,15 @@
  *
  * Identification rules (applied per tank):
  *
- *   1. productName matches a known sentinel (case-insensitive trim against
+ *   1. tankId contains '→' (blend tanks only). This is the legacy UHT-direct
+ *      virtual-batch convention used by the deleted code path in
+ *      jobs/blendTankJob:147-214 (pre-SD-597). Rows like 'ML2→TSTAT1' /
+ *      'ML4→TSTAT1' / 'ML2→TSTAT2' are zombies — the code that would have
+ *      closed them is gone, so they stay 'active' forever and pollute the
+ *      tick state.
+ *   2. productName matches a known sentinel (case-insensitive trim against
  *      PRODUCT_SENTINELS — same set used by the jobs).
- *   2. status === 'pending_ns' AND nsWorkOrderId IS NULL (parser found no
+ *   3. status === 'pending_ns' AND nsWorkOrderId IS NULL (parser found no
  *      match and no NS WO was ever created).
  *
  * On match, the row is updated to status='cancelled', completedAt=now, with
@@ -43,13 +49,24 @@ function isSentinel(productName) {
   return PRODUCT_SENTINELS.has(t)
 }
 
-function classifyReason(row) {
+// Pre-SD-597, jobs/blendTankJob:147-214 created MesBlendTankBatch rows with a
+// composite tankId of '{line}→{requestedBy}' (e.g. 'ML2→TSTAT1') whenever a
+// milk/cream line started flowing toward a UHT/TSTAT. That code path is gone;
+// these rows have no closer and accumulate forever.
+function isLegacyUhtDirect(row) {
+  return typeof row.tankId === 'string' && row.tankId.includes('→')
+}
+
+function classifyReason(row, { isBlend }) {
+  if (isBlend && isLegacyUhtDirect(row)) {
+    return `legacy UHT-direct virtual batch (tankId='${row.tankId}', NS WO=${row.nsWorkOrderId || 'none'})`
+  }
   if (isSentinel(row.productName)) return `sentinel productName ("${row.productName}")`
   if (row.status === 'pending_ns' && !row.nsWorkOrderId) return 'pending_ns with no NS WO (parser found nothing)'
   return null
 }
 
-async function cleanupModel(Model, label) {
+async function cleanupModel(Model, label, { isBlend }) {
   // Pull a wider net than strictly needed — rows the operator may still want
   // — and classify each one. We only cancel rows that match a rule.
   const candidates = await Model.findAll({
@@ -65,7 +82,7 @@ async function cleanupModel(Model, label) {
   let matched = 0
   let cancelled = 0
   for (const row of candidates) {
-    const reason = classifyReason(row)
+    const reason = classifyReason(row, { isBlend })
     if (!reason) continue
     matched++
 
@@ -99,11 +116,11 @@ async function main() {
   const totals = { surge: { matched: 0, cancelled: 0 }, blend: { matched: 0, cancelled: 0 } }
 
   if (!blendOnly) {
-    totals.surge = await cleanupModel(db.MesSurgeTankBatch, 'SurgeTank')
+    totals.surge = await cleanupModel(db.MesSurgeTankBatch, 'SurgeTank', { isBlend: false })
     console.log()
   }
   if (!surgeOnly) {
-    totals.blend = await cleanupModel(db.MesBlendTankBatch, 'BlendTank')
+    totals.blend = await cleanupModel(db.MesBlendTankBatch, 'BlendTank', { isBlend: true })
     console.log()
   }
 
