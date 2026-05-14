@@ -200,6 +200,25 @@ class MockProvider extends BaseProvider {
     })
   }
 
+  async getUhtMilkTotalizer(uhtId) {
+    // Monotonic per-UHT accumulator that drifts up while the mock is "running".
+    // Resets every ~40 cycles to simulate an IDLE→PROCESS transition.
+    if (!this._uhtMilkGal) this._uhtMilkGal = { UHT1: 0, UHT2: 0 }
+    if (!this._uhtMilkGalCycle) this._uhtMilkGalCycle = { UHT1: 0, UHT2: 0 }
+    this._uhtMilkGalCycle[uhtId] = (this._uhtMilkGalCycle[uhtId] || 0) + 1
+    if (this._uhtMilkGalCycle[uhtId] % 40 === 0) this._uhtMilkGal[uhtId] = 0
+    this._uhtMilkGal[uhtId] += 50 + Math.floor(Math.random() * 200)
+    return this._uhtMilkGal[uhtId]
+  }
+
+  async getUhtFromEntName(uhtId) {
+    // UHT1 pulls from BlendTank1A in the mock; UHT2 pulls from MSilo1 (a
+    // direct-from-silo run). Exercises both component-resolution code paths.
+    if (uhtId === 'UHT1') return 'BlendTank1A'
+    if (uhtId === 'UHT2') return 'MSilo1'
+    return ''
+  }
+
   async getUhtDestinationSurgeTank(uhtId) {
     if (!/^UHT[12]$/i.test(uhtId)) return null
     // UHT1 → ST81/82, UHT2 → ST83/84 deterministically per cycle so dev sees

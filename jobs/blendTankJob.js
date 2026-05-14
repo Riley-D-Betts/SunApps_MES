@@ -22,18 +22,12 @@ const tankState = {
 }
 
 const lineState = {
-  ML1: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtRequestedBy: '', uhtActive: false },
-  ML2: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtRequestedBy: '', uhtActive: false },
-  ML3: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtRequestedBy: '', uhtActive: false },
-  ML4: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtRequestedBy: '', uhtActive: false },
-  CL1: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtRequestedBy: '', uhtActive: false },
-  CL2: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtRequestedBy: '', uhtActive: false },
-}
-
-const UHT_DESTINATIONS = ['UHT1', 'UHT2', 'TSTAT1', 'TSTAT2']
-
-function isUhtDirect(requestedBy) {
-  return UHT_DESTINATIONS.some(d => requestedBy?.toUpperCase().includes(d))
+  ML1: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
+  ML2: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
+  ML3: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
+  ML4: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
+  CL1: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
+  CL2: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
 }
 
 let lastPollTime = new Date()
@@ -144,77 +138,8 @@ async function run(historian) {
       const hasProduct = !!validStr(productName)
       const totalizerReset = prev.prevValue > LINE_RESET_THRESHOLD_LBS && totalizerLbs < LINE_RESET_THRESHOLD_LBS
 
-      if (hasProduct && isUhtDirect(requestedBy) && !prev.uhtActive) {
-        const tankId = `${line}→${requestedBy}`
-        console.log(`[BlendTankJob] UHT-DIRECT START on ${line}: "${productName}" (${siloName} → ${requestedBy})`)
-        statusStore.pushEvent('line.uhtDirectStart', `${line}: UHT-direct "${productName}" (${siloName} → ${requestedBy})`, { line, productName, siloName, destination: requestedBy })
-
-        // The line carries a RAW product (the issue/component); the FG is the
-        // pasteurized product landing in whichever surge tank the operator
-        // routed this UHT to. Look it up via ThermaRoute.{UHT}_{ST}_Connection_Code.
-        const uhtMatch = String(requestedBy || '').match(/(?:UHT|TSTAT)(\d+)/i)
-        const uhtIdNum = uhtMatch ? `UHT${uhtMatch[1]}` : null
-        let fgProductName = productName
-        let surgeTankId = null
-        if (uhtIdNum) {
-          try {
-            const dest = await historian.getUhtDestinationSurgeTank(uhtIdNum)
-            if (dest?.surgeTankId) {
-              surgeTankId = dest.surgeTankId
-              if (dest.productDesc) fgProductName = dest.productDesc
-              console.log(`[BlendTankJob] ${line} UHT-direct → ${uhtIdNum} → ${surgeTankId} ("${dest.productDesc || ''}")`)
-            } else {
-              console.warn(`[BlendTankJob] No connected surge tank for ${uhtIdNum} — using line product as FG`)
-            }
-          } catch (err) {
-            console.error(`[BlendTankJob] getUhtDestinationSurgeTank(${uhtIdNum}) failed:`, err.message)
-          }
-        }
-
-        try {
-          await blendTankMesService.processWOStart({
-            tankId,
-            productName: fgProductName,
-            batchSize: requestedTargetLbs || 0,
-            fromEntName: siloName || '',
-            toEntName: surgeTankId || requestedBy || '',
-            detectedAt: new Date().toISOString(),
-          })
-        } catch (err) {
-          console.error(`[BlendTankJob] processWOStart (UHT) failed for ${tankId}:`, err.message)
-        }
-        prev.uhtRequestedBy = requestedBy
-        prev.uhtActive = true
-      }
-
-      if (prev.uhtActive && (totalizerReset || !hasProduct)) {
-        const uhtId = `${line}→${prev.uhtRequestedBy}`
-        const batchTotalLbs = totalizerReset ? prev.prevValue : (totalizerLbs > 10 ? totalizerLbs : prev.prevValue)
-        console.log(`[BlendTankJob] UHT-DIRECT END on ${line}: "${prev.productName}" — ${batchTotalLbs.toFixed(1)} LBS`)
-        statusStore.pushEvent('line.uhtDirectEnd', `${line}: UHT-direct ended ${batchTotalLbs.toFixed(0)} LBS "${prev.productName}"`, { line, productName: prev.productName, totalLbs: batchTotalLbs, destination: prev.uhtRequestedBy })
-
-        if (batchTotalLbs > 10) {
-          try {
-            await blendTankMesService.processLineFlow({
-              line, totalLbs: batchTotalLbs, lineProductName: prev.productName,
-              siloName: prev.siloName || '', destination: prev.requestedBy || '',
-              requestedTargetLbs: prev.requestedTargetLbs || 0, resetTime: new Date().toISOString(),
-            })
-          } catch (err) {
-            console.error(`[BlendTankJob] processLineFlow (UHT) failed for ${line}:`, err.message)
-          }
-        }
-
-        try {
-          await blendTankMesService.processWOEnd({ tankId: uhtId, productName: prev.productName, detectedAt: new Date().toISOString() })
-        } catch (err) {
-          console.error(`[BlendTankJob] processWOEnd (UHT) failed for ${uhtId}:`, err.message)
-        }
-        prev.uhtActive = false
-      }
-
       const productCleared = hadProduct && !hasProduct && prev.prevValue > 10
-      if ((totalizerReset || productCleared) && hadProduct && !prev.uhtActive) {
+      if ((totalizerReset || productCleared) && hadProduct) {
         const batchTotalLbs = totalizerReset ? prev.prevValue : (totalizerLbs > 10 ? totalizerLbs : prev.prevValue)
         console.log(`[BlendTankJob] Line ${line} batch complete: ${batchTotalLbs.toFixed(1)} LBS of "${prev.productName}" (${prev.siloName || ''} → ${prev.requestedBy || ''})`)
         statusStore.pushEvent('line.flowComplete', `${line}: ${batchTotalLbs.toFixed(0)} LBS "${prev.productName}" (${prev.siloName || '?'} → ${prev.requestedBy || '?'})`, { line, totalLbs: batchTotalLbs, productName: prev.productName, siloName: prev.siloName, destination: prev.requestedBy })

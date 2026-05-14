@@ -29,6 +29,7 @@ module.exports = {
   SEPARATION_CRON: process.env.SEPARATION_CRON || '*/10 * * * * *',
   BULK_MILK_CRON: process.env.BULK_MILK_CRON || '*/1 * * * *',
   BLEND_TANK_CRON: process.env.BLEND_TANK_CRON || '*/10 * * * * *',
+  SURGE_TANK_CRON: process.env.SURGE_TANK_CRON || '*/10 * * * * *',
   EQUIPMENT_CRON: process.env.EQUIPMENT_CRON || '*/15 * * * * *',
   // Tick that fires periodic blend-tank WO issues + completions. Production cadence
   // is once every 5 minutes; sandbox can override to e.g. '*/30 * * * * *' for testing.
@@ -49,6 +50,20 @@ module.exports = {
       return JSON.parse(process.env.BLEND_TANK_OVERRIDES)
     } catch (e) {
       console.warn(`[Config] Failed to parse BLEND_TANK_OVERRIDES: ${e.message}`)
+      return {}
+    }
+  })(),
+  // Test-input override for surge tank FG product selection. JSON object mapping
+  // tankId → finished-goods NS item ID (e.g. '{"ST81":4498,"ST83":3228}').
+  // When set, processWOStart uses that FG item ID directly and skips the parser.
+  // Temporary scaffolding for sandbox testing until the AVEVA standardized
+  // surge-tank product tag is wired up.
+  SURGE_TANK_OVERRIDES: (() => {
+    if (!process.env.SURGE_TANK_OVERRIDES) return {}
+    try {
+      return JSON.parse(process.env.SURGE_TANK_OVERRIDES)
+    } catch (e) {
+      console.warn(`[Config] Failed to parse SURGE_TANK_OVERRIDES: ${e.message}`)
       return {}
     }
   })(),

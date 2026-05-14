@@ -1,9 +1,11 @@
 const blendTankMesService = require('../services/blendTankMesService')
+const surgeTankMesService = require('../services/surgeTankMesService')
 const statusStore = require('../services/statusStore')
 const db = require('../models')
 
 let lastTickAt = null
 let lastSummary = null
+let lastSurgeSummary = null
 
 /**
  * Tick that drives blend-tank WO issues + completions on a fixed cadence.
@@ -25,15 +27,38 @@ async function run(historian) {
     lastSummary = summary
 
     if (summary.batchesProcessed > 0 || summary.errors.length > 0) {
-      console.log(`[IssueCompletionJob] tick: ${summary.batchesProcessed} batch(es), ${summary.issuesFired} issue(s), ${summary.completionsFired} completion(s), ${summary.errors.length} error(s)`)
+      console.log(`[IssueCompletionJob] blend tick: ${summary.batchesProcessed} batch(es), ${summary.issuesFired} issue(s), ${summary.completionsFired} completion(s), ${summary.errors.length} error(s)`)
     }
     if (summary.errors.length > 0) {
-      statusStore.pushEvent('tick.error', `Tick had ${summary.errors.length} error(s)`, summary.errors)
+      statusStore.pushEvent('tick.error', `Blend tick had ${summary.errors.length} error(s)`, summary.errors)
+    }
+
+    // Surge tank tick rides the same cadence — each fires its own NS issues +
+    // completions per active batch and they are independent of blend tank state.
+    try {
+      const surgeSummary = await surgeTankMesService.tickAllActiveBatches(historian)
+      lastSurgeSummary = surgeSummary
+      if (surgeSummary.batchesProcessed > 0 || surgeSummary.errors.length > 0) {
+        console.log(`[IssueCompletionJob] surge tick: ${surgeSummary.batchesProcessed} batch(es), ${surgeSummary.issuesFired} issue(s), ${surgeSummary.completionsFired} completion(s), ${surgeSummary.errors.length} error(s)`)
+      }
+      if (surgeSummary.errors.length > 0) {
+        statusStore.pushEvent('tick.error', `Surge tick had ${surgeSummary.errors.length} error(s)`, surgeSummary.errors)
+      }
+    } catch (err) {
+      console.error('[IssueCompletionJob] Surge tick failed:', err.message)
+      statusStore.pushEvent('tick.error', 'Surge tick failed', { error: err.message })
     }
 
     // Push the latest authoritative tick state to the in-memory store so the
-    // dashboard sees fresh cumulative totals + per-line lastIssued baselines.
-    await statusStore.hydrateTickState(db.MesBlendTankBatch, db.MesPipeIssueState)
+    // dashboard sees fresh cumulative totals + per-line lastIssued baselines
+    // for both blend and surge tank batches.
+    await statusStore.hydrateTickState(
+      db.MesBlendTankBatch, db.MesPipeIssueState,
+      db.MesSurgeTankBatch, db.MesSurgeTankIssueState,
+    )
+    // Refresh recent-batches rings so closed batches show up promptly.
+    await statusStore.hydrateRecentBlendBatches(db.MesBlendTankBatch)
+    await statusStore.hydrateRecentSurgeBatches(db.MesSurgeTankBatch)
   } catch (err) {
     console.error('[IssueCompletionJob] Tick run failed:', err.message)
     statusStore.pushEvent('tick.error', 'Tick run failed', { error: err.message })
@@ -48,4 +73,8 @@ function getLastSummary() {
   return lastSummary
 }
 
-module.exports = { run, getLastTickAt, getLastSummary }
+function getLastSurgeSummary() {
+  return lastSurgeSummary
+}
+
+module.exports = { run, getLastTickAt, getLastSummary, getLastSurgeSummary }

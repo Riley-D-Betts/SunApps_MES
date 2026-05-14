@@ -884,6 +884,29 @@ class RestProvider extends BaseProvider {
       mainLevelPct: levelPv?.Value || 0,
     }
   }
+
+  /**
+   * Read the current value of the per-UHT software milk-flow totalizer (gal).
+   * Note: this returns the cached accumulator, which is only updated when
+   * getUhtStatus() runs. Callers that need a fresh value must await
+   * getUhtStatus() first (the equipment job poll does this every 15s, which
+   * is fine for the surge-tank tick cadence of every 5 min in production).
+   */
+  async getUhtMilkTotalizer(uhtId) {
+    return this._uhtMilkGal?.[uhtId] || 0
+  }
+
+  /**
+   * Read the current FromEntName tag for a UHT. This drives surge-tank
+   * component resolution — value is either a silo (MSiloN or CSiloN) or
+   * a blend tank (BlendTankNA/B).
+   */
+  async getUhtFromEntName(uhtId) {
+    if (!/^UHT[12]$/i.test(uhtId)) return ''
+    const fqn = `${uhtId.toUpperCase()}${TAGS.UHT_FROM_ENT}`
+    const pv = await this._getCurrentValue(fqn, { verbose: false })
+    return pv?.Text || ''
+  }
 }
 
 module.exports = RestProvider

@@ -183,6 +183,32 @@ class BaseProvider {
   async getUhtDestinationSurgeTank(uhtId) {
     throw new Error('getUhtDestinationSurgeTank() not implemented')
   }
+
+  /**
+   * Read the current value of the per-UHT software milk-flow totalizer (in
+   * gallons). The hardware lacks a real totalizer on FT1102, so the rest
+   * provider integrates the live GPM over time while the UHT is in PROCESS
+   * mode. Value resets on each IDLE→PROCESS transition.
+   *
+   * Used by the surge tank tick as the inflow source (UHT → ST is 1:1 during
+   * a run). When/if a hardware ST inflow tag ships, swap this read.
+   * @param {string} uhtId - 'UHT1' or 'UHT2'
+   * @returns {Promise<number>} gallons; 0 if the UHT is idle or unknown
+   */
+  async getUhtMilkTotalizer(uhtId) {
+    throw new Error('getUhtMilkTotalizer() not implemented')
+  }
+
+  /**
+   * Read the current FromEntName tag for a UHT — the source entity the UHT
+   * is currently pulling from. Either a silo (MSiloN or CSiloN) or a blend
+   * tank (BlendTankNA/B). Drives surge-tank-batch component resolution.
+   * @param {string} uhtId - 'UHT1' or 'UHT2'
+   * @returns {Promise<string>} '' when the UHT is idle or tag is empty
+   */
+  async getUhtFromEntName(uhtId) {
+    throw new Error('getUhtFromEntName() not implemented')
+  }
 }
 
 module.exports = BaseProvider

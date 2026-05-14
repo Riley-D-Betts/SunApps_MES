@@ -10,6 +10,7 @@
 
 const MAX_EVENTS = 500
 const MAX_RECENT_BATCHES = 20
+const MAX_RECENT_TANK_BATCHES = 25
 
 const state = {
   separator: null,                 // { status, recentBatchCount, pollDurationMs, pollAt }
@@ -26,7 +27,12 @@ const state = {
   },
   events: [],                      // newest first
   recentBatches: [],               // newest first; each entry is a processed separator batch
-  tick: null,                      // { batches: [...], pipeStates: {...}, updatedAt }
+  recentBlendBatches: [],          // newest first; completed/closed MesBlendTankBatch rows
+  recentSurgeBatches: [],          // newest first; completed/closed MesSurgeTankBatch rows
+  // Authoritative tick state. Shape:
+  //   { batches: [blend], pipeStates: { [line]: ... },
+  //     surgeBatches: [surge], surgeIssueStates: { [tankId]: ... }, updatedAt }
+  tick: null,
 }
 
 function now() {
@@ -94,7 +100,7 @@ function setTick(tick) {
   state.tick = { ...tick, updatedAt: now() }
 }
 
-async function hydrateTickState(MesBlendTankBatch, MesPipeIssueState) {
+async function hydrateTickState(MesBlendTankBatch, MesPipeIssueState, MesSurgeTankBatch, MesSurgeTankIssueState) {
   try {
     const batches = await MesBlendTankBatch.findAll({
       where: { status: 'active' },
@@ -114,6 +120,51 @@ async function hydrateTickState(MesBlendTankBatch, MesPipeIssueState) {
         lastObservedAt: ps.lastObservedAt,
       }
     }
+
+    let surgeBatches = []
+    let surgeIssueStates = {}
+    if (MesSurgeTankBatch) {
+      const surgeRows = await MesSurgeTankBatch.findAll({
+        where: { status: 'active' },
+        order: [['detectedAt', 'DESC']],
+      })
+      surgeBatches = surgeRows.map(b => ({
+        batchId: b.id,
+        tankId: b.tankId,
+        productName: b.productName,
+        mesItem: b.mesItem,
+        feedingUhtId: b.feedingUhtId,
+        feedingFromEntName: b.feedingFromEntName,
+        parserConfidence: b.parserConfidence,
+        nsWorkOrderId: b.nsWorkOrderId,
+        nsWorkOrderNumber: b.nsWorkOrderNumber,
+        cumulativeIssuedLbs: parseFloat(b.cumulativeIssuedLbs) || 0,
+        cumulativeCompletedLbs: parseFloat(b.cumulativeCompletedLbs) || 0,
+        lastIssueAt: b.lastIssueAt,
+        lastCompletionAt: b.lastCompletionAt,
+        detectedAt: b.detectedAt,
+      }))
+      if (MesSurgeTankIssueState) {
+        const issueRows = await MesSurgeTankIssueState.findAll()
+        const surgeById = Object.fromEntries(surgeRows.map(b => [b.id, b]))
+        for (const row of issueRows) {
+          const b = surgeById[row.surgeTankBatchId]
+          // Key on tankId so the UI can look up by surge tank ID directly.
+          const key = b?.tankId || `batch:${row.surgeTankBatchId}`
+          surgeIssueStates[key] = {
+            batchId: row.surgeTankBatchId,
+            tankId: b?.tankId || null,
+            uhtId: row.uhtId,
+            lastIssuedUhtGal: parseFloat(row.lastIssuedUhtGal) || 0,
+            lastIssueAt: row.lastIssueAt,
+            lastTotalizerGal: row.lastTotalizerGal != null ? parseFloat(row.lastTotalizerGal) : null,
+            lastObservedAt: row.lastObservedAt,
+            lastFromEntName: row.lastFromEntName,
+          }
+        }
+      }
+    }
+
     setTick({
       batches: batches.map(b => ({
         batchId: b.id,
@@ -127,10 +178,86 @@ async function hydrateTickState(MesBlendTankBatch, MesPipeIssueState) {
         lastCompletionAt: b.lastCompletionAt,
       })),
       pipeStates: pipeMap,
+      surgeBatches,
+      surgeIssueStates,
     })
-    console.log(`[StatusStore] Hydrated tick state: ${batches.length} active batch(es), ${pipeStates.length} pipe state(s)`)
+    console.log(`[StatusStore] Hydrated tick state: ${batches.length} blend batch(es), ${pipeStates.length} pipe state(s), ${surgeBatches.length} surge batch(es), ${Object.keys(surgeIssueStates).length} surge issue state(s)`)
   } catch (err) {
     console.error('[StatusStore] Failed to hydrate tick state:', err.message)
+  }
+}
+
+/**
+ * Load the most recent completed/closed blend tank batches into the in-memory
+ * ring. Run on startup so the dashboard has history without waiting for the
+ * next close event.
+ */
+async function hydrateRecentBlendBatches(MesBlendTankBatch) {
+  try {
+    // Include active rows so the operator sees in-progress work, not just
+    // closed history. Order by detectedAt so the freshest batch is on top
+    // regardless of status.
+    const rows = await MesBlendTankBatch.findAll({
+      order: [['detectedAt', 'DESC']],
+      limit: MAX_RECENT_TANK_BATCHES,
+    })
+    state.recentBlendBatches = rows.map(blendBatchSummary)
+    console.log(`[StatusStore] Hydrated recentBlendBatches: ${state.recentBlendBatches.length} row(s)`)
+  } catch (err) {
+    console.error('[StatusStore] Failed to hydrate recent blend batches:', err.message)
+  }
+}
+
+async function hydrateRecentSurgeBatches(MesSurgeTankBatch) {
+  try {
+    const rows = await MesSurgeTankBatch.findAll({
+      order: [['detectedAt', 'DESC']],
+      limit: MAX_RECENT_TANK_BATCHES,
+    })
+    state.recentSurgeBatches = rows.map(surgeBatchSummary)
+    console.log(`[StatusStore] Hydrated recentSurgeBatches: ${state.recentSurgeBatches.length} row(s)`)
+  } catch (err) {
+    console.error('[StatusStore] Failed to hydrate recent surge batches:', err.message)
+  }
+}
+
+function blendBatchSummary(b) {
+  return {
+    id: b.id,
+    tankId: b.tankId,
+    productName: b.productName,
+    mesItem: b.mesItem,
+    nsWorkOrderId: b.nsWorkOrderId,
+    nsWorkOrderNumber: b.nsWorkOrderNumber,
+    status: b.status,
+    parserConfidence: b.parserConfidence,
+    fromEntName: b.fromEntName,
+    toEntName: b.toEntName,
+    cumulativeIssuedLbs: parseFloat(b.cumulativeIssuedLbs) || 0,
+    cumulativeCompletedLbs: parseFloat(b.cumulativeCompletedLbs) || 0,
+    detectedAt: b.detectedAt,
+    completedAt: b.completedAt,
+    errorMessage: b.errorMessage,
+  }
+}
+
+function surgeBatchSummary(b) {
+  return {
+    id: b.id,
+    tankId: b.tankId,
+    productName: b.productName,
+    mesItem: b.mesItem,
+    feedingUhtId: b.feedingUhtId,
+    feedingFromEntName: b.feedingFromEntName,
+    nsWorkOrderId: b.nsWorkOrderId,
+    nsWorkOrderNumber: b.nsWorkOrderNumber,
+    status: b.status,
+    parserConfidence: b.parserConfidence,
+    cumulativeIssuedLbs: parseFloat(b.cumulativeIssuedLbs) || 0,
+    cumulativeCompletedLbs: parseFloat(b.cumulativeCompletedLbs) || 0,
+    detectedAt: b.detectedAt,
+    completedAt: b.completedAt,
+    errorMessage: b.errorMessage,
   }
 }
 
@@ -294,7 +421,11 @@ function snapshot() {
     silos: combineSilos(),
     uhts: state.uhts,
     surgeTanks: state.surgeTanks,
-    recentBatches: state.recentBatches.filter(b => b.status !== 'error'),
+    // Errors are kept in the ring so operators can see *why* a transfer
+    // failed. Pre-fix they were hidden; surfacing them is more useful.
+    recentBatches: state.recentBatches,
+    recentBlendBatches: state.recentBlendBatches,
+    recentSurgeBatches: state.recentSurgeBatches,
     tick: state.tick,
     lastPoll: { ...state.lastPoll },
     eventCount: state.events.length,
@@ -323,6 +454,8 @@ module.exports = {
   hydrateSeparationBatches,
   setTick,
   hydrateTickState,
+  hydrateRecentBlendBatches,
+  hydrateRecentSurgeBatches,
   snapshot,
   events,
 }
