@@ -36,7 +36,7 @@ function buildWoIssueBody(bomLines, targetItemId, quantity, binId) {
           return {
             lineNumber: c.line,
             quantity,
-            componentInventoryDetail: {
+            inventoryDetail: {
               inventoryAssignment: { items: [{
                 quantity,
                 binnumber: { id: binId },
