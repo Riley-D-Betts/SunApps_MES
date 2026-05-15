@@ -42,7 +42,9 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: true,
       },
-      // 'blend-tank-canonical' | 'blend-tank-non-canonical' | 'silo-line-product' | 'silo-bulk-fallback'
+      // 'blend-tank' | 'silo-line-product' | 'silo-bulk-fallback'
+      // (canonical vs non-canonical is now tracked via MesFgInputPairings, not
+      // baked into this column — see pairingStatus.)
       componentResolvedFrom: {
         type: DataTypes.STRING(40),
         allowNull: true,
@@ -52,6 +54,13 @@ module.exports = (sequelize, DataTypes) => {
       // 'layer-1-and-2-skip'   = bulk raw milk piped straight to UHT.
       layerSkipReason: {
         type: DataTypes.STRING(30),
+        allowNull: true,
+      },
+      // 'ok'             = (fgItemId, componentItemId) pairing is approved in MesFgInputPairings.
+      // 'pending_review' = pairing is unknown or pending; UI surfaces it for ops to approve.
+      // null             = legacy batches predating the pairing flow.
+      pairingStatus: {
+        type: DataTypes.STRING(20),
         allowNull: true,
       },
       parserConfidence: {

@@ -70,6 +70,47 @@ db.ensureRuntimeSchema = async function () {
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'layerSkipReason' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
       ALTER TABLE MesSurgeTankBatches ADD layerSkipReason NVARCHAR(30) NULL;
   `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'pairingStatus' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
+      ALTER TABLE MesSurgeTankBatches ADD pairingStatus NVARCHAR(20) NULL;
+  `)
+
+  // Seed MesFgInputPairings from the canonical RAW_FG_TO_FG_MAP. Idempotent —
+  // findOrCreate on the unique (fgItemId, rawInputItemId) index skips existing
+  // rows on every boot. Newly-added entries in RAW_FG_TO_FG_MAP get auto-seeded
+  // on the next deploy; rows added by ops via the approval flow are untouched.
+  await seedFgInputPairings()
+}
+
+async function seedFgInputPairings() {
+  if (!db.MesFgInputPairing) return
+  const itemConfig = require('../services/mesItemConfig')
+  const { RAW_FG_TO_FG_MAP } = itemConfig
+  // Pull names for nicer UI display — derive from parser catalogs (already in memory).
+  let blendCatalog = []
+  let surgeCatalog = []
+  try { blendCatalog = require('../services/blendTankProductParser').PRODUCT_CATALOG } catch {}
+  try { surgeCatalog = require('../services/surgeTankProductParser').PRODUCT_CATALOG } catch {}
+  const nameForBlend = id => blendCatalog.find(p => p.nsId === Number(id))?.name || null
+  const nameForSurge = id => surgeCatalog.find(p => p.nsId === Number(id))?.name || null
+
+  let inserted = 0
+  for (const [rawId, fgId] of Object.entries(RAW_FG_TO_FG_MAP)) {
+    const [, created] = await db.MesFgInputPairing.findOrCreate({
+      where: { fgItemId: Number(fgId), rawInputItemId: Number(rawId) },
+      defaults: {
+        status: 'approved',
+        fgName: nameForSurge(fgId),
+        rawInputName: nameForBlend(rawId),
+        createdBy: 'seed',
+        decidedBy: 'seed',
+        decidedAt: new Date(),
+        notes: 'Canonical pairing seeded from RAW_FG_TO_FG_MAP',
+      },
+    })
+    if (created) inserted++
+  }
+  if (inserted > 0) console.log(`[Models] Seeded ${inserted} canonical FG input pairing(s)`)
 }
 
 module.exports = db

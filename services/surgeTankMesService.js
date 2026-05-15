@@ -71,34 +71,73 @@ function isSiloRef(name) {
 
 /**
  * Decide the single component item that the surge tank's Layer-3 WO should
- * consume, based on what's physically feeding the UHT at WO-create time.
- * The result is pinned to MesSurgeTankBatch (componentItemId/Bin/...) and
- * also sent as a custom one-line component list on the workOrder create body
- * — every subsequent tick issue runs against this same item.
+ * consume, based on what's physically feeding the UHT at WO-create time, and
+ * tag the (FG, component) pairing as approved or pending review by looking it
+ * up in MesFgInputPairings.
  *
- * Returns null if the source can't be resolved yet (caller defers and the
- * batch lands as pending_ns until a re-check picks it up).
+ * The result is pinned to MesSurgeTankBatch (componentItemId/Bin/From,
+ * layerSkipReason, pairingStatus) and the component is also sent as a custom
+ * one-line list on the workOrder create body — every subsequent tick issue
+ * runs against this same item. Returns null if the source can't be resolved
+ * yet (caller defers).
  *
- *   fgItem            — the Layer-3 assembly we're about to build (FG, e.g. 4498 Kirkland 2%)
- *   data              — { feedingFromEntName, feedingUhtId } from the surge-tank job
- *   historian         — provider for getMilkLineStatus()
+ *   fgItem    — Layer-3 assembly we're about to build (FG, e.g. 4498 Kirkland 2%)
+ *   data      — { feedingFromEntName, feedingUhtId } from the surge-tank job
+ *   historian — provider for getMilkLineStatus()
  *
- * Cases:
- *   A. feedingFromEntName is a blend tank → use the blend batch's mesItem (raw FG).
- *      Compare against FG_TO_RAW_FG_MAP[fgItem.id] to flag canonical vs non-canonical.
- *      Warn (but still issue) when the actual mesItem isn't a recognized raw FG.
- *   B. feedingFromEntName is a silo → look at the milk line feeding our UHT;
- *      if it carries a recognized post-separator product, that's a layer-2-skip;
- *      if it's bulk raw milk (5417/5404/5403/5406), that's a layer-1-and-2-skip.
- *      Last-resort: silo's static SILO_ITEM_MAP entry (bulk).
+ * Pairing semantics: any (fgItemId, componentItemId) combo not present in
+ * MesFgInputPairings is auto-inserted as status='pending' and the batch is
+ * flagged pending_review. WO + ticks still fire — physical milk flow happened.
+ * Ops reviews pending rows via the /api/mes/fg-pairings UI and either approves
+ * or leaves them pending forever (no blocklist).
  */
 async function resolveLayer3Component(data, historian, fgItem) {
+  const resolved = await _resolveLayer3Source(data, historian)
+  if (!resolved) return null
+
+  const fgItemId = fgItem?.id ? Number(fgItem.id) : null
+  if (!fgItemId) return { ...resolved, pairingStatus: null }
+
+  const rawInputItemId = Number(resolved.itemId)
+  const pair = await db.MesFgInputPairing.findOne({
+    where: { fgItemId, rawInputItemId },
+  })
+
+  let pairingStatus
+  if (pair?.status === 'approved') {
+    pairingStatus = 'ok'
+  } else {
+    pairingStatus = 'pending_review'
+    if (!pair) {
+      try {
+        await db.MesFgInputPairing.create({
+          fgItemId,
+          rawInputItemId,
+          status: 'pending',
+          fgName: fgItem.name || null,
+          rawInputName: resolved.itemName || null,
+          createdBy: 'auto',
+        })
+        console.log(`[SurgeTankMesService] New pairing flagged for review: FG ${fgItemId} (${fgItem.name}) ← raw ${rawInputItemId} (${resolved.itemName})`)
+      } catch (err) {
+        // Race: a concurrent batch inserted the same pairing first — fine.
+        if (err.name !== 'SequelizeUniqueConstraintError') {
+          console.warn(`[SurgeTankMesService] Failed to log pending pairing: ${err.message}`)
+        }
+      }
+    } else {
+      console.log(`[SurgeTankMesService] Pairing still pending review: FG ${fgItemId} ← raw ${rawInputItemId} (id=${pair.id})`)
+    }
+  }
+  return { ...resolved, pairingStatus }
+}
+
+// Inner: resolve which NS item feeds the surge WO, agnostic of pairing status.
+// Returns { itemId, itemName, binId, resolvedFrom, layerSkipReason } or null.
+async function _resolveLayer3Source(data, historian) {
   const feedingFromEntName = data.feedingFromEntName
   const feedingUhtId = data.feedingUhtId
   if (!feedingFromEntName) return null
-
-  const fgItemId = fgItem?.id ? Number(fgItem.id) : null
-  const fgItemName = fgItem?.name || `NS ${fgItemId ?? 'unknown'}`
 
   if (isBlendTankRef(feedingFromEntName)) {
     const blendBatch = await db.MesBlendTankBatch.findOne({
@@ -106,28 +145,14 @@ async function resolveLayer3Component(data, historian, fgItem) {
       order: [['detectedAt', 'DESC']],
     })
     if (!blendBatch?.mesItem) {
-      console.warn(`[SurgeTankMesService] resolveLayer3Component: no active blend batch on ${feedingFromEntName} — deferring`)
+      console.warn(`[SurgeTankMesService] _resolveLayer3Source: no active blend batch on ${feedingFromEntName} — deferring`)
       return null
     }
-    const blendItemId = Number(blendBatch.mesItem)
-    const canonicalRaw = fgItemId ? itemConfig.FG_TO_RAW_FG_MAP[String(fgItemId)] : null
-    let resolvedFrom
-    if (canonicalRaw && blendItemId === Number(canonicalRaw)) {
-      resolvedFrom = 'blend-tank-canonical'
-    } else {
-      resolvedFrom = 'blend-tank-non-canonical'
-      const isKnownRawFg = blendItemId in itemConfig.RAW_FG_TO_FG_MAP
-      if (!isKnownRawFg) {
-        console.warn(`[SurgeTankMesService] Unfamiliar blend-tank feed: WO will issue NS item ${blendItemId} (from ${feedingFromEntName}) into ${fgItemName} — verify mass balance`)
-      } else {
-        console.warn(`[SurgeTankMesService] Non-canonical blend feed: ${feedingFromEntName} producing NS ${blendItemId} into ${fgItemName} (expected raw FG ${canonicalRaw ?? 'unknown'})`)
-      }
-    }
     return {
-      itemId: String(blendItemId),
+      itemId: String(blendBatch.mesItem),
       itemName: blendBatch.productName,
       binId: itemConfig.getBinId(feedingFromEntName),
-      resolvedFrom,
+      resolvedFrom: 'blend-tank',
       layerSkipReason: null,
     }
   }
@@ -155,12 +180,12 @@ async function resolveLayer3Component(data, historian, fgItem) {
           }
         }
       } catch (err) {
-        console.warn(`[SurgeTankMesService] resolveLayer3Component: line lookup failed — ${err.message}`)
+        console.warn(`[SurgeTankMesService] _resolveLayer3Source: line lookup failed — ${err.message}`)
       }
     }
     const fallback = itemConfig.SILO_ITEM_MAP[silo]
     if (!fallback) {
-      console.warn(`[SurgeTankMesService] resolveLayer3Component: no SILO_ITEM_MAP entry for ${silo}`)
+      console.warn(`[SurgeTankMesService] _resolveLayer3Source: no SILO_ITEM_MAP entry for ${silo}`)
       return null
     }
     return {
@@ -172,7 +197,7 @@ async function resolveLayer3Component(data, historian, fgItem) {
     }
   }
 
-  console.warn(`[SurgeTankMesService] resolveLayer3Component: unknown feeding source: ${feedingFromEntName}`)
+  console.warn(`[SurgeTankMesService] _resolveLayer3Source: unknown feeding source: ${feedingFromEntName}`)
   return null
 }
 
@@ -329,7 +354,7 @@ async function processWOStart(data, historian) {
     }
   }
   if (resolvedComponent) {
-    console.log(`  Layer-3 component: NS ${resolvedComponent.itemId} (${resolvedComponent.itemName}) from ${resolvedComponent.resolvedFrom}${resolvedComponent.layerSkipReason ? ` [${resolvedComponent.layerSkipReason}]` : ''}`)
+    console.log(`  Layer-3 component: NS ${resolvedComponent.itemId} (${resolvedComponent.itemName}) from ${resolvedComponent.resolvedFrom}${resolvedComponent.layerSkipReason ? ` [${resolvedComponent.layerSkipReason}]` : ''} (pairing: ${resolvedComponent.pairingStatus || 'n/a'})`)
   }
 
   const record = await db.MesSurgeTankBatch.create({
@@ -342,6 +367,7 @@ async function processWOStart(data, historian) {
     componentBinId: resolvedComponent?.binId || null,
     componentResolvedFrom: resolvedComponent?.resolvedFrom || null,
     layerSkipReason: resolvedComponent?.layerSkipReason || null,
+    pairingStatus: resolvedComponent?.pairingStatus || null,
     parserConfidence: assemblyItem.confidence,
     status: 'active',
     detectedAt: detectedAt || new Date(),
