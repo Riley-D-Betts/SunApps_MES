@@ -683,8 +683,24 @@ class RestProvider extends BaseProvider {
       ]
     }
     const perUht = 17
-    const fqns = uhts.flatMap(fqnsForUht)
+
+    // Blend-tank → TSTAT outlet valve state tags. TSTAT-1 feeds UHT1; TSTAT-2
+    // feeds UHT2. UHT1 valves are at indices 0-3, UHT2 valves at indices 4-7.
+    const BT_NAMES  = ['BlendTank1A', 'BlendTank1B', 'BlendTank2A', 'BlendTank2B']
+    const valveFqns = [
+      'BlendSystem.VG_8014MP_Y1_STA',  // BT1A → TSTAT-1 → UHT1
+      'BlendSystem.VG_8024MP_Y1_STA',  // BT1B → TSTAT-1 → UHT1
+      'BlendSystem.VG_8034MP_Y1_STA',  // BT2A → TSTAT-1 → UHT1
+      'BlendSystem.VG_8044MP_Y1_STA',  // BT2B → TSTAT-1 → UHT1
+      'BlendSystem.VG_8013MP_Y1_STA',  // BT1A → TSTAT-2 → UHT2
+      'BlendSystem.VG_8023MP_Y1_STA',  // BT1B → TSTAT-2 → UHT2
+      'BlendSystem.VG_8033MP_Y1_STA',  // BT2A → TSTAT-2 → UHT2
+      'BlendSystem.VG_8043MP_Y1_STA',  // BT2B → TSTAT-2 → UHT2
+    ]
+
+    const fqns = [...uhts.flatMap(fqnsForUht), ...valveFqns]
     const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
+    const valveOffset = uhts.length * perUht
 
     return uhts.map((uhtId, i) => {
       const offset = i * perUht
@@ -725,6 +741,15 @@ class RestProvider extends BaseProvider {
         ? (CIP_STEP_NAMES[stepNum] ?? `CIP Step ${stepNum}`)
         : (PROCESS_STEP_NAMES[stepNum] ?? `Step ${stepNum}`)
 
+      // UHT{N}.FromEntName tag is often unpopulated (PLC writes null).
+      // Fall back to reading which blend-tank→TSTAT outlet valve is open.
+      // Valve index group: UHT1 uses slots 0-3, UHT2 uses slots 4-7.
+      let fromEntName = txt(7)
+      if (!fromEntName) {
+        const groupOffset = valveOffset + (i * 4)
+        fromEntName = BT_NAMES.find((_, vi) => !!values[groupOffset + vi]?.Value) || ''
+      }
+
       return {
         uhtId,
         active: !!val(0),
@@ -738,7 +763,7 @@ class RestProvider extends BaseProvider {
         mode,
         recipeText: txt(9),
         woState: txt(10),
-        fromEntName: txt(7),
+        fromEntName,
         toEntName: txt(8),
       }
     })
