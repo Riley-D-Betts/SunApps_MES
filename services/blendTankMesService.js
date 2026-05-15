@@ -26,9 +26,14 @@ function clearBomCache(nsWorkOrderId) {
 // Build the transform body for a workOrderIssue that issues qty lbs of one
 // non-lot-tracked item from a specific bin. All other BOM lines are zeroed out
 // so the transform doesn't auto-fill them and demand lot detail.
+//
+// Property names are camelCase (componentInventoryDetail / inventoryAssignment)
+// — the lowercase variants were silently dropped by NS, leaving the component
+// quantity unbacked by inventory details and causing rejections like "The total
+// inventory detail quantity must be N". Matches the working separator body in
+// services/milkMesService.js.
 function buildWoIssueBody(bomLines, targetItemId, quantity, binId) {
   const targetIdStr = String(targetItemId)
-  const binIdStr = String(binId)
   return {
     component: {
       items: bomLines.map(c => {
@@ -36,8 +41,14 @@ function buildWoIssueBody(bomLines, targetItemId, quantity, binId) {
           return {
             lineNumber: c.line,
             quantity,
-            componentinventorydetail: {
-              inventoryassignment: { items: [{ quantity, binnumber: binIdStr }] },
+            componentInventoryDetail: {
+              inventoryAssignment: { items: [{
+                quantity,
+                binnumber: { id: binId },
+                // inventoryStatus 1 = "Good" — the default NS assigns when omitted,
+                // sent explicitly so the body matches the canonical shape NS stores.
+                inventoryStatus: { id: 1 },
+              }] },
             },
           }
         }
@@ -599,7 +610,11 @@ async function tickAllActiveBatches(historian) {
 
 async function tickIssuesForBatch(batch, lineReadings) {
   const matchingLines = lineReadings.filter(r => findBatchForLine(r, [batch]) !== null)
-  if (matchingLines.length === 0) return 0
+  // Don't early-return on no-current-matches: the catch-up pass below uses
+  // stored pipe-state context (lastProductName/lastSiloName) to issue against
+  // flow that landed during an earlier tick window. Lines reset between ticks
+  // (totalizer 0 → peak → 0) when a batch ends, and AVEVA clears REQUESTEDBY
+  // after the fill — without the catch-up running, that flow is never issued.
 
   let issuesFired = 0
 

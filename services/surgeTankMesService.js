@@ -29,7 +29,6 @@ function clearBomCache(nsWorkOrderId) {
 
 function buildWoIssueBody(bomLines, targetItemId, quantity, binId) {
   const targetIdStr = String(targetItemId)
-  const binIdStr = String(binId)
   return {
     component: {
       items: bomLines.map(c => {
@@ -37,8 +36,12 @@ function buildWoIssueBody(bomLines, targetItemId, quantity, binId) {
           return {
             lineNumber: c.line,
             quantity,
-            componentinventorydetail: {
-              inventoryassignment: { items: [{ quantity, binnumber: binIdStr }] },
+            componentInventoryDetail: {
+              inventoryAssignment: { items: [{
+                quantity,
+                binnumber: { id: binId },
+                inventoryStatus: { id: 1 },
+              }] },
             },
           }
         }
