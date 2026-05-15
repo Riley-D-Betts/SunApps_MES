@@ -47,7 +47,10 @@
       "Bash(npx jest *)",
       "Bash(gh run *)",
       "Bash(python -c ' *)",
-      "Bash(dir -R -Attributes !h)"
+      "Bash(dir -R -Attributes !h)",
+      "Bash(npx --no-install vite build --mode development)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\BryceChesley\\\\Workspace\\\\SunApps_MES\" -Recurse -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)"
     ]
   }
 }
