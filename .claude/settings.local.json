@@ -50,7 +50,11 @@
       "Bash(dir -R -Attributes !h)",
       "Bash(npx --no-install vite build --mode development)",
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\BryceChesley\\\\Workspace\\\\SunApps_MES\" -Recurse -Directory)",
-      "Bash(Select-Object -ExpandProperty FullName)"
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Read(//tmp/**)",
+      "Bash(python -c \"import json; d=json.load\\(open\\('/tmp/out.json'\\)\\); print\\(len\\(d.get\\('pairings',[]\\)\\), 'pairings | success=' + str\\(d.get\\('success'\\)\\)\\)\")",
+      "Read(//c/Users/BryceChesley/Workspace/SunApps_Manufacturing/routes/**)",
+      "Read(//c/Users/BryceChesley/Workspace/SunApps_Manufacturing/**)"
     ]
   }
 }
