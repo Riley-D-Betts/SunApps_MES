@@ -2,14 +2,20 @@ const surgeTankMesService = require('../services/surgeTankMesService')
 const notifyService = require('../services/notifyService')
 const statusStore = require('../services/statusStore')
 
-// ST81-84 capacities are roughly 5000 gal. Use modest thresholds so we don't
-// false-trigger on residual coolant or a re-pressurization spike.
-const WEIGHT_THRESHOLD_GAL = 50
 const EMPTY_THRESHOLD_GAL = 10
 // Minimum batch lifetime before the "tank emptied" END can fire. Prevents a
 // false end when the ST reads 0 at the start of a fill (sterile prep) before
 // any real product has landed.
 const MIN_BATCH_DURATION_MS = 120_000
+// Per-tick gal-delta floor — below this we treat the change as sensor noise
+// rather than real inflow. Matches the equipmentJob fill-noise floor.
+const FILL_NOISE_GAL = 5
+// Consecutive ticks of confirmed fill required before a WO START fires.
+// At a 10s cron, 5 ticks ≈ 50s of sustained inflow. The gate combines this
+// with UHT phase ("Sterile on Product") — both conditions must hold per tick,
+// any miss resets the counter to 0.
+const FILL_TICKS_FOR_START = 5
+const STERILE_ON_PRODUCT_STEP = 'Sterile on Product'
 
 // Sentinel productDesc values that look like real strings to the historian
 // but are not real product names. The PLC and operator entries can write any
@@ -25,22 +31,38 @@ function validStr(val) {
   return val
 }
 
-// Tank is in CIP / non-sterile state and not eligible to start a batch.
-//   state === 4 is the confirmed CIP code (per SURGE_STATE_NAMES on the
-//     dashboard).
-//   sterProdBarrOK === false means the Sterile Product Barrier is down, so
-//     the tank cannot hold sterile product even if productDesc looks valid.
+// Tank is in CIP and not eligible to start a batch. state === 4 is the
+// confirmed CIP code (per SURGE_STATE_NAMES on the dashboard). Do NOT gate
+// on sterProdBarrOK — that's a plumbing/valve indicator, not a sterility
+// signal, and the tank can legitimately hold sterile product with it false.
 function isCipMode(status) {
-  if (status?.state === 4) return true
-  if (status && status.sterProdBarrOK === false) return true
-  return false
+  return status?.state === 4
+}
+
+// UHT is actively pushing sterile product into a surge tank. PROCESS step 24
+// ("Sterile on Product") is the authoritative "real production" signal.
+function isUhtSterileOnProduct(uhtStatus) {
+  return uhtStatus?.mode === 'PROCESS' && uhtStatus?.stepName === STERILE_ON_PRODUCT_STEP
+}
+
+function blankTankState() {
+  return {
+    productName: null,
+    batchActive: false,
+    seeded: false,
+    batchStartedAt: null,
+    feedingUhtId: null,
+    feedingFromEntName: null,
+    fillTickCount: 0,
+    lastGallonsForDelta: null,
+  }
 }
 
 const tankState = {
-  ST81: { productName: null, batchActive: false, seeded: false, batchStartedAt: null, feedingUhtId: null, feedingFromEntName: null },
-  ST82: { productName: null, batchActive: false, seeded: false, batchStartedAt: null, feedingUhtId: null, feedingFromEntName: null },
-  ST83: { productName: null, batchActive: false, seeded: false, batchStartedAt: null, feedingUhtId: null, feedingFromEntName: null },
-  ST84: { productName: null, batchActive: false, seeded: false, batchStartedAt: null, feedingUhtId: null, feedingFromEntName: null },
+  ST81: blankTankState(),
+  ST82: blankTankState(),
+  ST83: blankTankState(),
+  ST84: blankTankState(),
 }
 
 let lastPollTime = new Date()
@@ -107,6 +129,11 @@ async function run(historian) {
       console.warn(`[SurgeTankJob] getUhtSurgeTankRouting failed: ${err.message}`)
       return {}
     })
+    const uhtStatusList = await historian.getUhtStatus().catch(err => {
+      console.warn(`[SurgeTankJob] getUhtStatus failed: ${err.message}`)
+      return []
+    })
+    const uhtById = Object.fromEntries(uhtStatusList.map(u => [u.uhtId, u]))
 
     for (const status of statuses) {
       const { tankId, productDesc, mainGallons } = status
@@ -141,6 +168,7 @@ async function run(historian) {
         statusStore.pushEvent('surgeTank.batchEnd', `${tankId}: batch ended (emptied)`, { tankId, productName: prev.productName, gallons, reason: 'emptied' })
         prev.batchActive = false
         prev.batchStartedAt = null
+        prev.fillTickCount = 0
         try {
           await surgeTankMesService.processWOEnd({ tankId, productName: prev.productName, detectedAt: new Date().toISOString() }, historian)
         } catch (err) {
@@ -149,7 +177,14 @@ async function run(historian) {
       }
 
       const cip = isCipMode(status)
+      const feedingUht = resolveFeedingUht(tankId, routing)
+      const feedingUhtStatus = feedingUht ? uhtById[feedingUht] : null
+      const sterileOnProduct = isUhtSterileOnProduct(feedingUhtStatus)
 
+      // Product change while a batch is running: close the old WO immediately,
+      // adopt the new productName, and reset the fill-tick counter. The new WO
+      // doesn't fire until the 5-tick gate below clears again with the new
+      // product — same gate as a cold start.
       if (hasProduct && productName !== prev.productName) {
         if (prev.batchActive && prev.productName) {
           console.log(`[SurgeTankJob] BATCH END (product change) on ${tankId}: "${prev.productName}"`)
@@ -162,73 +197,53 @@ async function run(historian) {
             console.error(`[SurgeTankJob] processWOEnd failed for ${tankId}:`, err.message)
           }
         }
-
-        // Don't start a WO when the tank is in CIP / non-sterile state — the
-        // productDesc may carry sterile-prep text the operator left from a
-        // previous run, and the tank cannot legitimately hold product. We
-        // still adopt the new productName as the latest seen value so the
-        // next legitimate change is detected normally.
-        if (cip) {
-          console.log(`[SurgeTankJob] SUPPRESS BATCH START on ${tankId} (CIP/non-sterile, state=${status.state}, sterProdBarrOK=${status.sterProdBarrOK}): "${productName}"`)
-          statusStore.pushEvent('surgeTank.batchStart.suppressed', `${tankId}: "${productName}" suppressed (CIP)`, { tankId, productName, state: status.state, sterProdBarrOK: status.sterProdBarrOK })
-          prev.productName = productName
-          continue
-        }
-
-        // Resolve the feeding source at start time so the batch carries it.
-        const feedingUhtId = resolveFeedingUht(tankId, routing)
-        let feedingFromEntName = null
-        if (feedingUhtId) {
-          try {
-            feedingFromEntName = await historian.getUhtFromEntName(feedingUhtId)
-          } catch (err) {
-            console.warn(`[SurgeTankJob] getUhtFromEntName(${feedingUhtId}) failed: ${err.message}`)
-          }
-        }
-
-        console.log(`[SurgeTankJob] BATCH START detected on ${tankId}: "${productName}" (UHT=${feedingUhtId || '?'}, from=${feedingFromEntName || '?'})`)
-        statusStore.pushEvent('surgeTank.batchStart', `${tankId}: "${productName}" started`, { tankId, productName, feedingUhtId, feedingFromEntName })
-        prev.batchActive = true
-        prev.batchStartedAt = Date.now()
-        prev.feedingUhtId = feedingUhtId
-        prev.feedingFromEntName = feedingFromEntName
-        try {
-          await surgeTankMesService.processWOStart({
-            tankId,
-            productName,
-            feedingUhtId,
-            feedingFromEntName,
-            detectedAt: new Date().toISOString(),
-          }, historian)
-        } catch (err) {
-          console.error(`[SurgeTankJob] processWOStart failed for ${tankId}:`, err.message)
-        }
+        prev.productName = productName
+        prev.fillTickCount = 0
       }
 
-      // Weight-confirmation fallback: product was already seeded but no
-      // active batch yet, and gallons have crossed the threshold. Covers
-      // the case where seeding ran during an in-progress fill.
-      if (hasProduct && !cip && !prev.batchActive && productName === prev.productName && gallons >= WEIGHT_THRESHOLD_GAL) {
-        const feedingUhtId = resolveFeedingUht(tankId, routing)
+      // 5-tick fill gate — replaces the old immediate-start-on-product-change
+      // and weight-confirmation paths. A tick "counts" only when the tank is
+      // both physically receiving milk (delta > FILL_NOISE_GAL since our last
+      // poll) AND the feeding UHT is on PROCESS step "Sterile on Product".
+      // Any miss resets the counter to 0 — sustained inflow during real
+      // production is required.
+      const fillDelta = prev.lastGallonsForDelta == null ? null : gallons - prev.lastGallonsForDelta
+      prev.lastGallonsForDelta = gallons
+      const eligibleForGate = hasProduct && !cip && !prev.batchActive && productName === prev.productName
+
+      if (eligibleForGate && fillDelta != null && fillDelta > FILL_NOISE_GAL && sterileOnProduct) {
+        prev.fillTickCount++
+        console.log(`[SurgeTankJob] Fill tick ${prev.fillTickCount}/${FILL_TICKS_FOR_START} on ${tankId}: "${productName}" (Δ${fillDelta.toFixed(1)} gal, UHT=${feedingUht} Sterile on Product)`)
+      } else if (eligibleForGate && prev.fillTickCount > 0) {
+        const reason = !sterileOnProduct
+          ? `UHT not Sterile on Product (uht=${feedingUht || '?'}, step=${feedingUhtStatus?.stepName || '?'})`
+          : `Δ${fillDelta == null ? 'n/a' : fillDelta.toFixed(1)} gal ≤ ${FILL_NOISE_GAL}`
+        console.log(`[SurgeTankJob] Fill tick reset on ${tankId} (${reason})`)
+        prev.fillTickCount = 0
+      }
+
+      if (eligibleForGate && prev.fillTickCount >= FILL_TICKS_FOR_START) {
         let feedingFromEntName = null
-        if (feedingUhtId) {
+        if (feedingUht) {
           try {
-            feedingFromEntName = await historian.getUhtFromEntName(feedingUhtId)
+            feedingFromEntName = await historian.getUhtFromEntName(feedingUht)
           } catch (err) {
-            console.warn(`[SurgeTankJob] getUhtFromEntName(${feedingUhtId}) failed: ${err.message}`)
+            console.warn(`[SurgeTankJob] getUhtFromEntName(${feedingUht}) failed: ${err.message}`)
           }
         }
-        console.log(`[SurgeTankJob] BATCH START (level confirmed) on ${tankId}: "${productName}" (${Math.round(gallons)} gal)`)
-        statusStore.pushEvent('surgeTank.batchStart', `${tankId}: "${productName}" started (level)`, { tankId, productName, gallons, feedingUhtId, feedingFromEntName })
+
+        console.log(`[SurgeTankJob] BATCH START (${FILL_TICKS_FOR_START}-tick gate cleared) on ${tankId}: "${productName}" (UHT=${feedingUht || '?'}, from=${feedingFromEntName || '?'})`)
+        statusStore.pushEvent('surgeTank.batchStart', `${tankId}: "${productName}" started`, { tankId, productName, feedingUhtId: feedingUht, feedingFromEntName })
         prev.batchActive = true
         prev.batchStartedAt = Date.now()
-        prev.feedingUhtId = feedingUhtId
+        prev.feedingUhtId = feedingUht
         prev.feedingFromEntName = feedingFromEntName
+        prev.fillTickCount = 0
         try {
           await surgeTankMesService.processWOStart({
             tankId,
             productName,
-            feedingUhtId,
+            feedingUhtId: feedingUht,
             feedingFromEntName,
             detectedAt: new Date().toISOString(),
           }, historian)
@@ -242,6 +257,7 @@ async function run(historian) {
         statusStore.pushEvent('surgeTank.batchEnd', `${tankId}: batch ended (ProductDesc cleared)`, { tankId, productName: prev.productName, reason: 'product_cleared' })
         prev.batchActive = false
         prev.batchStartedAt = null
+        prev.fillTickCount = 0
         try {
           await surgeTankMesService.processWOEnd({ tankId, productName: prev.productName, detectedAt: new Date().toISOString() }, historian)
         } catch (err) {
