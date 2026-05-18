@@ -147,6 +147,12 @@ class RestProvider extends BaseProvider {
     // dashboard can show "+X gal this tick" per tank.
     this._prevSurgeGal = { ST81: null, ST82: null, ST83: null, ST84: null }
 
+    // Previous value of the XFR TransferComplete bit. Used to detect the 0→1
+    // rising edge that signals a completed separation batch. Null on first poll
+    // so a TransferComplete=1 at startup also triggers batch building (handles
+    // batches that completed while the service was down).
+    this._prevTransferComplete = null
+
     // Software milk-flow totalizer per UHT. Since FT1102 only exposes a live
     // GPM rate (no hardware totalizer exists), we integrate it over time while
     // the UHT is in PROCESS mode. Resets to 0 on each IDLE→PROCESS transition
@@ -258,34 +264,95 @@ class RestProvider extends BaseProvider {
 
   /**
    * Detect completed separation batches by watching the XFR TransferComplete
-   * trigger. All volume tags (QTYActual, Cream/Skim_Flow_Totalized) reset
-   * to 0 between batches, so the value at TransferComplete is the per-batch total.
+   * trigger via the Real-time Raw endpoint (0→1 rising-edge detection).
+   *
+   * ProcessValues has a ~1h DST timestamp lag that places recent events
+   * outside the lastPollTime query window, causing them to be silently
+   * missed. The Raw endpoint returns the current tag value without that lag.
+   * We track the previous value between calls and fire when we see 0→1.
+   * A null previous value (first poll / service start) also triggers if the
+   * bit is already 1, handling batches that completed while the service was
+   * down before the PLC reset the bit.
    */
   async getSeparatorBatches(since) {
-    const now = new Date()
+    const xfrPv = await this._getCurrentValue(TAGS.SEP_XFR_TRANSFER_COMPLETE, { verbose: false })
+    const currentXfr = xfrPv?.Value ?? 0
+    const prevXfr = this._prevTransferComplete
+    this._prevTransferComplete = currentXfr
 
-    const xfrEvents = await this._queryProcessValues(
-      TAGS.SEP_XFR_TRANSFER_COMPLETE, since, now, { verbose: false }
-    )
+    const risingEdge = currentXfr === 1 && (prevXfr === 0 || prevXfr === null)
+    if (!risingEdge) return []
 
-    const completedEvents = xfrEvents.filter(e => e.Value === 1)
+    const transferTime = xfrPv?.DateTime ? new Date(xfrPv.DateTime) : new Date()
+    const reason = prevXfr === null ? 'startup (TransferComplete already 1)' : '0→1 edge'
+    console.log(`[RestProvider] TransferComplete detected (${reason}) at ${transferTime.toISOString()}`)
 
-    if (completedEvents.length === 0) return []
+    try {
+      const batch = await this._buildBatchFromCurrentValues(transferTime)
+      return batch ? [batch] : []
+    } catch (err) {
+      console.error(`[RestProvider] Failed to build batch from current tags:`, err.message)
+      return []
+    }
+  }
 
-    console.log(`[RestProvider] Found ${completedEvents.length} transfer complete event(s)`)
+  /**
+   * Build a separation batch record from the CURRENT values of the XFR tags.
+   * Called immediately when TransferComplete goes 1 — the XFR tags still hold
+   * the just-completed batch's data and won't reset until the next batch starts.
+   * Uses _getCurrentValue (Raw endpoint) so there is no DST-lag concern.
+   */
+  async _buildBatchFromCurrentValues(transferTime) {
+    const fqns = [
+      TAGS.SEP_XFR_QTY_ACTUAL,   // 0
+      TAGS.SEP_XFR_QTY_TARGET,   // 1
+      TAGS.SEP_XFR_SOURCE,       // 2
+      TAGS.SEP_XFR_ITEM_ID,      // 3
+      TAGS.SEP_XFR_NAME,         // 4
+      TAGS.SEP_XFR_EU,           // 5
+      TAGS.SEP_XFR_DEST_0,       // 6
+      TAGS.SEP_XFR_DEST_1,       // 7
+      TAGS.SEP_XFR_DEST_2,       // 8
+      TAGS.SEP_XFR_DEST_3,       // 9
+      TAGS.CREAM_FLOW_TOTAL,     // 10
+      TAGS.SKIM_FLOW_TOTAL,      // 11
+    ]
+    const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
+    const val = (i) => values[i]?.Value ?? 0
+    const txt = (i) => values[i]?.Text ?? ''
 
-    const batches = []
-    for (const event of completedEvents) {
-      const transferTime = new Date(event.DateTime)
-      try {
-        const batch = await this._buildBatchFromTransfer(transferTime)
-        if (batch) batches.push(batch)
-      } catch (err) {
-        console.error(`[RestProvider] Failed to read batch at ${transferTime.toISOString()}:`, err.message)
-      }
+    const source = txt(2)
+    if (!source) {
+      console.log(`[RestProvider] _buildBatchFromCurrentValues: no XFR source — skipping`)
+      return null
     }
 
-    return batches
+    const batchId = `XFR-${transferTime.getTime()}`
+    const inputVolume = val(0)
+    const creamGallons = val(10)
+    const skimGallons = val(11)
+    const creamVolume = creamGallons * CREAM_DENSITY_PPG
+    const skimVolume = skimGallons * SKIM_DENSITY_PPG
+    const destinations = [txt(6), txt(7), txt(8), txt(9)].filter(Boolean)
+    const siloProductConfig = await this._readSiloProductConfigRaw([source, ...destinations])
+
+    console.log(`[RestProvider] Batch ${batchId}: ${source} → ${destinations.join(', ') || '?'}, input=${inputVolume.toFixed(1)} LBS, cream=${creamGallons.toFixed(1)} gal (${creamVolume.toFixed(1)} LBS), skim=${skimGallons.toFixed(1)} gal (${skimVolume.toFixed(1)} LBS)`)
+
+    return {
+      batchId,
+      sourceSilo: source,
+      destinations,
+      siloProductConfig,
+      inputVolume,
+      creamVolume,
+      skimVolume,
+      batchStart: new Date(transferTime.getTime() - 30 * 60 * 1000),
+      batchEnd: transferTime,
+      itemId: txt(3),
+      transferName: txt(4),
+      unit: txt(5),
+      targetVolume: val(1),
+    }
   }
 
   async getSeparatorStatus() {
