@@ -75,6 +75,28 @@ db.ensureRuntimeSchema = async function () {
       ALTER TABLE MesSurgeTankBatches ADD pairingStatus NVARCHAR(20) NULL;
   `)
 
+  // MesSeparationBatches: state machine extensions (endReason + per-tick snapshots)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'endReason' AND Object_ID = Object_ID(N'MesSeparationBatches'))
+      ALTER TABLE MesSeparationBatches ADD endReason NVARCHAR(40) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'prevSourceSilo' AND Object_ID = Object_ID(N'MesSeparationBatches'))
+      ALTER TABLE MesSeparationBatches ADD prevSourceSilo NVARCHAR(50) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'prevDestinationsJson' AND Object_ID = Object_ID(N'MesSeparationBatches'))
+      ALTER TABLE MesSeparationBatches ADD prevDestinationsJson NVARCHAR(500) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'prevIndexCodesJson' AND Object_ID = Object_ID(N'MesSeparationBatches'))
+      ALTER TABLE MesSeparationBatches ADD prevIndexCodesJson NVARCHAR(500) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lastTickAt' AND Object_ID = Object_ID(N'MesSeparationBatches'))
+      ALTER TABLE MesSeparationBatches ADD lastTickAt DATETIME2 NULL;
+  `)
+
   // Seed MesFgInputPairings from the canonical RAW_FG_TO_FG_MAP. Idempotent —
   // findOrCreate on the unique (fgItemId, rawInputItemId) index skips existing
   // rows on every boot. Newly-added entries in RAW_FG_TO_FG_MAP get auto-seeded

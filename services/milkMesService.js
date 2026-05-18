@@ -7,7 +7,7 @@ async function processSeparationBatch(data) {
   const {
     batchId, sourceSilo: sourceRaw, destinations: destsRaw = [], siloProductConfig = {},
     inputVolume, creamVolume, skimVolume,
-    batchStart, batchEnd, itemId, transferName, unit, targetVolume,
+    batchStart, batchEnd, itemId, transferName, unit, targetVolume, endReason,
   } = data
 
   if (!batchId) throw new Error('batchId is required')
@@ -16,12 +16,27 @@ async function processSeparationBatch(data) {
 
   const sourceSilo = itemConfig.normalizeSiloName(sourceRaw) || sourceRaw
 
-  const existing = await db.MesSeparationBatch.findOne({
-    where: { batchId, sourceSilo, batchEnd: batchEnd || null },
+  // State-machine flow: a row already exists (created at start, closed in
+  // separatorStateMachine.closeBatch). We update it through to NS rather than
+  // creating a fresh row. Status 'running' = just closed by SM, ready to emit.
+  // Anything else terminal = already processed, skip.
+  const stateMachineRow = await db.MesSeparationBatch.findOne({
+    where: { batchId, sourceSilo },
   })
-  if (existing) {
-    console.log(`[MilkMesService] Batch ${batchId} / ${sourceSilo} already processed (status: ${existing.status}) — skipping`)
-    return { success: true, duplicate: true, batchId, status: existing.status, summary: null }
+  if (stateMachineRow && stateMachineRow.status !== 'running') {
+    console.log(`[MilkMesService] Batch ${batchId} / ${sourceSilo} already processed (status: ${stateMachineRow.status}) — skipping`)
+    return { success: true, duplicate: true, batchId, status: stateMachineRow.status, summary: null }
+  }
+  // Legacy admin-route compat: if no row exists, fall back to the dedup-by-(batchId,sourceSilo,batchEnd)
+  // check the original logic used.
+  if (!stateMachineRow) {
+    const existing = await db.MesSeparationBatch.findOne({
+      where: { batchId, sourceSilo, batchEnd: batchEnd || null },
+    })
+    if (existing) {
+      console.log(`[MilkMesService] Batch ${batchId} / ${sourceSilo} already processed (status: ${existing.status}) — skipping`)
+      return { success: true, duplicate: true, batchId, status: existing.status, summary: null }
+    }
   }
 
   // Source product: prefer the silo's currently-selected product index (from
@@ -125,30 +140,50 @@ async function processSeparationBatch(data) {
   })
 
   let record
-  try {
-    record = await db.MesSeparationBatch.create({
-      batchId,
-      sourceSilo,
+  if (stateMachineRow) {
+    // State machine flow: update the existing row with resolution data.
+    // batchStart was set at open; preserve it. batchEnd was set at close.
+    await stateMachineRow.update({
       inputVolume,
       creamVolume: creamVolume || 0,
       skimVolume: skimVolume || 0,
       wasteVolume: parseFloat(wasteVolume.toFixed(2)),
       wastePercent: parseFloat(wastePercent.toFixed(2)),
-      batchStart,
-      batchEnd,
-      transferName: transferName || null,
+      transferName: transferName || stateMachineRow.transferName,
       destinations: destinationsJson,
-      itemId: itemId || null,
-      unit: unit || null,
-      targetVolume: targetVolume ?? null,
+      itemId: itemId || stateMachineRow.itemId,
+      unit: unit || stateMachineRow.unit,
+      targetVolume: targetVolume ?? stateMachineRow.targetVolume,
+      endReason: endReason || stateMachineRow.endReason,
       status: 'pending',
     })
-  } catch (err) {
-    if (err.name === 'SequelizeUniqueConstraintError') {
-      console.log(`[MilkMesService] Batch ${batchId} / ${sourceSilo} lost insert race — skipping`)
-      return { success: true, duplicate: true, batchId, status: 'race_dedup' }
+    record = stateMachineRow
+  } else {
+    try {
+      record = await db.MesSeparationBatch.create({
+        batchId,
+        sourceSilo,
+        inputVolume,
+        creamVolume: creamVolume || 0,
+        skimVolume: skimVolume || 0,
+        wasteVolume: parseFloat(wasteVolume.toFixed(2)),
+        wastePercent: parseFloat(wastePercent.toFixed(2)),
+        batchStart,
+        batchEnd,
+        transferName: transferName || null,
+        destinations: destinationsJson,
+        itemId: itemId || null,
+        unit: unit || null,
+        targetVolume: targetVolume ?? null,
+        status: 'pending',
+      })
+    } catch (err) {
+      if (err.name === 'SequelizeUniqueConstraintError') {
+        console.log(`[MilkMesService] Batch ${batchId} / ${sourceSilo} lost insert race — skipping`)
+        return { success: true, duplicate: true, batchId, status: 'race_dedup' }
+      }
+      throw err
     }
-    throw err
   }
 
   try {

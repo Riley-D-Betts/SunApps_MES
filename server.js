@@ -6,6 +6,7 @@ const { sequelize } = require('./config')
 const db = require('./models')
 const { createProvider } = require('./historian')
 const separationJob = require('./jobs/separationJob')
+const separatorStateMachine = require('./services/separatorStateMachine')
 const bulkMilkJob = require('./jobs/bulkMilkJob')
 const blendTankJob = require('./jobs/blendTankJob')
 const surgeTankJob = require('./jobs/surgeTankJob')
@@ -32,6 +33,7 @@ sequelize.sync().then(async () => {
   // already running before the restart. Without this, the first poll would
   // see an empty in-memory state and either false-fire a new WO (if the
   // product is set) or never close the orphaned DB row (if it later clears).
+  await separatorStateMachine.hydrateFromDb()
   await blendTankJob.hydrateFromDb(db.MesBlendTankBatch)
   await surgeTankJob.hydrateFromDb(db.MesSurgeTankBatch)
   console.log('Sequelize models synced.')

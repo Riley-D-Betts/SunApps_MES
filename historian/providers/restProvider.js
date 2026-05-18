@@ -46,11 +46,13 @@ const TAGS = {
   SKIM_FLOW_TOTAL:  'Ing_Sep_CMSep1_HIST.Skim_Flow_Totalized',
 
   // Live separator status (SEPSTAT — real-time from SCADA)
-  SEP_FEED_PERMIT:   'SEPSTAT.FEEDPERMIT',
-  SEP_CREAM_FLOW:    'SEPSTAT.CREAMFLOW',       // GPM
-  SEP_SKIM_FLOW:     'SEPSTAT.SKIMFLOW',         // GPM
-  SEP_MOTOR_RPM:     'SEPSTAT.MOTORSPEEDPROX',   // RPM
-  SEP_FEED_TOTAL:    'Product.SepFeedTotal',      // LBS — live separator feed totalizer
+  SEP_FEED_PERMIT:    'SEPSTAT.FEEDPERMIT',
+  SEP_CREAM_FLOW:     'SEPSTAT.CREAMFLOW',       // GPM
+  SEP_SKIM_FLOW:      'SEPSTAT.SKIMFLOW',         // GPM
+  SEP_MOTOR_RPM:      'SEPSTAT.MOTORSPEEDPROX',   // RPM
+  SEP_FEED_TOTAL:     'Product.SepFeedTotal',      // LBS — live separator feed totalizer
+  SEP_CIPCHEM_REQ:    'SEPSTAT.CIPCHEMMODE_REQ',   // bool — operator/recipe is requesting CIP chemical mode
+  SEP_CIPRINSE_REQ:   'SEPSTAT.CIPRINSEMODE_REQ',  // bool — operator/recipe is requesting CIP rinse mode
 
   // Blend tank tags (per-tank prefix substituted at query time)
   // NOTE: MES WO tags (CurrentWO, JobRunning, etc.) are stale — plant uses Atlas, not MES.
@@ -352,6 +354,78 @@ class RestProvider extends BaseProvider {
       transferName: txt(4),
       unit: txt(5),
       targetVolume: val(1),
+    }
+  }
+
+  /**
+   * Single-tick snapshot of every separator signal the state machine needs.
+   * Replaces the old getSeparatorBatches+getSeparatorStatus pair: the
+   * TransferComplete rising edge becomes one of several end signals rather
+   * than the sole trigger. See BATCH_LIFECYCLE_PLAN.md §2 for the state
+   * machine that consumes this.
+   */
+  async getSeparatorTickSnapshot() {
+    const xfrPv = await this._getCurrentValue(TAGS.SEP_XFR_TRANSFER_COMPLETE, { verbose: false })
+    const currentXfr = xfrPv?.Value ?? 0
+    const prevXfr = this._prevTransferComplete
+    this._prevTransferComplete = currentXfr
+    const xfrRising = currentXfr === 1 && (prevXfr === 0 || prevXfr === null)
+
+    const fqns = [
+      TAGS.SEP_FEED_PERMIT,      // 0
+      TAGS.SEP_MOTOR_RPM,        // 1
+      TAGS.SEP_CIPCHEM_REQ,      // 2
+      TAGS.SEP_CIPRINSE_REQ,     // 3
+      TAGS.SEP_FEED_TOTAL,       // 4
+      TAGS.SEP_CREAM_FLOW,       // 5
+      TAGS.SEP_SKIM_FLOW,        // 6
+      TAGS.CREAM_FLOW_TOTAL,     // 7
+      TAGS.SKIM_FLOW_TOTAL,      // 8
+      TAGS.SEP_XFR_SOURCE,       // 9
+      TAGS.SEP_XFR_ITEM_ID,      // 10
+      TAGS.SEP_XFR_NAME,         // 11
+      TAGS.SEP_XFR_EU,           // 12
+      TAGS.SEP_XFR_QTY_TARGET,   // 13
+      TAGS.SEP_XFR_DEST_0,       // 14
+      TAGS.SEP_XFR_DEST_1,       // 15
+      TAGS.SEP_XFR_DEST_2,       // 16
+      TAGS.SEP_XFR_DEST_3,       // 17
+    ]
+    const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
+    const val = (i) => values[i]?.Value ?? 0
+    const txt = (i) => values[i]?.Text ?? ''
+
+    const xfrSource = txt(9)
+    const xfrDestinations = [txt(14), txt(15), txt(16), txt(17)]
+    const populatedSilos = [xfrSource, ...xfrDestinations].filter(Boolean)
+    const siloProductConfig = populatedSilos.length > 0
+      ? await this._readSiloProductConfigRaw(populatedSilos)
+      : {}
+
+    const creamTotalGal = val(7)
+    const skimTotalGal = val(8)
+
+    return {
+      pollTime: new Date(),
+      feedPermit: !!val(0),
+      motorRpm: val(1),
+      cipChemReq: !!val(2),
+      cipRinseReq: !!val(3),
+      feedTotalLbs: val(4),
+      creamFlowGpm: val(5),
+      skimFlowGpm: val(6),
+      creamTotalGal,
+      skimTotalGal,
+      creamTotalLbs: creamTotalGal * CREAM_DENSITY_PPG,
+      skimTotalLbs: skimTotalGal * SKIM_DENSITY_PPG,
+      xfrSource,
+      xfrItemId: txt(10),
+      xfrTransferName: txt(11),
+      xfrUnit: txt(12),
+      xfrQtyTarget: val(13),
+      xfrDestinations,
+      xfrTransferCompleteRising: xfrRising,
+      siloProductConfig,
     }
   }
 

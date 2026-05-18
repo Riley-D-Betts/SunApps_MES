@@ -41,6 +41,18 @@ class BaseProvider {
   }
 
   /**
+   * Single-tick snapshot for the state machine. Returns every signal the
+   * machine evaluates per tick: feedPermit, motorRpm, cipChemReq, cipRinseReq,
+   * feedTotalLbs, creamTotalGal, skimTotalGal, xfrSource, xfrItemId,
+   * xfrTransferName, xfrDestinations[4], xfrTransferCompleteRising (rising
+   * edge this tick), siloProductConfig (per-silo index/name). See
+   * BATCH_LIFECYCLE_PLAN.md §2 and services/separatorStateMachine.js.
+   */
+  async getSeparatorTickSnapshot() {
+    throw new Error('getSeparatorTickSnapshot() not implemented')
+  }
+
+  /**
    * Get bulk milk flow data since the given timestamp.
    * @param {Date} since - Only return readings after this time
    * @returns {Promise<Array<{

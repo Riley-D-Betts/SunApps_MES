@@ -83,13 +83,35 @@ const LINE_PRODUCT_MAP = {
   'organic uf milk':             { id: 5402, name: 'Raw Organic UF Milk' },
   'organic uf':                  { id: 5402, name: 'Raw Organic UF Milk' },
 
-  // A2 variants
+  // A2 variants — source whole milk
   'raw organic a2 milk':         { id: 5403, name: 'Raw Organic A2 Milk' },
   'organic a2 milk':             { id: 5403, name: 'Raw Organic A2 Milk' },
   'raw a2 organic':              { id: 5403, name: 'Raw Organic A2 Milk' },
   'a2 organic':                  { id: 5403, name: 'Raw Organic A2 Milk' },
-  'raw organic a2 0%':           { id: 5482, name: 'Raw Organic 0%' },          // no separate A2 0% item — use organic 0%
   'raw organic grade a (a2/a2) milk': { id: 5406, name: 'Raw Organic Grade A (A2/A2) Milk' },
+
+  // A2 fat-level outputs (separator → blend-tank inputs).
+  // SCADA HMI defines indices 22-25 (3.25%, 2%, 1%, Fat Free) + 26 (Cream).
+  // No A2 3.5% or 4% in SCADA — corresponding NS items (8369, 8370) exist but
+  // aren't reachable from the standardization HMI.
+  'raw organic a2 0%':           { id: 5484, name: 'Raw Organic A2 0%' },
+  'organic a2 0%':               { id: 5484, name: 'Raw Organic A2 0%' },
+  'a2 organic fat free':         { id: 5484, name: 'Raw Organic A2 0%' },
+  'organic a2 skim':             { id: 5484, name: 'Raw Organic A2 0%' },
+  'raw organic a2 1%':           { id: 8366, name: 'Raw Organic A2 1%' },
+  'organic a2 1%':               { id: 8366, name: 'Raw Organic A2 1%' },
+  'a2 organic low fat 1%':       { id: 8366, name: 'Raw Organic A2 1%' },
+  'raw organic a2 2%':           { id: 8367, name: 'Raw Organic A2 2%' },
+  'organic a2 2%':               { id: 8367, name: 'Raw Organic A2 2%' },
+  'a2 organic reduced fat 2%':   { id: 8367, name: 'Raw Organic A2 2%' },
+  'raw organic a2 3.25%':        { id: 8368, name: 'Raw Organic A2 3.25%' },
+  'organic a2 3.25%':            { id: 8368, name: 'Raw Organic A2 3.25%' },
+  'a2 organic whole 3.25%':      { id: 8368, name: 'Raw Organic A2 3.25%' },
+
+  // A2 cream
+  'raw organic a2 cream':        { id: 8365, name: 'Raw Organic A2 Cream' },
+  'organic a2 cream':            { id: 8365, name: 'Raw Organic A2 Cream' },
+  'a2 organic cream':            { id: 8365, name: 'Raw Organic A2 Cream' },
 }
 
 /**

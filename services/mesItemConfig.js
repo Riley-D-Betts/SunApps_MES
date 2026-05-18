@@ -65,9 +65,11 @@ const SEPARATION_BOM_MAP = {
   '5404_8': 348,  // Organic → 2%     (Raw Organic Milk to 2% and cream)
   '5404_9': 347,  // Organic → 1%     (Raw Organic Milk to 1% and cream)
   '5404_10': 252, // Organic → Fat Free / Skim (Raw Organic Milk to skim and cream)
-  // A2 separator only does skim separation; fat-level A2 milks come from a
-  // downstream blend WO (skim + A2 cream → fat-level). BOM 253 currently
-  // produces regular org cream (5483), not A2 cream (8365) — flag for NS fix.
+  // A2 separator outputs — HMI indices 22-25 only (no 3.5% or 4% in SCADA).
+  // BOM 253 currently produces regular org cream (5483), not A2 cream (8365) — flag for NS fix.
+  '5403_22': 379, // Organic A2 → 3.25% (Raw Organic A2 Milk to A2 3.25% and Cream)
+  '5403_23': 378, // Organic A2 → 2%    (Raw Organic A2 Milk to A2 2% and Cream)
+  '5403_24': 377, // Organic A2 → 1%    (Raw Organic A2 Milk to A2 1% and Cream)
   '5403_25': 253, // Organic A2 → Fat Free / Skim (Raw Organic A2 Milk to A2 Skim and Cream)
 }
 

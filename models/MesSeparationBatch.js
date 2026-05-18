@@ -81,6 +81,36 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATE,
         allowNull: true,
       },
+      // Reason the state machine closed the batch (one of:
+      // transfer_complete, source_changed, destination_changed,
+      // product_index_changed, cip_started, idle_rpm, idle_feedpermit).
+      // Null while status='running'.
+      endReason: {
+        type: DataTypes.STRING(40),
+        allowNull: true,
+      },
+      // Snapshots taken at each tick — let us detect boundary changes by
+      // comparing the previous tick's value to the current one. Updated
+      // every tick while batch is open. Cleared on close.
+      prevSourceSilo: {
+        type: DataTypes.STRING(50),
+        allowNull: true,
+      },
+      prevDestinationsJson: {
+        type: DataTypes.STRING(500),
+        allowNull: true,
+      },
+      prevIndexCodesJson: {
+        type: DataTypes.STRING(500),
+        allowNull: true,
+      },
+      // Last per-tick observation timestamp. lastTickAt vs createdAt tells us
+      // batch lifetime; lastTickAt vs now() on restart tells us how stale the
+      // open row is.
+      lastTickAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
       createdAt: {
         type: DataTypes.DATE,
         allowNull: false,

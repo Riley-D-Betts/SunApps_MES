@@ -81,6 +81,39 @@ class MockProvider extends BaseProvider {
     }
   }
 
+  async getSeparatorTickSnapshot() {
+    const running = Math.random() > 0.3
+    const feedTotalLbs = running ? 100000 + Math.floor(Math.random() * 200000) : 313611
+    const creamTotalGal = running ? Math.floor(Math.random() * 3500) : 4520
+    const skimTotalGal = running ? Math.floor(Math.random() * 29000) : 32325
+    return {
+      pollTime: new Date(),
+      feedPermit: running,
+      motorRpm: running ? 4200 + Math.floor(Math.random() * 100) : 0,
+      cipChemReq: false,
+      cipRinseReq: false,
+      feedTotalLbs,
+      creamFlowGpm: running ? 5 + Math.random() * 3 : 0,
+      skimFlowGpm: running ? 40 + Math.random() * 10 : 0,
+      creamTotalGal,
+      skimTotalGal,
+      creamTotalLbs: creamTotalGal * 8.62,
+      skimTotalLbs: skimTotalGal * 8.63,
+      xfrSource: 'MSilo1',
+      xfrItemId: '300005',
+      xfrTransferName: 'Separation',
+      xfrUnit: 'LBS',
+      xfrQtyTarget: 350000,
+      xfrDestinations: ['RawMilkSilo5', 'CSilo2', '', ''],
+      xfrTransferCompleteRising: false,
+      siloProductConfig: {
+        MSilo1: { productIndex: 15, productName: 'Raw Conventional' },
+        MSilo5: { productIndex: 5, productName: 'Conventional Fat Free' },
+        CSilo2: { productIndex: 11, productName: 'Conventional Cream 40%' },
+      },
+    }
+  }
+
   async getBulkMilkFlowData(since) {
     // ~50% chance of generating a flow reading each poll
     if (Math.random() > 0.5) return []
