@@ -31,98 +31,61 @@ const FG_ITEM_MAP = {
 }
 
 // ── Fuzzy catalog (legacy free-text path) ───────────────────────────────
-// Mirrors blendTankProductParser's PRODUCT_CATALOG but each entry's nsId
-// points at the FG (finished pasteurized) item, not the raw assembly.
+// Surge tank end products only — pasteurized type-4 FGs. This is the
+// canonical list per BATCH_LIFECYCLE_PLAN.md and the source description.
+// Anything not on this list is NOT made on a surge tank; the parser
+// returns null so the batch lands on pending_ns rather than being
+// silently scored onto a wrong item.
 const PRODUCT_CATALOG = [
   // Alexandre Eco Dairy
-  { nsId: 3278, name: 'Alexandre Eco Dairy A2/A2 Organic 4% Whole Milk', brand: 'alexandre', fatPct: 4, modifiers: ['organic', 'a2', 'whole'] },
-  { nsId: 4899, name: 'Alexandre Eco Dairy A2/A2 Organic Chocolate 4% Milk', brand: 'alexandre', fatPct: 4, modifiers: ['organic', 'a2', 'chocolate'] },
+  { nsId: 3278, name: 'Alexandre Eco Dairy A2/A2 Organic 4% Whole Milk',         brand: 'alexandre',      fatPct: 4,    modifiers: ['organic', 'a2', 'whole'] },
+  { nsId: 4899, name: 'Alexandre Eco Dairy A2/A2 Organic Chocolate 4% Milk',     brand: 'alexandre',      fatPct: 4,    modifiers: ['organic', 'a2', 'chocolate'] },
 
-  // Conventional Milk
-  { nsId: 2793, name: 'Conventional Milk 1%', brand: 'conventional', fatPct: 1, modifiers: [] },
-  { nsId: 2880, name: 'Conventional Milk 1% LAC Free', brand: 'conventional', fatPct: 1, modifiers: ['lacfree'] },
-  { nsId: 3471, name: 'Conventional Milk 2%', brand: 'conventional', fatPct: 2, modifiers: [] },
-  { nsId: 2883, name: 'Conventional Milk 2% LAC Free', brand: 'conventional', fatPct: 2, modifiers: ['lacfree'] },
-  { nsId: 2808, name: 'Conventional Milk 3.25%', brand: 'conventional', fatPct: 3.25, modifiers: [] },
-  { nsId: 2886, name: 'Conventional Milk 3.25% Lac Free', brand: 'conventional', fatPct: 3.25, modifiers: ['lacfree'] },
-  { nsId: 2645, name: 'Conventional Milk 3.5%', brand: 'conventional', fatPct: 3.5, modifiers: [] },
-  { nsId: 3223, name: 'Conventional Whole Milk 3.25% (No Vitamins)', brand: 'conventional', fatPct: 3.25, modifiers: ['novitamins'] },
+  // American Farmer
+  { nsId: 5510, name: 'American Farmer Whole Milk',                              brand: 'americanfarmer', fatPct: 3.5,  modifiers: ['whole'] },
 
-  // DFI (Diversified Foods Inc) — general
-  { nsId: 3231, name: 'DFI 2% Milk', brand: 'dfi', fatPct: 2, modifiers: [] },
-  { nsId: 3395, name: 'DFI Holiday Nog', brand: 'dfi', fatPct: null, modifiers: ['nog'] },
+  // Barista
+  { nsId: 5314, name: 'Barista Frappe Mix',                                      brand: 'barista',        fatPct: null, modifiers: ['frappe'] },
+
+  // DFI
+  { nsId: 3395, name: 'DFI Holiday Nog',                                         brand: 'dfi',            fatPct: null, modifiers: ['nog'] },
 
   // DFI Marcel's specialty
-  { nsId: 6855, name: "DFI Marcel's 1% Lac Free", brand: 'marcels', fatPct: 1, modifiers: ['lacfree'] },
-  { nsId: 3493, name: "DFI Marcel's Modern Pantry Heavy Cream", brand: 'marcels', fatPct: null, modifiers: ['heavycream'] },
-  { nsId: 3046, name: "DFI Marcel's Modern Pantry Light Whip Cream UHT", brand: 'marcels', fatPct: null, modifiers: ['lightcream'] },
-  { nsId: 2940, name: "DFI Marcel's Modern Pantry UHT Half & Half", brand: 'marcels', fatPct: null, modifiers: ['halfhalf'] },
+  { nsId: 3493, name: "DFI Marcel's Modern Pantry Heavy Cream",                  brand: 'marcels',        fatPct: null, modifiers: ['heavycream'] },
+  { nsId: 2940, name: "DFI Marcel's Modern Pantry UHT Half & Half",              brand: 'marcels',        fatPct: null, modifiers: ['halfhalf'] },
 
   // DFI Marcels milk
-  { nsId: 3222, name: 'DFI Marcels 0% Milk', brand: 'marcels', fatPct: 0, modifiers: [] },
-  { nsId: 3228, name: 'DFI Marcels 1% Milk', brand: 'marcels', fatPct: 1, modifiers: [] },
-  { nsId: 4012, name: 'DFI Marcels 2% Milk', brand: 'marcels', fatPct: 2, modifiers: [] },
-  { nsId: 3236, name: 'DFI Marcels 3.25% Milk', brand: 'marcels', fatPct: 3.25, modifiers: ['whole'] },
-
-  // DFI Swan River
-  { nsId: 3939, name: 'DFI: Swan River Vanilla Sweet Cream (F)', brand: 'swanriver', fatPct: null, modifiers: ['sweetcream'] },
-
-  // ESL
-  { nsId: 3900, name: 'ESL Half & Half', brand: 'esl', fatPct: null, modifiers: ['halfhalf'] },
-  { nsId: 3905, name: 'ESL Heavy Whip Cream', brand: 'esl', fatPct: null, modifiers: ['heavycream'] },
-
-  // Horizon Organic
-  { nsId: 5911, name: 'Horizon Organic 2% Milk', brand: 'horizon', fatPct: 2, modifiers: ['organic'] },
-  { nsId: 5907, name: 'Horizon Organic 3.25% Whole Milk', brand: 'horizon', fatPct: 3.25, modifiers: ['organic', 'whole'] },
-  { nsId: 7477, name: 'Horizon Organic Half & Half', brand: 'horizon', fatPct: null, modifiers: ['organic', 'halfhalf'] },
-
-  // Kirkland (Costco)
-  { nsId: 4495, name: 'Kirkland 1% Organic Milk', brand: 'kirkland', fatPct: 1, modifiers: ['organic'] },
-  { nsId: 4501, name: 'Kirkland 2% Organic Lac Free Milk', brand: 'kirkland', fatPct: 2, modifiers: ['organic', 'lacfree'] },
-  { nsId: 4498, name: 'Kirkland 2% Organic Milk', brand: 'kirkland', fatPct: 2, modifiers: ['organic'] },
-  { nsId: 4485, name: 'Kirkland A2 Organic Whole Milk', brand: 'kirkland', fatPct: null, modifiers: ['organic', 'a2', 'whole'] },
-  { nsId: 4548, name: 'Kirkland Chocolate 2% Organic Milk - Aseptic', brand: 'kirkland', fatPct: 2, modifiers: ['organic', 'chocolate'] },
-  { nsId: 6420, name: 'Kirkland Organic Whole Milk', brand: 'kirkland', fatPct: null, modifiers: ['organic', 'whole'] },
-
-  // American Farmer / Blue Valley / Golden Flow
-  { nsId: 5510, name: 'American Farmer Whole Milk', brand: 'americanfarmer', fatPct: 3.5, modifiers: ['whole'] },
-  { nsId: 7455, name: 'Blue Valley Whole Milk', brand: 'bluevalley', fatPct: 3.3, modifiers: ['whole'] },
-  { nsId: 7452, name: 'Golden Flow', brand: 'goldenflow', fatPct: 1, modifiers: [] },
-
-  // Barista / Kinera / Nurri (specialty)
-  { nsId: 5314, name: 'Barista Frappe Mix', brand: 'barista', fatPct: null, modifiers: ['frappe'] },
-  { nsId: 5317, name: 'Kinera Chocolate', brand: 'kinera', fatPct: null, modifiers: ['chocolate'] },
-  { nsId: 5003, name: 'Kinera Strawberry', brand: 'kinera', fatPct: null, modifiers: ['strawberry'] },
-  { nsId: 7674, name: 'Nurri - Chocolate', brand: 'nurri', fatPct: null, modifiers: ['chocolate'] },
-  { nsId: 7671, name: 'Nurri - Salted Caramel', brand: 'nurri', fatPct: null, modifiers: ['caramel'] },
-  { nsId: 7668, name: 'Nurri - Sweet Cream', brand: 'nurri', fatPct: null, modifiers: ['sweetcream'] },
-
-  // DairyPure
-  { nsId: 5320, name: 'DairyPure 2% - 8oz', brand: 'dairypure', fatPct: 2, modifiers: [] },
-  { nsId: 5323, name: 'DairyPure Half & Half - 8oz', brand: 'dairypure', fatPct: null, modifiers: ['halfhalf'] },
+  { nsId: 3222, name: 'DFI Marcels 0% Milk',                                     brand: 'marcels',        fatPct: 0,    modifiers: [] },
+  { nsId: 3228, name: 'DFI Marcels 1% Milk',                                     brand: 'marcels',        fatPct: 1,    modifiers: [] },
+  { nsId: 4012, name: 'DFI Marcels 2% Milk',                                     brand: 'marcels',        fatPct: 2,    modifiers: [] },
+  { nsId: 3236, name: 'DFI Marcels 3.25% Milk',                                  brand: 'marcels',        fatPct: 3.25, modifiers: ['whole'] },
 
   // DG
-  { nsId: 2796, name: 'DG Chocolate Milk 2%', brand: 'dg', fatPct: 2, modifiers: ['chocolate'] },
-  { nsId: 2889, name: 'DG Half & Half', brand: 'dg', fatPct: null, modifiers: ['halfhalf'] },
-  { nsId: 2790, name: 'DG Heavy Cream', brand: 'dg', fatPct: null, modifiers: ['heavycream'] },
-  { nsId: 4029, name: 'DG Light Cream', brand: 'dg', fatPct: null, modifiers: ['lightcream'] },
+  { nsId: 2889, name: 'DG Half & Half',                                          brand: 'dg',             fatPct: null, modifiers: ['halfhalf'] },
+  { nsId: 2790, name: 'DG Heavy Cream',                                          brand: 'dg',             fatPct: null, modifiers: ['heavycream'] },
 
-  // Dutch Brothers
-  { nsId: 7474, name: 'Dutch - Annihilator (Macadamia)', brand: 'dutch', fatPct: null, modifiers: ['macadamia'] },
-  { nsId: 7225, name: 'Dutch - Caramelizer (Choc Caramel)', brand: 'dutch', fatPct: null, modifiers: ['chocolate', 'caramel'] },
-  { nsId: 7222, name: 'Dutch - Golden Eagle (Vanilla Caramel)', brand: 'dutch', fatPct: null, modifiers: ['caramel'] },
+  // ESL
+  { nsId: 3900, name: 'ESL Half & Half',                                         brand: 'esl',            fatPct: null, modifiers: ['halfhalf'] },
+  { nsId: 3905, name: 'ESL Heavy Whip Cream',                                    brand: 'esl',            fatPct: null, modifiers: ['heavycream'] },
 
-  // HWC Trial
-  { nsId: 6624, name: 'HWC Aseptic Trial', brand: 'hwc', fatPct: null, modifiers: ['heavycream'] },
+  // Horizon Organic
+  { nsId: 5911, name: 'Horizon Organic 2% Milk',                                 brand: 'horizon',        fatPct: 2,    modifiers: ['organic'] },
+  { nsId: 5907, name: 'Horizon Organic 3.25% Whole Milk',                        brand: 'horizon',        fatPct: 3.25, modifiers: ['organic', 'whole'] },
+
+  // Kinera
+  { nsId: 5317, name: 'Kinera Chocolate',                                        brand: 'kinera',         fatPct: null, modifiers: ['chocolate'] },
+  { nsId: 5003, name: 'Kinera Strawberry',                                       brand: 'kinera',         fatPct: null, modifiers: ['strawberry'] },
+
+  // Kirkland (Costco)
+  { nsId: 4495, name: 'Kirkland 1% Organic Milk',                                brand: 'kirkland',       fatPct: 1,    modifiers: ['organic'] },
+  { nsId: 4501, name: 'Kirkland 2% Organic Lac Free Milk',                       brand: 'kirkland',       fatPct: 2,    modifiers: ['organic', 'lacfree'] },
+  { nsId: null, name: 'Kirkland 2% Organic Lactose Free',                        brand: 'kirkland',       fatPct: 2,    modifiers: ['organic', 'lacfree'] }, // TODO: populate NS item ID when SKU is created
+  { nsId: 4498, name: 'Kirkland 2% Organic Milk',                                brand: 'kirkland',       fatPct: 2,    modifiers: ['organic'] },
+  { nsId: 4548, name: 'Kirkland Chocolate 2% Organic Milk - Aseptic',            brand: 'kirkland',       fatPct: 2,    modifiers: ['organic', 'chocolate'] },
+  { nsId: 6420, name: 'Kirkland Organic Whole Milk',                             brand: 'kirkland',       fatPct: null, modifiers: ['organic', 'whole'] },
 
   // Organic misc
-  { nsId: 6651, name: 'Organic 2% Sample', brand: 'organic', fatPct: 2, modifiers: ['organic'] },
-  { nsId: 3926, name: 'Organic Milk 0% Lac Free', brand: 'organic', fatPct: 0, modifiers: ['organic', 'lacfree'] },
-  { nsId: 7594, name: 'Tres Monjitas 2% Organic', brand: 'tresmonjitas', fatPct: 2, modifiers: ['organic'] },
-
-  // Trials (may not match — that's OK, they'll go to pending_ns)
-  { nsId: 6891, name: 'Trial - Sweet Cream', brand: 'trial', fatPct: null, modifiers: ['sweetcream'] },
-  { nsId: 6752, name: 'Water Trials', brand: 'water', fatPct: null, modifiers: [] },
+  { nsId: 3926, name: 'Organic Milk 0% Lac Free',                                brand: 'organic',        fatPct: 0,    modifiers: ['organic', 'lacfree'] },
 ]
 
 const BRAND_ALIASES = {
