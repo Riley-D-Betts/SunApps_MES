@@ -322,6 +322,25 @@ async function processLineFlow(data) {
     }
   }
 
+  // Silo fallback: when REQUESTEDBY was empty (destination=''), match by the
+  // line's source silo vs the batch's stored fromEntName. Restricted to an
+  // unambiguous 1-to-1 mapping to avoid double-issuing.
+  if (!targetBatch && siloName && activeBatches.length > 0) {
+    const siloCanon = itemConfig.normalizeSiloName(siloName)
+    if (siloCanon) {
+      const matched = activeBatches.filter(b => {
+        const batchSilo = itemConfig.normalizeSiloName(b.fromEntName)
+        return batchSilo !== null && batchSilo === siloCanon
+      })
+      if (matched.length === 1) {
+        targetBatch = matched[0]
+        console.log(`[BlendTankMesService] processLineFlow ${line}: matched ${targetBatch.tankId} via siloName="${siloName}" (REQUESTEDBY was empty)`)
+      } else if (matched.length > 1) {
+        console.warn(`[BlendTankMesService] processLineFlow ${line}: silo "${siloName}" matches ${matched.length} active batches — cannot route`)
+      }
+    }
+  }
+
   if (!targetBatch) {
     const record = await db.MesBlendTankInflow.create({
       blendTankBatchId: null, line,
@@ -531,19 +550,38 @@ function normalizeTankRef(raw) {
 }
 
 /**
- * Match a line reading to one active batch. Three paths in order:
+ * Match a line reading to one active batch. Four paths in order:
  *   1. UHT-direct virtual batches (tankId encoded as "{line}→{destination}")
  *   2. Canonical-form match between reading.requestedBy and batch.tankId
  *      (handles the BT2A ↔ BlendTank2A abbreviation)
- *   3. Loose substring match on raw normalized strings (legacy path — kept
- *      for any historian quirk we haven't seen yet, but the canonical form
- *      should cover the real cases)
+ *   3. Loose substring match on raw normalized strings (legacy path)
+ *   4. Source-silo fallback: when REQUESTEDBY is empty, match the line's
+ *      siloName against batch.fromEntName. Covers AVEVA configs that write
+ *      FromEntName on the blend tank but don't write REQUESTEDBY on the line.
+ *      Restricted to an unambiguous 1-to-1 silo-to-batch mapping to avoid
+ *      double-issuing when multiple batches share the same source silo.
  */
 function findBatchForLine(reading, activeBatches) {
   for (const batch of activeBatches) {
     if (batch.tankId.startsWith(`${reading.line}→`)) return batch
   }
-  if (!reading.requestedBy) return null
+  if (!reading.requestedBy) {
+    // Silo fallback: match by line.siloName ↔ batch.fromEntName
+    if (reading.siloName) {
+      const siloCanon = itemConfig.normalizeSiloName(reading.siloName)
+      if (siloCanon) {
+        const matched = activeBatches.filter(b => {
+          const batchSilo = itemConfig.normalizeSiloName(b.fromEntName)
+          return batchSilo !== null && batchSilo === siloCanon
+        })
+        if (matched.length === 1) return matched[0]
+        if (matched.length > 1) {
+          console.warn(`[BlendTankMesService] findBatchForLine ${reading.line}: silo "${reading.siloName}" matches ${matched.length} active batches — skipping to avoid double-issue`)
+        }
+      }
+    }
+    return null
+  }
 
   const destCanonical = normalizeTankRef(reading.requestedBy)
   if (destCanonical) {
@@ -610,11 +648,24 @@ async function tickAllActiveBatches(historian) {
 
 async function tickIssuesForBatch(batch, lineReadings) {
   const matchingLines = lineReadings.filter(r => findBatchForLine(r, [batch]) !== null)
-  // Don't early-return on no-current-matches: the catch-up pass below uses
-  // stored pipe-state context (lastProductName/lastSiloName) to issue against
-  // flow that landed during an earlier tick window. Lines reset between ticks
-  // (totalizer 0 → peak → 0) when a batch ends, and AVEVA clears REQUESTEDBY
-  // after the fill — without the catch-up running, that flow is never issued.
+
+  // Diagnostic: log REQUESTEDBY state for each line so we can tell whether
+  // AVEVA is populating it (helps diagnose the silo-fallback path being taken).
+  if (batch.nsWorkOrderId) {
+    const hasAnyFlow = lineReadings.some(r => r.totalizerLbs > 0)
+    if (hasAnyFlow && matchingLines.length === 0) {
+      const lineSnapshot = lineReadings
+        .filter(r => r.totalizerLbs > 0 || r.active)
+        .map(r => `${r.line}(tot=${Math.round(r.totalizerLbs)}lb requestedBy="${r.requestedBy}" silo="${r.siloName}")`)
+        .join(', ')
+      console.warn(`[BlendTankMesService] tick ${batch.tankId} (WO ${batch.nsWorkOrderId}): no matching lines despite flow — ${lineSnapshot || 'all zero'}`)
+    } else if (matchingLines.length > 0) {
+      const viaSilo = matchingLines.filter(r => !r.requestedBy).map(r => r.line)
+      if (viaSilo.length > 0) {
+        console.log(`[BlendTankMesService] tick ${batch.tankId}: lines matched via silo fallback: ${viaSilo.join(', ')}`)
+      }
+    }
+  }
 
   let issuesFired = 0
 

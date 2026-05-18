@@ -223,14 +223,11 @@ async function run(historian) {
       }
 
       if (eligibleForGate && prev.fillTickCount >= FILL_TICKS_FOR_START) {
-        let feedingFromEntName = null
-        if (feedingUht) {
-          try {
-            feedingFromEntName = await historian.getUhtFromEntName(feedingUht)
-          } catch (err) {
-            console.warn(`[SurgeTankJob] getUhtFromEntName(${feedingUht}) failed: ${err.message}`)
-          }
-        }
+        // Use the valve-based fromEntName already resolved in feedingUhtStatus
+        // (getUhtStatus() has a valve-state fallback when the raw tag is empty).
+        // The old getUhtFromEntName() read the raw tag without the fallback and
+        // returned '' for every poll, leaving feedingFromEntName permanently null.
+        const feedingFromEntName = feedingUhtStatus?.fromEntName || null
 
         console.log(`[SurgeTankJob] BATCH START (${FILL_TICKS_FOR_START}-tick gate cleared) on ${tankId}: "${productName}" (UHT=${feedingUht || '?'}, from=${feedingFromEntName || '?'})`)
         statusStore.pushEvent('surgeTank.batchStart', `${tankId}: "${productName}" started`, { tankId, productName, feedingUhtId: feedingUht, feedingFromEntName })

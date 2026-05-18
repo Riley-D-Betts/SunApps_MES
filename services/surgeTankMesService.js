@@ -231,9 +231,24 @@ async function resolveSurgeTankComponent(batch, historian) {
     }
   }
 
-  const feedingFromEntName = batch.feedingFromEntName
+  let feedingFromEntName = batch.feedingFromEntName
   const feedingUhtId = batch.feedingUhtId
-  if (!feedingFromEntName) return null
+  if (!feedingFromEntName) {
+    // Retroactive recovery: batches started before the feedingFromEntName fix
+    // have null here. Try the live valve-based value from the current UHT status.
+    if (!feedingUhtId || !historian) return null
+    try {
+      const uhtList = await historian.getUhtStatus()
+      const uhtStatus = uhtList.find(u => u.uhtId === feedingUhtId)
+      feedingFromEntName = uhtStatus?.fromEntName || null
+    } catch (err) {
+      console.warn(`[SurgeTankMesService] resolveSurgeTankComponent: live UHT lookup failed — ${err.message}`)
+    }
+    if (!feedingFromEntName) return null
+    // Pin it so future ticks skip this lookup.
+    await batch.update({ feedingFromEntName })
+    console.log(`[SurgeTankMesService] Retroactively pinned feedingFromEntName="${feedingFromEntName}" on batch ${batch.id} (${batch.tankId})`)
+  }
 
   if (isBlendTankRef(feedingFromEntName)) {
     const blendBatch = await db.MesBlendTankBatch.findOne({
