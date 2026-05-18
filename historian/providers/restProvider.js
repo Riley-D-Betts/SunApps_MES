@@ -57,11 +57,16 @@ const TAGS = {
   // Blend tank tags (per-tank prefix substituted at query time)
   // NOTE: MES WO tags (CurrentWO, JobRunning, etc.) are stale — plant uses Atlas, not MES.
   // NOTE_STRING is the live product name written by Atlas via PLC.
-  BT_NOTE_STRING:   '.NOTE_STRING',
-  BT_WEIGHT_LBS:    '.100LT.SCL_LBS',
-  BT_BATCH_SIZE:    '.BatchSize',
-  BT_FROM_ENT:      '.FromEntName',
-  BT_TO_ENT:        '.ToEntName',
+  BT_NOTE_STRING:      '.NOTE_STRING',
+  BT_WEIGHT_LBS:       '.100LT.SCL_LBS',
+  BT_BATCH_SIZE:       '.BatchSize',
+  BT_FROM_ENT:         '.FromEntName',
+  BT_TO_ENT:           '.ToEntName',
+  // String — Atlas WO lifecycle state. Observed values: "Running" (active),
+  // "Complete" (between batches). CIP/Idle values not yet sampled. Treat
+  // "Running" as the only production-eligible state. Confirmed working on
+  // all four tanks; the Proc_Proc1_BT*_IO.* namespace is missing on BT2A/2B.
+  BT_CURRENT_WO_STATE: '.CurrentWOState',
 
 
   // Milk/cream line tag suffixes (per-line, identical structure across ML1-4 and CL1-2)
@@ -646,7 +651,7 @@ class RestProvider extends BaseProvider {
     const tanks = ['BlendTank1A', 'BlendTank1B', 'BlendTank2A', 'BlendTank2B']
     const suffixes = [
       TAGS.BT_NOTE_STRING, TAGS.BT_WEIGHT_LBS, TAGS.BT_BATCH_SIZE,
-      TAGS.BT_FROM_ENT, TAGS.BT_TO_ENT,
+      TAGS.BT_FROM_ENT, TAGS.BT_TO_ENT, TAGS.BT_CURRENT_WO_STATE,
     ]
 
     const results = await Promise.all(tanks.map(async (tankId) => {
@@ -662,6 +667,7 @@ class RestProvider extends BaseProvider {
         batchSize: val(2),
         fromEntName: txt(3),
         toEntName: txt(4),
+        currentWOState: txt(5),     // CurrentWOState — "Running" (active) | "Complete" | …
       }
     }))
 

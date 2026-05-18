@@ -67,14 +67,17 @@ class BaseProvider {
 
   /**
    * Get blend tank status for all 4 tanks.
-   * Uses NOTE_STRING (product name from Atlas) for batch detection.
+   * NOTE_STRING is the Atlas product name; currentWOState is the Atlas WO
+   * lifecycle state ("Running" while production WO is active, "Complete"
+   * between batches).
    * @returns {Promise<Array<{
    *   tankId: string,
    *   productName: string,
    *   weightLbs: number,
    *   batchSize: number,
    *   fromEntName: string,
-   *   toEntName: string
+   *   toEntName: string,
+   *   currentWOState: string
    * }>>}
    */
   async getBlendTankStatus() {

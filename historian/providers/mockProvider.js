@@ -139,6 +139,7 @@ class MockProvider extends BaseProvider {
         batchSize: isActive ? 50000 : 0,
         fromEntName: isActive ? 'MSilo1' : '',
         toEntName: isActive ? 'UHT1' : '',
+        currentWOState: isActive ? 'Running' : 'Complete',
       }
     })
   }
