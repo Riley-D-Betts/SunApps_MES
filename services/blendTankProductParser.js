@@ -42,9 +42,12 @@ const PRODUCT_CATALOG = [
   // Each entry mirrors a surge tank canonical FG. Items not on the surge
   // canonical list (e.g. the old Raw Conventional Milk 1/2/3.25/3.5% line)
   // are intentionally absent.
-  // Alexandre Eco Dairy
-  { nsId: 8333, name: 'Raw Alexandre Eco Dairy A2/A2 Organic 4% Whole Milk', brand: 'alexandre', fatPct: 4, modifiers: ['organic', 'a2', 'whole'] },
-  { nsId: 8371, name: 'Raw Alexandre Eco Dairy A2/A2 Organic Chocolate 4% Milk', brand: 'alexandre', fatPct: 4, modifiers: ['organic', 'a2', 'chocolate'] },
+  // Alexandre Eco Dairy — accept both "alexandre" and bare "a2" as brand
+  // keys so "A2 Chocolate" / "A2 Whole" inputs match here without colliding
+  // with the type-2 A2 entries (those have brand: 'a2' single, so inputs that
+  // share modifiers like 'cream'/'skim' still pick the right type-2 row).
+  { nsId: 8333, name: 'Raw Alexandre Eco Dairy A2/A2 Organic 4% Whole Milk', brand: ['alexandre', 'a2'], fatPct: 4, modifiers: ['organic', 'a2', 'whole'] },
+  { nsId: 8371, name: 'Raw Alexandre Eco Dairy A2/A2 Organic Chocolate 4% Milk', brand: ['alexandre', 'a2'], fatPct: 4, modifiers: ['organic', 'a2', 'chocolate'] },
 
   // DFI (Diversified Foods Inc)
   { nsId: 8357, name: 'Raw DFI Holiday Nog', brand: 'dfi', fatPct: null, modifiers: ['nog'] },
@@ -247,9 +250,12 @@ function extractModifiers(input) {
 function scoreProduct(product, brand, fatPct, modifiers) {
   let score = 0
 
-  // Brand must match (if we detected one)
+  // Brand must match (if we detected one). product.brand can be a single
+  // string or an array of accepted brand keys — used so Alexandre entries
+  // also match bare "a2" inputs without breaking type-2 A2 catalog matching.
   if (brand) {
-    if (product.brand !== brand) return 0
+    const productBrands = Array.isArray(product.brand) ? product.brand : [product.brand]
+    if (!productBrands.includes(brand)) return 0
     score += 10
   }
 
