@@ -70,6 +70,11 @@ function buildResolvedDestinations(snap) {
     const kind = itemConfig.classifySiloDestination(raw)
     const dcfg = lookupCfg(raw)
     const idx = dcfg.productIndex || 0
+    // Cream item is determined by source, not by the cream silo's productIndex
+    // (which is operator-set on the HMI and often stale).
+    const item = kind === 'cream'
+      ? itemConfig.getCreamItemForSource(sourceItem.id)
+      : (idx ? itemConfig.getItemByProductIndex(idx) : { id: null, name: '' })
     return {
       raw,
       silo,
@@ -77,7 +82,7 @@ function buildResolvedDestinations(snap) {
       binId: silo ? itemConfig.getBinId(silo) : null,
       productIndex: idx,
       productName: dcfg.productName || '',
-      item: idx ? itemConfig.getItemByProductIndex(idx) : { id: null, name: '' },
+      item,
     }
   })
 

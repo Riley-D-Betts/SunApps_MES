@@ -58,6 +58,11 @@ async function processSeparationBatch(data) {
     const cls = itemConfig.classifySiloDestination(raw)
     const cfg = lookupCfg(raw)
     const idx = cfg.productIndex || 0
+    // Cream item is determined by source, not by the cream silo's productIndex
+    // (which is operator-set on the HMI and often stale).
+    const item = cls === 'cream'
+      ? itemConfig.getCreamItemForSource(sourceItem.id)
+      : (idx ? itemConfig.getItemByProductIndex(idx) : { id: null, name: '' })
     return {
       raw,
       silo,
@@ -65,7 +70,7 @@ async function processSeparationBatch(data) {
       binId: silo ? itemConfig.getBinId(silo) : null,
       productIndex: idx,
       productName: cfg.productName || '',
-      item: idx ? itemConfig.getItemByProductIndex(idx) : { id: null, name: '' },
+      item,
     }
   })
 
@@ -222,8 +227,7 @@ async function processSeparationBatch(data) {
     const bomId = itemConfig.getSeparationBomId(sourceItem.id, skimProductIndex)
     if (!bomId) throw new Error(`No BOM mapped for source=${sourceItem.id} skim productIndex=${skimProductIndex}`)
 
-    // Cream item: 5483 for organic source (5404), 5480 for conventional (5417)
-    const creamItemId = sourceItem.id === 5404 ? 5483 : 5480
+    const creamItemId = itemConfig.getCreamItemForSource(sourceItem.id).id
     const skimItem = itemConfig.getItemByProductIndex(skimProductIndex)
     if (needSkim && !skimItem.id) throw new Error(`No NS item for skim productIndex=${skimProductIndex}`)
 

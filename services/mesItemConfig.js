@@ -277,6 +277,18 @@ function getOutputItems(sourceSilo) {
   }
 }
 
+// Cream output is fully determined by the source silo's item — operators have
+// no fat-level choice for cream, so the cream silo's productIndex on the HMI
+// is not authoritative (and is often stale, e.g. CSilo3 reading idx 11 / conv
+// while fed by organic source). Always derive from source instead.
+// 5404 = Raw Organic, 5403 = Raw Organic A2, 5406 = Grade A A2/A2 → organic cream.
+// A2 cream item 8365 exists in NS but BOM 253 still produces 5483; mirror that.
+function getCreamItemForSource(sourceItemId) {
+  const id = Number(sourceItemId)
+  if (id === 5404 || id === 5403 || id === 5406) return CREAM_ITEM_ORG
+  return CREAM_ITEM_CONV
+}
+
 function getInputItem(sourceSilo) {
   const item = SILO_ITEM_MAP[sourceSilo]
   if (!item) throw new Error(`Unknown silo: ${sourceSilo}. Known silos: ${Object.keys(SILO_ITEM_MAP).join(', ')}`)
@@ -340,6 +352,7 @@ module.exports = {
   getItem,
   getItemByProductIndex,
   getOutputItems,
+  getCreamItemForSource,
   getInputItem,
   getBlendTankItem,
   getBinId,
