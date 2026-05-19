@@ -133,6 +133,7 @@ async function hydrateTickState(MesBlendTankBatch, MesPipeIssueState, MesSurgeTa
         tankId: b.tankId,
         productName: b.productName,
         mesItem: b.mesItem,
+        mesItemName: surgeItemName(b.mesItem),
         feedingUhtId: b.feedingUhtId,
         feedingFromEntName: b.feedingFromEntName,
         parserConfidence: b.parserConfidence,
@@ -170,6 +171,9 @@ async function hydrateTickState(MesBlendTankBatch, MesPipeIssueState, MesSurgeTa
         batchId: b.id,
         tankId: b.tankId,
         productName: b.productName,
+        mesItem: b.mesItem,                   // resolved NS item id (string)
+        mesItemName: blendItemName(b.mesItem), // catalog name for the id, if known
+        parserConfidence: b.parserConfidence, // exact / high / medium / low / override / none
         nsWorkOrderId: b.nsWorkOrderId,
         nsWorkOrderNumber: b.nsWorkOrderNumber,
         cumulativeIssuedLbs: parseFloat(b.cumulativeIssuedLbs) || 0,
@@ -221,12 +225,39 @@ async function hydrateRecentSurgeBatches(MesSurgeTankBatch) {
   }
 }
 
+// Resolve an NS item ID back to its catalog name for the dashboard. Falls
+// through to null when the parser doesn't know the ID — UI shows just the
+// numeric ID in that case.
+let _blendCatalog = null
+let _surgeCatalog = null
+function _ensureCatalogs() {
+  if (!_blendCatalog) {
+    try { _blendCatalog = require('./blendTankProductParser').PRODUCT_CATALOG } catch { _blendCatalog = [] }
+  }
+  if (!_surgeCatalog) {
+    try { _surgeCatalog = require('./surgeTankProductParser').PRODUCT_CATALOG } catch { _surgeCatalog = [] }
+  }
+}
+function blendItemName(mesItem) {
+  if (mesItem == null) return null
+  _ensureCatalogs()
+  const hit = _blendCatalog.find(p => String(p.nsId) === String(mesItem))
+  return hit?.name || null
+}
+function surgeItemName(mesItem) {
+  if (mesItem == null) return null
+  _ensureCatalogs()
+  const hit = _surgeCatalog.find(p => String(p.nsId) === String(mesItem))
+  return hit?.name || null
+}
+
 function blendBatchSummary(b) {
   return {
     id: b.id,
     tankId: b.tankId,
     productName: b.productName,
     mesItem: b.mesItem,
+    mesItemName: blendItemName(b.mesItem),
     nsWorkOrderId: b.nsWorkOrderId,
     nsWorkOrderNumber: b.nsWorkOrderNumber,
     status: b.status,
@@ -247,6 +278,7 @@ function surgeBatchSummary(b) {
     tankId: b.tankId,
     productName: b.productName,
     mesItem: b.mesItem,
+    mesItemName: surgeItemName(b.mesItem),
     feedingUhtId: b.feedingUhtId,
     feedingFromEntName: b.feedingFromEntName,
     componentItemId: b.componentItemId,
