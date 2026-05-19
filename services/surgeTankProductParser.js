@@ -89,28 +89,28 @@ const PRODUCT_CATALOG = [
 ]
 
 const BRAND_ALIASES = {
-  marcel: 'marcels', marcels: 'marcels', "marcel's": 'marcels', mp: 'marcels',
-  kirkland: 'kirkland', ks: 'kirkland', costco: 'kirkland',
-  conventional: 'conventional', conv: 'conventional',
-  dfi: 'dfi', diversified: 'dfi',
-  dg: 'dg',
-  esl: 'esl',
-  horizon: 'horizon',
+  // Alexandre
   alexandre: 'alexandre', alex: 'alexandre',
-  'swan river': 'swanriver', swanriver: 'swanriver', starbucks: 'swanriver',
+  // American Farmer
   'american farmer': 'americanfarmer', americanfarmer: 'americanfarmer',
-  'blue valley': 'bluevalley', bluevalley: 'bluevalley',
-  'golden flow': 'goldenflow', goldenflow: 'goldenflow',
+  // Barista
   barista: 'barista',
+  // DFI (Holiday Nog only — Marcel's is its own brand below)
+  dfi: 'dfi',
+  // DFI Marcel's
+  marcel: 'marcels', marcels: 'marcels', "marcel's": 'marcels', mp: 'marcels',
+  // DG (also called DairyGold)
+  dg: 'dg', dairygold: 'dg', 'dairy gold': 'dg',
+  // ESL
+  esl: 'esl',
+  // Horizon
+  horizon: 'horizon',
+  // Kinera
   kinera: 'kinera',
-  nurri: 'nurri',
-  dairypure: 'dairypure', 'dairy pure': 'dairypure',
-  dutch: 'dutch', 'dutch bros': 'dutch',
-  hwc: 'hwc',
+  // Kirkland (Costco)
+  kirkland: 'kirkland', ks: 'kirkland', costco: 'kirkland',
+  // Organic (catch-all for "Organic Milk 0% Lac Free")
   organic: 'organic',
-  'tres monjitas': 'tresmonjitas', tresmonjitas: 'tresmonjitas',
-  trial: 'trial',
-  water: 'water',
 }
 
 const MODIFIER_PATTERNS = [
@@ -121,14 +121,9 @@ const MODIFIER_PATTERNS = [
   { key: 'whole', patterns: ['whole'] },
   { key: 'halfhalf', patterns: ['half & half', 'half and half', 'halfhalf', 'half half', 'h&h', 'h/h', 'hh'] },
   { key: 'heavycream', patterns: ['heavy cream', 'heavycream', 'heavy whip', 'hwc'] },
-  { key: 'lightcream', patterns: ['light cream', 'lightcream', 'light whip'] },
-  { key: 'sweetcream', patterns: ['sweet cream', 'sweetcream'] },
   { key: 'nog', patterns: ['nog', 'eggnog'] },
-  { key: 'novitamins', patterns: ['no vitamin', 'no vit'] },
   { key: 'frappe', patterns: ['frappe', 'frape'] },
   { key: 'strawberry', patterns: ['strawberry'] },
-  { key: 'macadamia', patterns: ['macadamia', 'annihilator'] },
-  { key: 'caramel', patterns: ['caramel', 'caramelizer', 'golden eagle'] },
 ]
 
 function normalize(input) {
@@ -227,7 +222,20 @@ function parseProductName(input) {
   const modifiers = extractModifiers(normalized)
   const parsed = { normalized, brand, fatPct, modifiers }
 
+  // Brand required. Without it, modifier/fat-pct scoring picks the
+  // closest catalog entry regardless of intent ("Conv 2%" was leaking
+  // to "DFI Marcels 2% Milk"). The surge tank catalog is the canonical
+  // type-4 list and only known brand keywords resolve to it.
+  if (!brand) {
+    console.log(`[SurgeTankParser] No brand recognized in "${input}" — returning null`)
+    return null
+  }
+
+  // Surge tank produces type-4 finished goods only — no "Raw " items. The
+  // catalog is curated to FG entries; the filter is belt-and-suspenders for
+  // any future Raw entry that sneaks in.
   const scored = PRODUCT_CATALOG
+    .filter(p => typeof p.name === 'string' && !p.name.startsWith('Raw '))
     .map(p => ({ ...p, score: scoreProduct(p, brand, fatPct, modifiers) }))
     .filter(p => p.score > 0)
     .sort((a, b) => b.score - a.score)

@@ -129,8 +129,8 @@ const BRAND_ALIASES = {
   a2: 'a2', 'a2/a2': 'a2',
   // DFI
   dfi: 'dfi', diversified: 'dfi',
-  // DG
-  dg: 'dg',
+  // DG (also called DairyGold)
+  dg: 'dg', dairygold: 'dg', 'dairy gold': 'dg',
   // ESL
   esl: 'esl',
   // Horizon
