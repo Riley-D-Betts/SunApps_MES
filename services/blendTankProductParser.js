@@ -34,40 +34,17 @@ const RAW_FG_ITEM_MAP = {
 // standardization-in-BT flow per BATCH_LIFECYCLE_PLAN.md §3. Item IDs
 // match mesItemConfig.RAW_ITEMS.
 const PRODUCT_CATALOG = [
-  // ── Type-2: Raw separated milk (separator outputs, also produced by
-  // ── standardization-in-BT from other type-2 inputs) ─────────────────
-  { nsId: 8163, name: 'Raw Conventional 0% - Skim',  brand: 'conventional', fatPct: 0,    modifiers: ['skim'] },
-  { nsId: 5415, name: 'Raw Conventional 1%',          brand: 'conventional', fatPct: 1,    modifiers: [] },
-  { nsId: 5412, name: 'Raw Conventional 2%',          brand: 'conventional', fatPct: 2,    modifiers: [] },
-  { nsId: 5413, name: 'Raw Conventional 3.25%',       brand: 'conventional', fatPct: 3.25, modifiers: [] },
-  { nsId: 5416, name: 'Raw Conventional 3.5%',        brand: 'conventional', fatPct: 3.5,  modifiers: [] },
-  { nsId: 5480, name: 'Raw Conventional Cream',       brand: 'conventional', fatPct: 40,   modifiers: ['cream'] },
-  { nsId: 5405, name: 'Raw Conventional UF Milk',     brand: 'conventional', fatPct: null, modifiers: ['uf'] },
-  { nsId: 5482, name: 'Raw Organic 0%',               brand: 'organic',      fatPct: 0,    modifiers: ['organic', 'skim'] },
-  { nsId: 5409, name: 'Raw Organic 1%',               brand: 'organic',      fatPct: 1,    modifiers: ['organic'] },
-  { nsId: 5410, name: 'Raw Organic 2%',               brand: 'organic',      fatPct: 2,    modifiers: ['organic'] },
-  { nsId: 5411, name: 'Raw Organic 3.25%',            brand: 'organic',      fatPct: 3.25, modifiers: ['organic'] },
-  { nsId: 5401, name: 'Raw Organic 3.5%',             brand: 'organic',      fatPct: 3.5,  modifiers: ['organic'] },
-  { nsId: 5483, name: 'Raw Organic Cream',            brand: 'organic',      fatPct: 40,   modifiers: ['organic', 'cream'] },
-  { nsId: 5402, name: 'Raw Organic UF Milk',          brand: 'organic',      fatPct: null, modifiers: ['organic', 'uf'] },
-  { nsId: 5484, name: 'Raw Organic A2 0%',            brand: 'a2',           fatPct: 0,    modifiers: ['organic', 'a2', 'skim'] },
-  { nsId: 8366, name: 'Raw Organic A2 1%',            brand: 'a2',           fatPct: 1,    modifiers: ['organic', 'a2'] },
-  { nsId: 8367, name: 'Raw Organic A2 2%',            brand: 'a2',           fatPct: 2,    modifiers: ['organic', 'a2'] },
-  { nsId: 8368, name: 'Raw Organic A2 3.25%',         brand: 'a2',           fatPct: 3.25, modifiers: ['organic', 'a2'] },
-  { nsId: 8369, name: 'Raw Organic A2 3.5%',          brand: 'a2',           fatPct: 3.5,  modifiers: ['organic', 'a2'] },
-  { nsId: 8370, name: 'Raw Organic A2 4%',            brand: 'a2',           fatPct: 4,    modifiers: ['organic', 'a2'] },
-  { nsId: 8365, name: 'Raw Organic A2 Cream',         brand: 'a2',           fatPct: 40,   modifiers: ['organic', 'a2', 'cream'] },
-
   // ── Type-3: Raw FGs (blend-tank produced, surge-tank pasteurized) ────
+  // Listed FIRST so brand-specific type-3 entries win ties against their
+  // generic type-2 cousins. Example: "Raw Organic Milk 0% Lac Free" must
+  // land on 8341 (type-3 lac-free), NOT 5482 (type-2 organic skim — a
+  // separator cannot produce lac-free milk).
+  // Each entry mirrors a surge tank canonical FG. Items not on the surge
+  // canonical list (e.g. the old Raw Conventional Milk 1/2/3.25/3.5% line)
+  // are intentionally absent.
   // Alexandre Eco Dairy
   { nsId: 8333, name: 'Raw Alexandre Eco Dairy A2/A2 Organic 4% Whole Milk', brand: 'alexandre', fatPct: 4, modifiers: ['organic', 'a2', 'whole'] },
-
-  // Conventional Milk (raw FG — surge tank pasteurizes into Conventional Milk N%)
-  { nsId: 8362, name: 'Raw Conventional Milk 1%', brand: 'conventional', fatPct: 1, modifiers: [] },
-  { nsId: 8361, name: 'Raw Conventional Milk 2%', brand: 'conventional', fatPct: 2, modifiers: [] },
-  { nsId: 8360, name: 'Raw Conventional Milk 3.25%', brand: 'conventional', fatPct: 3.25, modifiers: [] },
-  { nsId: 8359, name: 'Raw Conventional Milk 3.5%', brand: 'conventional', fatPct: 3.5, modifiers: [] },
-  { nsId: 8358, name: 'Raw Conventional Whole Milk 3.25% (No Vitamins)', brand: 'conventional', fatPct: 3.25, modifiers: ['novitamins'] },
+  { nsId: null, name: 'Raw Alexandre Eco Dairy A2/A2 Organic Chocolate 4% Milk', brand: 'alexandre', fatPct: 4, modifiers: ['organic', 'a2', 'chocolate'] }, // TODO: populate NS item ID when raw SKU is created (sibling of FG 4899)
 
   // DFI (Diversified Foods Inc)
   { nsId: 8357, name: 'Raw DFI Holiday Nog', brand: 'dfi', fatPct: null, modifiers: ['nog'] },
@@ -111,6 +88,32 @@ const PRODUCT_CATALOG = [
 
   // Organic misc
   { nsId: 8341, name: 'Raw Organic Milk 0% Lac Free', brand: 'organic', fatPct: 0, modifiers: ['organic', 'lacfree'] },
+
+  // ── Type-2: Raw separated milk (separator outputs, also produced by
+  // ── standardization-in-BT from other type-2 inputs) ─────────────────
+  // Listed AFTER type-3 so brand-specific type-3 entries win catalog-order
+  // ties. Item IDs match mesItemConfig.RAW_ITEMS.
+  { nsId: 8163, name: 'Raw Conventional 0% - Skim',  brand: 'conventional', fatPct: 0,    modifiers: ['skim'] },
+  { nsId: 5415, name: 'Raw Conventional 1%',          brand: 'conventional', fatPct: 1,    modifiers: [] },
+  { nsId: 5412, name: 'Raw Conventional 2%',          brand: 'conventional', fatPct: 2,    modifiers: [] },
+  { nsId: 5413, name: 'Raw Conventional 3.25%',       brand: 'conventional', fatPct: 3.25, modifiers: [] },
+  { nsId: 5416, name: 'Raw Conventional 3.5%',        brand: 'conventional', fatPct: 3.5,  modifiers: [] },
+  { nsId: 5480, name: 'Raw Conventional Cream',       brand: 'conventional', fatPct: 40,   modifiers: ['cream'] },
+  { nsId: 5405, name: 'Raw Conventional UF Milk',     brand: 'conventional', fatPct: null, modifiers: ['uf'] },
+  { nsId: 5482, name: 'Raw Organic 0%',               brand: 'organic',      fatPct: 0,    modifiers: ['organic', 'skim'] },
+  { nsId: 5409, name: 'Raw Organic 1%',               brand: 'organic',      fatPct: 1,    modifiers: ['organic'] },
+  { nsId: 5410, name: 'Raw Organic 2%',               brand: 'organic',      fatPct: 2,    modifiers: ['organic'] },
+  { nsId: 5411, name: 'Raw Organic 3.25%',            brand: 'organic',      fatPct: 3.25, modifiers: ['organic'] },
+  { nsId: 5401, name: 'Raw Organic 3.5%',             brand: 'organic',      fatPct: 3.5,  modifiers: ['organic'] },
+  { nsId: 5483, name: 'Raw Organic Cream',            brand: 'organic',      fatPct: 40,   modifiers: ['organic', 'cream'] },
+  { nsId: 5402, name: 'Raw Organic UF Milk',          brand: 'organic',      fatPct: null, modifiers: ['organic', 'uf'] },
+  { nsId: 5484, name: 'Raw Organic A2 0%',            brand: 'a2',           fatPct: 0,    modifiers: ['organic', 'a2', 'skim'] },
+  { nsId: 8366, name: 'Raw Organic A2 1%',            brand: 'a2',           fatPct: 1,    modifiers: ['organic', 'a2'] },
+  { nsId: 8367, name: 'Raw Organic A2 2%',            brand: 'a2',           fatPct: 2,    modifiers: ['organic', 'a2'] },
+  { nsId: 8368, name: 'Raw Organic A2 3.25%',         brand: 'a2',           fatPct: 3.25, modifiers: ['organic', 'a2'] },
+  { nsId: 8369, name: 'Raw Organic A2 3.5%',          brand: 'a2',           fatPct: 3.5,  modifiers: ['organic', 'a2'] },
+  { nsId: 8370, name: 'Raw Organic A2 4%',            brand: 'a2',           fatPct: 4,    modifiers: ['organic', 'a2'] },
+  { nsId: 8365, name: 'Raw Organic A2 Cream',         brand: 'a2',           fatPct: 40,   modifiers: ['organic', 'a2', 'cream'] },
 ]
 
 // ── Brand aliases ───────────────────────────────────────────────────────
@@ -158,10 +161,7 @@ const MODIFIER_PATTERNS = [
   { key: 'uf', patterns: ['uf milk', 'uf'] },
   { key: 'halfhalf', patterns: ['half & half', 'half and half', 'halfhalf', 'half half', 'h&h', 'h/h', 'hh'] },
   { key: 'heavycream', patterns: ['heavy cream', 'heavycream', 'heavy whip', 'hwc'] },
-  { key: 'lightcream', patterns: ['light cream', 'lightcream', 'light whip'] },
-  { key: 'sweetcream', patterns: ['sweet cream', 'sweetcream'] },
   { key: 'nog', patterns: ['nog', 'eggnog'] },
-  { key: 'novitamins', patterns: ['no vitamin', 'no vit'] },
   { key: 'frappe', patterns: ['frappe', 'frape'] },
   { key: 'strawberry', patterns: ['strawberry'] },
 ]
@@ -316,6 +316,15 @@ function parseProductName(input) {
   const modifiers = extractModifiers(normalized)
 
   const parsed = { normalized, brand, fatPct, modifiers }
+
+  // Brand required (mirrors surge tank parser). Without it, modifier/fat-pct
+  // scoring picks the closest catalog entry regardless of intent. The blend
+  // tank catalog is the canonical type-2 + type-3 list; only known brand
+  // keywords resolve to it.
+  if (!brand) {
+    console.log(`[ProductParser] No brand recognized in "${input}" — returning null`)
+    return null
+  }
 
   // Score all products. Type-4 (non-Raw) names are filtered out — the blend
   // tank only produces type-2 / type-3 milk, all of which have "Raw " in their
