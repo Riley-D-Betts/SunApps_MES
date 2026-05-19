@@ -19,6 +19,16 @@ const STATE_RUNNING = 'running'
 const IDLE_RPM_THRESHOLD = 100
 const TICKS_TO_CLOSE_ON_IDLE = 30 // 5 min @ 10s/tick
 
+// End reasons that represent an in-flight boundary change (source/dest/product
+// swap mid-run). Only these warrant a same-tick re-open — transfer_complete,
+// cip_started, and the idle reasons mean the transfer is genuinely over, and
+// re-opening on them creates a phantom batch that posts a duplicate NS unbuild.
+const BOUNDARY_END_REASONS = new Set([
+  'source_changed',
+  'destination_changed',
+  'product_index_changed',
+])
+
 let machineState = STATE_IDLE
 let openBatchId = null
 let prevSnapshot = null
@@ -273,9 +283,11 @@ async function tick(historian) {
     const reason = evaluateEndReason(prevSnapshot, snap, participatingSilos)
     if (reason) {
       await closeBatch(snap, reason)
-      // Same-tick re-open: a boundary change that closed the batch may itself
-      // be the start of a new batch (new source/destination still valid).
-      if (canStart(snap)) {
+      // Same-tick re-open: only valid for boundary changes (source/dest/product
+      // swap), where the close itself is the start of a new transfer. For
+      // transfer_complete / cip_started / idle_* the transfer is over — a new
+      // batch must wait for the next feed-permit rising edge in STATE_IDLE.
+      if (BOUNDARY_END_REASONS.has(reason) && canStart(snap)) {
         await openBatch(snap)
       }
     } else {
