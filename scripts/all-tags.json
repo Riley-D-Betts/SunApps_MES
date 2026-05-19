@@ -19248,6 +19248,18 @@
     "TagType": "Analog"
   },
   {
+    "FQN": "Filler1.B15",
+    "Description": "0 = no cap",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "Filler1.B16",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
     "FQN": "Filler1.B22",
     "Description": "Electrical$NCabinet $NTemperature",
     "EngUnit": "None",
@@ -135074,7 +135086,7 @@
   {
     "FQN": "Utilities.BoilerWaterMeter",
     "Description": "BoilerWaterMeter",
-    "EngUnit": "None",
+    "EngUnit": "GPM",
     "TagType": "Analog"
   },
   {
@@ -135843,6 +135855,18 @@
     "FQN": "Utilities.OutdoorAirTemp",
     "Description": "Outdoor AirTemperature",
     "EngUnit": "°F",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Utilities.ProcessBoostPressure",
+    "Description": "Process Boost Pressure",
+    "EngUnit": "PSI",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Utilities.ProcessBPSkid.Flow",
+    "Description": "Boost Skid Flow",
+    "EngUnit": "GPM",
     "TagType": "Analog"
   },
   {
