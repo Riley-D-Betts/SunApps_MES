@@ -667,10 +667,13 @@ async function tickIssuesForBatch(batch, lineReadings) {
     }
   }
 
-  let issuesFired = 0
+  const observedAt = new Date()
+  const candidates = []
+  const activeLines = new Set()
 
+  // ── Phase 1: build candidates for current-tick matching lines ─────────
   for (const reading of matchingLines) {
-    const observedAt = new Date()
+    activeLines.add(reading.line)
 
     let pipeState = await db.MesPipeIssueState.findOne({
       where: { blendTankBatchId: batch.id, line: reading.line },
@@ -705,17 +708,6 @@ async function tickIssuesForBatch(batch, lineReadings) {
     await pipeState.update(contextUpdate)
 
     if (delta < config.MES_MIN_ISSUE_LBS) continue
-    if (config.MES_DRY_RUN) {
-      await pipeState.update({ lastIssuedTotalizerLbs: reading.totalizerLbs, lastIssueAt: observedAt })
-      await batch.increment({ cumulativeIssuedLbs: delta })
-      await batch.update({ lastIssueAt: observedAt })
-      console.log(`[BlendTankMesService] DRY RUN tick issue ${reading.line} → ${batch.tankId}: ${delta.toFixed(1)} lb`)
-      continue
-    }
-    if (!batch.nsWorkOrderId) {
-      console.log(`[BlendTankMesService] tick: batch ${batch.id} has no NS WO — skipping ${reading.line} delta ${delta.toFixed(1)}`)
-      continue
-    }
 
     const component = resolveLineComponent(reading)
     if (!component.id) {
@@ -728,66 +720,24 @@ async function tickIssuesForBatch(batch, lineReadings) {
       continue
     }
 
-    const bomLines = await fetchWoBomLines(batch.nsWorkOrderId)
-    const body = buildWoIssueBody(bomLines, component.id, delta, binId)
-
-    try {
-      console.log(`[BlendTankMesService] tick issue ${reading.line} → WO ${batch.nsWorkOrderId} (${batch.tankId}): ${delta.toFixed(1)} lb "${reading.productName || component.name}" (NS ${component.id}, ${component.resolvedFrom})`)
-      const nsResult = await core.netsuitePost(`/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderIssue`, body)
-      const nsIssueId = extractNsIssueId(nsResult)
-
-      // Persist baseline + cumulative totals only after NS confirms the issue
-      await pipeState.update({ lastIssuedTotalizerLbs: reading.totalizerLbs, lastIssueAt: observedAt })
-      await batch.increment({ cumulativeIssuedLbs: delta })
-      await batch.update({ lastIssueAt: observedAt })
-
-      // Record the issue against MesBlendTankInflow for traceability (mirrors
-      // the legacy event-based path so historical queries still see all flows)
-      await db.MesBlendTankInflow.create({
-        blendTankBatchId: batch.id,
-        line: reading.line,
-        ingredientType: reading.productName || (reading.line.startsWith('CL') ? 'cream' : 'skim'),
-        totalLbs: delta,
-        nsItemId: String(component.id),
-        nsIssueId: nsIssueId ? String(nsIssueId) : null,
-        status: 'completed',
-        resetTime: observedAt,
-      })
-
-      await db.MesProcessingLog.create({
-        eventType: 'blend_tank_tick_issue',
-        sourceId: batch.nsWorkOrderId,
-        nsTransactionType: 'workOrderIssue',
-        nsTransactionId: nsIssueId,
-        payload: JSON.stringify({ batchId: batch.id, line: reading.line, delta, totalizer: reading.totalizerLbs, component }),
-        result: JSON.stringify({ nsIssueId }),
-        success: true,
-      })
-
-      issuesFired++
-    } catch (err) {
-      console.error(`[BlendTankMesService] tick issue failed for ${reading.line} → WO ${batch.nsWorkOrderId}:`, err.message)
-      await db.MesProcessingLog.create({
-        eventType: 'blend_tank_tick_issue',
-        sourceId: batch.nsWorkOrderId,
-        nsTransactionType: 'workOrderIssue',
-        payload: JSON.stringify({ batchId: batch.id, line: reading.line, delta, totalizer: reading.totalizerLbs }),
-        success: false,
-        errorMessage: err.message,
-      })
-      // Don't update the baseline — the same delta will retry on next tick
-    }
+    candidates.push({
+      kind: 'current',
+      line: reading.line,
+      delta,
+      pipeState,
+      component,
+      binId,
+      productName: reading.productName,
+      newBaseline: reading.totalizerLbs,
+    })
   }
 
-  // Catch-up pass: any pipe state for this batch where lastTotalizerLbs was
-  // recorded before a reset but the line was idle during the tick above (so it
-  // wasn't in matchingLines). Common after a service restart when a line reset
-  // while the process was down. Uses stored lastProductName/lastSiloName.
+  // ── Phase 2: catch-up candidates for lines that weren't in this tick ──
+  // Same gating as before: only run when the batch has an NS WO.
   if (batch.nsWorkOrderId) {
-    const activeLinesSet = new Set(matchingLines.map(r => r.line))
     const allPipeStates = await db.MesPipeIssueState.findAll({ where: { blendTankBatchId: batch.id } })
     for (const ps of allPipeStates) {
-      if (activeLinesSet.has(ps.line)) continue  // already handled above
+      if (activeLines.has(ps.line)) continue
       const stored = parseFloat(ps.lastTotalizerLbs) || 0
       const issued = parseFloat(ps.lastIssuedTotalizerLbs) || 0
       const catchUpDelta = stored - issued
@@ -807,32 +757,119 @@ async function tickIssuesForBatch(batch, lineReadings) {
         console.warn(`[BlendTankMesService] tick catch-up ${ps.line}: no bin for "${ps.lastSiloName}" — skipping`)
         continue
       }
-      const bomLines = await fetchWoBomLines(batch.nsWorkOrderId)
-      const body = buildWoIssueBody(bomLines, component.id, catchUpDelta, binId)
-      const observedAt = new Date()
-      try {
-        console.log(`[BlendTankMesService] tick catch-up ${ps.line} → WO ${batch.nsWorkOrderId} (${batch.tankId}): ${catchUpDelta.toFixed(1)} lb "${ps.lastProductName}" (NS ${component.id})`)
-        const nsResult = await core.netsuitePost(`/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderIssue`, body)
-        const nsIssueId = extractNsIssueId(nsResult)
-        await ps.update({ lastIssuedTotalizerLbs: stored, lastIssueAt: observedAt })
-        await batch.increment({ cumulativeIssuedLbs: catchUpDelta })
-        await batch.update({ lastIssueAt: observedAt })
+      candidates.push({
+        kind: 'catchup',
+        line: ps.line,
+        delta: catchUpDelta,
+        pipeState: ps,
+        component,
+        binId,
+        productName: ps.lastProductName,
+        newBaseline: stored,
+      })
+    }
+  }
+
+  let issuesFired = 0
+
+  // Dry-run: keep per-line baseline advancement (lets developers see state
+  // evolve as if NS calls succeeded). No grouping needed since there's no
+  // outbound call to consolidate.
+  if (config.MES_DRY_RUN) {
+    for (const c of candidates) {
+      await c.pipeState.update({ lastIssuedTotalizerLbs: c.newBaseline, lastIssueAt: observedAt })
+      await batch.increment({ cumulativeIssuedLbs: c.delta })
+      await batch.update({ lastIssueAt: observedAt })
+      console.log(`[BlendTankMesService] DRY RUN tick issue ${c.line} → ${batch.tankId}: ${c.delta.toFixed(1)} lb${c.kind === 'catchup' ? ' (catch-up)' : ''}`)
+    }
+    return 0
+  }
+
+  if (!batch.nsWorkOrderId) {
+    if (candidates.length > 0) {
+      console.log(`[BlendTankMesService] tick: batch ${batch.id} has no NS WO — skipping ${candidates.length} candidate(s)`)
+    }
+    return 0
+  }
+
+  // ── Phase 3: group candidates by (source bin, item) ──────────────────
+  // Per BATCH_LIFECYCLE_PLAN.md §3 + memory [[bt-wo-issue-grouping]]:
+  // emit one workOrderIssue per (source bin, item) tuple. Two lines
+  // pulling from the same silo with the same item collapse into one;
+  // lines with distinct bins or items each get their own issue.
+  const groups = new Map()
+  for (const c of candidates) {
+    const key = `${c.binId}:${c.component.id}`
+    if (!groups.has(key)) {
+      groups.set(key, { binId: c.binId, component: c.component, totalDelta: 0, members: [] })
+    }
+    const g = groups.get(key)
+    g.totalDelta += c.delta
+    g.members.push(c)
+  }
+
+  const bomLines = await fetchWoBomLines(batch.nsWorkOrderId)
+
+  for (const g of groups.values()) {
+    const body = buildWoIssueBody(bomLines, g.component.id, g.totalDelta, g.binId)
+    const memberLabel = g.members
+      .map(m => m.kind === 'catchup' ? `${m.line}(catch-up)` : m.line)
+      .join('+')
+
+    try {
+      console.log(`[BlendTankMesService] tick issue ${memberLabel} → WO ${batch.nsWorkOrderId} (${batch.tankId}): ${g.totalDelta.toFixed(1)} lb "${g.component.name}" (NS ${g.component.id}, bin ${g.binId})`)
+      const nsResult = await core.netsuitePost(`/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderIssue`, body)
+      const nsIssueId = extractNsIssueId(nsResult)
+
+      for (const m of g.members) {
+        await m.pipeState.update({ lastIssuedTotalizerLbs: m.newBaseline, lastIssueAt: observedAt })
+        await batch.increment({ cumulativeIssuedLbs: m.delta })
         await db.MesBlendTankInflow.create({
-          blendTankBatchId: batch.id, line: ps.line,
-          ingredientType: ps.lastProductName, totalLbs: catchUpDelta,
-          nsItemId: String(component.id), nsIssueId: nsIssueId ? String(nsIssueId) : null,
-          status: 'completed', resetTime: observedAt,
+          blendTankBatchId: batch.id,
+          line: m.line,
+          ingredientType: m.productName || (m.line.startsWith('CL') ? 'cream' : 'skim'),
+          totalLbs: m.delta,
+          nsItemId: String(g.component.id),
+          nsIssueId: nsIssueId ? String(nsIssueId) : null,
+          status: 'completed',
+          resetTime: observedAt,
         })
-        await db.MesProcessingLog.create({
-          eventType: 'blend_tank_tick_catchup', sourceId: batch.nsWorkOrderId,
-          nsTransactionType: 'workOrderIssue', nsTransactionId: nsIssueId,
-          payload: JSON.stringify({ batchId: batch.id, line: ps.line, catchUpDelta, stored, issued, component }),
-          result: JSON.stringify({ nsIssueId }), success: true,
-        })
-        issuesFired++
-      } catch (err) {
-        console.error(`[BlendTankMesService] tick catch-up failed for ${ps.line} → WO ${batch.nsWorkOrderId}:`, err.message)
       }
+      await batch.update({ lastIssueAt: observedAt })
+
+      await db.MesProcessingLog.create({
+        eventType: 'blend_tank_tick_issue',
+        sourceId: batch.nsWorkOrderId,
+        nsTransactionType: 'workOrderIssue',
+        nsTransactionId: nsIssueId,
+        payload: JSON.stringify({
+          batchId: batch.id,
+          members: g.members.map(m => ({ line: m.line, kind: m.kind, delta: m.delta, newBaseline: m.newBaseline })),
+          totalDelta: g.totalDelta,
+          component: g.component,
+          binId: g.binId,
+        }),
+        result: JSON.stringify({ nsIssueId }),
+        success: true,
+      })
+
+      issuesFired++
+    } catch (err) {
+      console.error(`[BlendTankMesService] tick issue failed for ${memberLabel} → WO ${batch.nsWorkOrderId}:`, err.message)
+      await db.MesProcessingLog.create({
+        eventType: 'blend_tank_tick_issue',
+        sourceId: batch.nsWorkOrderId,
+        nsTransactionType: 'workOrderIssue',
+        payload: JSON.stringify({
+          batchId: batch.id,
+          members: g.members.map(m => ({ line: m.line, kind: m.kind, delta: m.delta })),
+          totalDelta: g.totalDelta,
+          binId: g.binId,
+        }),
+        success: false,
+        errorMessage: err.message,
+      })
+      // Don't advance any baselines — every member's delta retries on next tick
     }
   }
 
