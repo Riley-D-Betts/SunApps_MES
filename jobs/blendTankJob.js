@@ -32,10 +32,10 @@ function validStr(val) {
 // sees line flow (a sitting tank between fill and drain) must NOT auto-close.
 // The idle timer only arms once at least one line tick has fed the tank.
 const tankState = {
-  BlendTank1A: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false },
-  BlendTank1B: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false },
-  BlendTank2A: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false },
-  BlendTank2B: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false },
+  BlendTank1A: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false, openedOnRunning: false },
+  BlendTank1B: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false, openedOnRunning: false },
+  BlendTank2A: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false, openedOnRunning: false },
+  BlendTank2B: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false, openedOnRunning: false },
 }
 
 const lineState = {
@@ -80,6 +80,9 @@ async function hydrateFromDb(MesBlendTankBatch) {
       // had been actively filled before. If no flow arrives within 5 min,
       // batch closes; if flow does arrive, lastFlowAt advances normally.
       tankState[tankId].hasSeenFlow = true
+      // Conservatively assume the hydrated batch was opened via WOState=Running
+      // so wo_state_left_running still applies if Atlas closes it.
+      tankState[tankId].openedOnRunning = true
       console.log(`[BlendTankJob] Hydrated ${tankId} from DB: "${row.productName}" (active since ${row.detectedAt})`)
     }
     console.log(`[BlendTankJob] Hydrated tankState from ${rows.length} active row(s)`)
@@ -123,6 +126,7 @@ async function endBatch(tankId, prev, reason) {
   prev.batchStartedAt = null
   prev.lastFlowAt = null
   prev.hasSeenFlow = false
+  prev.openedOnRunning = false
   try {
     await blendTankMesService.processWOEnd({ tankId, productName, detectedAt: new Date().toISOString() })
   } catch (err) {
@@ -168,11 +172,15 @@ async function run(historian) {
       // Order matters: explicit WO/state signals take priority over the
       // line-flow idle test so a CIP that pauses lines mid-batch closes
       // immediately rather than waiting 5 min. The all_lines_stopped check
-      // only arms once we've actually seen flow on this batch — batches that
-      // open from WOState=Running on a sitting tank shouldn't auto-close.
+      // only arms once we've actually seen flow on this batch — batches
+      // that open from WOState=Running on a sitting tank shouldn't
+      // auto-close. wo_state_left_running only fires if the batch was
+      // OPENED on the Running signal (openedOnRunning=true). Batches
+      // opened on line-flow alone (WOState stayed Complete from a previous
+      // WO) don't have a Running transition to detect.
       let endReason = null
       if (prev.batchActive) {
-        if (wasRunning && !isRunning) endReason = 'wo_state_left_running'
+        if (prev.openedOnRunning && wasRunning && !isRunning) endReason = 'wo_state_left_running'
         else if (hadProduct && !hasProduct) endReason = 'note_cleared'
         else if (hasProduct && productName !== prev.productName) endReason = 'product_change'
         else if (prev.hasSeenFlow && prev.lastFlowAt && (now - prev.lastFlowAt) > ALL_LINES_STOPPED_IDLE_MS) endReason = 'all_lines_stopped'
@@ -182,16 +190,24 @@ async function run(historian) {
       }
 
       // ── START pass ────────────────────────────────────────────────────
-      // Open a batch as soon as Atlas marks the WO Running and NOTE_STRING
-      // is a recognized product — the WO exists at that moment regardless
-      // of whether line flow is happening right this tick. Sitting tanks
-      // between fill and drain still need to be tracked. Line flow drives
-      // workOrderIssue + workOrderCompletion as before; it's not required
-      // to OPEN the batch. Same-tick reopen still possible after a
-      // product_change end.
-      if (!prev.batchActive && hasProduct && isRunning) {
-        const reason = feedingLines.length > 0 ? 'WOState=Running + flow' : 'WOState=Running'
+      // Open a batch when EITHER Atlas marks WOState=Running OR we see
+      // active line flow into the tank — whichever fires first. Real
+      // operator workflow can lead either way: Atlas may flip Running
+      // before lines start (Atlas-led), or operator may start dispensing
+      // before opening the WO record (operator-led, common at WO
+      // transitions). Caveat: a batch opened on line-flow alone resolves
+      // to whatever NOTE_STRING currently says — if NOTE_STRING is still
+      // stale from the previous WO, the batch will be misattributed until
+      // NOTE_STRING is updated.
+      if (!prev.batchActive && hasProduct && (isRunning || feedingLines.length > 0)) {
+        const reason = isRunning
+          ? (feedingLines.length > 0 ? 'WOState=Running + flow' : 'WOState=Running')
+          : 'line flow (WOState=' + (currentWOState || 'none') + ')'
         await startBatch(tankId, prev, status, reason)
+        // Remember how the batch was opened so the END pass knows whether
+        // wo_state_left_running is applicable. Set after startBatch so the
+        // helper's reset of prev fields doesn't clobber it.
+        prev.openedOnRunning = !!isRunning
       }
 
       prev.productName = productName
