@@ -2,6 +2,7 @@ const core = require('../clients/coreClient')
 const itemConfig = require('./mesItemConfig')
 const productParser = require('./blendTankProductParser')
 const lineMapper = require('./lineIngredientMapper')
+const nsInventory = require('./nsInventoryLookup')
 const config = require('../config')
 const db = require('../models')
 
@@ -23,38 +24,61 @@ function clearBomCache(nsWorkOrderId) {
   _bomCache.delete(nsWorkOrderId)
 }
 
-// Build the transform body for a workOrderIssue that issues qty lbs of one
-// non-lot-tracked item from a specific bin. All other BOM lines are zeroed out
-// so the transform doesn't auto-fill them and demand lot detail.
+// Build the transform body for a workOrderIssue that issues quantity lbs of
+// one component (the "target" item) against the named WO BOM line. Returns
+// { body, allocations } — body goes to NS, allocations carries per-(lot,bin)
+// breakdown for logging / audit.
 //
-// Property naming gotcha: the WRITE body for the `/!transform/workOrderIssue`
-// endpoint uses `inventoryDetail` (singular) at the component-line level.
-// `componentInventoryDetail` is the READ shape on the resulting WorkOrderIssue
-// record — sending it on the write was silently dropped and caused "The total
-// inventory detail quantity must be N" rejections.
-function buildWoIssueBody(bomLines, targetItemId, quantity, binId) {
+// All non-target BOM lines are OMITTED from the items array entirely. NS's
+// transform endpoint auto-populates default qty for unspecified lines but
+// only validates lines we touch; sending them at qty=0 (with or without
+// empty inventoryassignment) makes NS demand inventory detail for any
+// lot/bin tracked aux lines (vitamins, citrate, etc.) and reject the issue
+// before getting to inventory-quantity validation.
+//
+// Field names + ID shape follow what NS actually accepts on this endpoint
+// (verified by scripts/probeLotShape.js on 2026-05-19):
+//   - lowercase componentinventorydetail / inventoryassignment
+//   - raw string IDs for issueinventorynumber / binnumber (no { id } wrapping)
+//   - status: 1 ("Good") — silently ignored, kept for parity with manufacturing
+//
+// See [[ns-wo-issue-shape]] and [[lot-tracked-bom-components]] memories.
+async function buildWoIssueBody(targetItemId, quantity, preferredBinId, bomLines) {
+  const tracking = await nsInventory.getItemTracking(targetItemId)
   const targetIdStr = String(targetItemId)
+  const targetLine = bomLines.find(c => String(c.itemId) === targetIdStr)
+  if (!targetLine) {
+    throw new Error(`Item ${targetItemId} is not on the WO BOM (lines: ${bomLines.map(b => b.itemId).join(', ')})`)
+  }
+
+  let allocations = null
+  if (tracking.isLot) {
+    allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
+    const allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
+    if (allocatedQty + 1e-6 < quantity) {
+      const err = new Error(`Insufficient inventory for item ${targetItemId}: need ${quantity}, found ${allocatedQty} across ${allocations.length} lot(s)`)
+      err.code = 'INSUFFICIENT_INVENTORY'
+      err.itemId = targetItemId
+      err.needed = quantity
+      err.available = allocatedQty
+      err.allocations = allocations
+      throw err
+    }
+  }
+
+  const assignmentItems = nsInventory.buildAssignmentItems(tracking, quantity, allocations, preferredBinId)
+
+  const componentEntry = { lineNumber: targetLine.line, quantity }
+  if (assignmentItems && assignmentItems.length > 0) {
+    componentEntry.componentinventorydetail = {
+      inventoryassignment: { items: assignmentItems },
+    }
+  }
+
   return {
-    component: {
-      items: bomLines.map(c => {
-        if (c.itemId === targetIdStr) {
-          return {
-            lineNumber: c.line,
-            quantity,
-            inventoryDetail: {
-              inventoryAssignment: { items: [{
-                quantity,
-                binnumber: { id: binId },
-                // inventoryStatus 1 = "Good" — the default NS assigns when omitted,
-                // sent explicitly so the body matches the canonical shape NS stores.
-                inventoryStatus: { id: 1 },
-              }] },
-            },
-          }
-        }
-        return { lineNumber: c.line, quantity: 0 }
-      }),
-    },
+    body: { component: { items: [componentEntry] } },
+    allocations,
+    tracking,
   }
 }
 
@@ -399,10 +423,27 @@ async function processLineFlow(data) {
   }
 
   const bomLines = await fetchWoBomLines(targetBatch.nsWorkOrderId)
-  const body = buildWoIssueBody(bomLines, component.id, delta, binId)
+  let body, allocations
+  try {
+    const built = await buildWoIssueBody(component.id, delta, binId, bomLines)
+    body = built.body
+    allocations = built.allocations
+  } catch (err) {
+    console.error(`[BlendTankMesService] tail-catcher ${line}: buildWoIssueBody failed — ${err.message}`)
+    await inflowRecord.update({ status: 'pending_ns' })
+    await db.MesProcessingLog.create({
+      eventType: 'blend_tank_tail_issue', sourceId: targetBatch.nsWorkOrderId,
+      nsTransactionType: 'workOrderIssue', payload: JSON.stringify(data),
+      result: null, success: false, errorMessage: err.message,
+    })
+    return { success: true, inflowId: inflowRecord.id, status: 'pending_ns', error: err.message }
+  }
 
   try {
-    console.log(`[BlendTankMesService] tail-catcher ${line} → WO ${targetBatch.nsWorkOrderId} (${targetBatch.tankId}): ${delta.toFixed(1)} lb (peak ${totalLbs.toFixed(1)}, tick had issued ${lastIssued.toFixed(1)})`)
+    const allocSummary = allocations
+      ? ` via ${allocations.map(a => `lot ${a.lotName}@${a.binName} ${a.qty.toFixed(1)}`).join(' + ')}`
+      : ''
+    console.log(`[BlendTankMesService] tail-catcher ${line} → WO ${targetBatch.nsWorkOrderId} (${targetBatch.tankId}): ${delta.toFixed(1)} lb (peak ${totalLbs.toFixed(1)}, tick had issued ${lastIssued.toFixed(1)})${allocSummary}`)
     const nsResult = await core.netsuitePost(`/record/v1/workOrder/${targetBatch.nsWorkOrderId}/!transform/workOrderIssue`, body)
     const nsIssueId = extractNsIssueId(nsResult)
 
@@ -811,13 +852,39 @@ async function tickIssuesForBatch(batch, lineReadings) {
   const bomLines = await fetchWoBomLines(batch.nsWorkOrderId)
 
   for (const g of groups.values()) {
-    const body = buildWoIssueBody(bomLines, g.component.id, g.totalDelta, g.binId)
     const memberLabel = g.members
       .map(m => m.kind === 'catchup' ? `${m.line}(catch-up)` : m.line)
       .join('+')
 
+    let body, allocations
     try {
-      console.log(`[BlendTankMesService] tick issue ${memberLabel} → WO ${batch.nsWorkOrderId} (${batch.tankId}): ${g.totalDelta.toFixed(1)} lb "${g.component.name}" (NS ${g.component.id}, bin ${g.binId})`)
+      const built = await buildWoIssueBody(g.component.id, g.totalDelta, g.binId, bomLines)
+      body = built.body
+      allocations = built.allocations
+    } catch (err) {
+      console.error(`[BlendTankMesService] tick issue ${memberLabel} → WO ${batch.nsWorkOrderId}: buildWoIssueBody failed — ${err.message}`)
+      await db.MesProcessingLog.create({
+        eventType: 'blend_tank_tick_issue',
+        sourceId: batch.nsWorkOrderId,
+        nsTransactionType: 'workOrderIssue',
+        payload: JSON.stringify({
+          batchId: batch.id,
+          members: g.members.map(m => ({ line: m.line, kind: m.kind, delta: m.delta })),
+          totalDelta: g.totalDelta,
+          targetItem: g.component.id,
+          preferredBinId: g.binId,
+        }),
+        success: false,
+        errorMessage: err.message,
+      })
+      continue
+    }
+
+    try {
+      const allocSummary = allocations
+        ? ` via ${allocations.map(a => `lot ${a.lotName}@${a.binName} ${a.qty.toFixed(1)}`).join(' + ')}`
+        : ''
+      console.log(`[BlendTankMesService] tick issue ${memberLabel} → WO ${batch.nsWorkOrderId} (${batch.tankId}): ${g.totalDelta.toFixed(1)} lb "${g.component.name}" (NS ${g.component.id})${allocSummary}`)
       const nsResult = await core.netsuitePost(`/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderIssue`, body)
       const nsIssueId = extractNsIssueId(nsResult)
 

@@ -2,6 +2,7 @@ const core = require('../clients/coreClient')
 const itemConfig = require('./mesItemConfig')
 const productParser = require('./surgeTankProductParser')
 const lineMapper = require('./lineIngredientMapper')
+const nsInventory = require('./nsInventoryLookup')
 const config = require('../config')
 const db = require('../models')
 
@@ -27,27 +28,46 @@ function clearBomCache(nsWorkOrderId) {
   _bomCache.delete(nsWorkOrderId)
 }
 
-function buildWoIssueBody(bomLines, targetItemId, quantity, binId) {
+// Mirror of blendTankMesService.buildWoIssueBody — see that file for the
+// detailed rationale. Lowercase componentinventorydetail + omit non-target
+// lines + raw string IDs. Looks up tracking class (lot / bin / both) and
+// allocations from NS via nsInventoryLookup.
+async function buildWoIssueBody(targetItemId, quantity, preferredBinId, bomLines) {
+  const tracking = await nsInventory.getItemTracking(targetItemId)
   const targetIdStr = String(targetItemId)
+  const targetLine = bomLines.find(c => String(c.itemId) === targetIdStr)
+  if (!targetLine) {
+    throw new Error(`Item ${targetItemId} is not on the WO BOM (lines: ${bomLines.map(b => b.itemId).join(', ')})`)
+  }
+
+  let allocations = null
+  if (tracking.isLot) {
+    allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
+    const allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
+    if (allocatedQty + 1e-6 < quantity) {
+      const err = new Error(`Insufficient inventory for item ${targetItemId}: need ${quantity}, found ${allocatedQty} across ${allocations.length} lot(s)`)
+      err.code = 'INSUFFICIENT_INVENTORY'
+      err.itemId = targetItemId
+      err.needed = quantity
+      err.available = allocatedQty
+      err.allocations = allocations
+      throw err
+    }
+  }
+
+  const assignmentItems = nsInventory.buildAssignmentItems(tracking, quantity, allocations, preferredBinId)
+
+  const componentEntry = { lineNumber: targetLine.line, quantity }
+  if (assignmentItems && assignmentItems.length > 0) {
+    componentEntry.componentinventorydetail = {
+      inventoryassignment: { items: assignmentItems },
+    }
+  }
+
   return {
-    component: {
-      items: bomLines.map(c => {
-        if (c.itemId === targetIdStr) {
-          return {
-            lineNumber: c.line,
-            quantity,
-            inventoryDetail: {
-              inventoryAssignment: { items: [{
-                quantity,
-                binnumber: { id: binId },
-                inventoryStatus: { id: 1 },
-              }] },
-            },
-          }
-        }
-        return { lineNumber: c.line, quantity: 0 }
-      }),
-    },
+    body: { component: { items: [componentEntry] } },
+    allocations,
+    tracking,
   }
 }
 
@@ -610,10 +630,29 @@ async function tickIssueForBatch(batch, historian) {
   // by construction the BOM contains exactly this item. Legacy batches without
   // a pinned component fall through to today's re-resolver path above.
 
-  const body = buildWoIssueBody(bomLines, component.itemId, deltaLbs, component.binId)
+  let body, allocations
+  try {
+    const built = await buildWoIssueBody(component.itemId, deltaLbs, component.binId, bomLines)
+    body = built.body
+    allocations = built.allocations
+  } catch (err) {
+    console.error(`[SurgeTankMesService] tick issue ${batch.tankId} → WO ${batch.nsWorkOrderId}: buildWoIssueBody failed — ${err.message}`)
+    await db.MesProcessingLog.create({
+      eventType: 'surge_tank_tick_issue',
+      sourceId: batch.nsWorkOrderId,
+      nsTransactionType: 'workOrderIssue',
+      payload: JSON.stringify({ batchId: batch.id, uhtId: batch.feedingUhtId, deltaGal, deltaLbs, component }),
+      success: false,
+      errorMessage: err.message,
+    })
+    return false
+  }
 
   try {
-    console.log(`[SurgeTankMesService] tick issue UHT ${batch.feedingUhtId} → WO ${batch.nsWorkOrderId} (${batch.tankId}): ${deltaLbs.toFixed(1)} lb "${component.itemName}" (NS ${component.itemId}, ${component.resolvedFrom})`)
+    const allocSummary = allocations
+      ? ` via ${allocations.map(a => `lot ${a.lotName}@${a.binName} ${a.qty.toFixed(1)}`).join(' + ')}`
+      : ''
+    console.log(`[SurgeTankMesService] tick issue UHT ${batch.feedingUhtId} → WO ${batch.nsWorkOrderId} (${batch.tankId}): ${deltaLbs.toFixed(1)} lb "${component.itemName}" (NS ${component.itemId}, ${component.resolvedFrom})${allocSummary}`)
     const nsResult = await core.netsuitePost(`/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderIssue`, body)
     const nsIssueId = extractNsIssueId(nsResult)
 
