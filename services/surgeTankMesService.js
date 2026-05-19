@@ -440,6 +440,11 @@ async function processWOStart(data, historian) {
       quantity: 1,
       location: { id: 23 },
       subsidiary: { id: 2 },
+      // isWip MUST be true — see blendTankMesService.processWOStart for the
+      // discovery context. NS rejects every workOrderIssue against a WO with
+      // isWip=false ("the work order does not use WIP, or the work order is
+      // already closed").
+      isWip: true,
       custbody_mes_tank_id: tankId,
       custbody_mes_product_name: productName,
       custbody_mes_source_entity: feedingFromEntName || null,

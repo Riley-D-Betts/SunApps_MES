@@ -184,6 +184,12 @@ async function processWOStart(data) {
       quantity: batchSize || 1,
       location: { id: 23 },
       subsidiary: { id: 2 },
+      // isWip MUST be true — controls whether NS lets us create
+      // workOrderIssue transactions against the WO. Without it, NS rejects
+      // every issue with "the work order does not use WIP, or the work
+      // order is already closed". Discovered 2026-05-19 via WO1364 (isWip
+      // false, every issue 400'd) vs WO1365 (isWip true, issues working).
+      isWip: true,
       custbody_mes_tank_id: tankId,
       custbody_mes_product_name: productName,
       custbody_mes_source_entity: fromEntName || null,
