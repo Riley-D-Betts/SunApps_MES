@@ -33,6 +33,58 @@ function reset() {
   feedPermitZeroTicks = 0
 }
 
+/**
+ * Build the rich destinations JSON shape the dashboard (summaryFromDbRow)
+ * expects: { raw, resolved, source } with per-side NS item + bin resolution.
+ * Mirrors what milkMesService.processSeparationBatch produces at close, but
+ * runs every tick so live "running" batches render cleanly instead of showing
+ * "no item · no bin" in red until close fires.
+ */
+function buildResolvedDestinations(snap) {
+  const sourceRaw = snap.xfrSource || ''
+  const sourceSilo = itemConfig.normalizeSiloName(sourceRaw) || sourceRaw
+  const cfg = snap.siloProductConfig || {}
+  const lookupCfg = (name) => (name && (cfg[name] || cfg[itemConfig.normalizeSiloName(name) || ''])) || {}
+
+  const sourceCfg = lookupCfg(sourceRaw)
+  const sourceIndex = sourceCfg.productIndex || 0
+  const sourceName = sourceCfg.productName || ''
+  const sourceItem = sourceIndex
+    ? itemConfig.getItemByProductIndex(sourceIndex)
+    : itemConfig.getItem(snap.xfrItemId, sourceSilo)
+  const sourceBinId = sourceSilo ? itemConfig.getBinId(sourceSilo) : null
+
+  const destsRaw = (snap.xfrDestinations || []).filter(Boolean)
+  const resolved = destsRaw.map(raw => {
+    const silo = itemConfig.normalizeSiloName(raw)
+    const kind = itemConfig.classifySiloDestination(raw)
+    const dcfg = lookupCfg(raw)
+    const idx = dcfg.productIndex || 0
+    return {
+      raw,
+      silo,
+      kind,
+      binId: silo ? itemConfig.getBinId(silo) : null,
+      productIndex: idx,
+      productName: dcfg.productName || '',
+      item: idx ? itemConfig.getItemByProductIndex(idx) : { id: null, name: '' },
+    }
+  })
+
+  return {
+    raw: destsRaw,
+    resolved,
+    source: {
+      silo: sourceSilo,
+      productIndex: sourceIndex,
+      productName: sourceName,
+      nsItemId: sourceItem.id || null,
+      nsItemName: sourceItem.name || null,
+      binId: sourceBinId,
+    },
+  }
+}
+
 function destinationsChanged(prev, curr) {
   for (let i = 0; i < 4; i++) {
     const a = prev[i] || ''
@@ -68,10 +120,7 @@ function feedPermitRisingEdge(prev, curr) {
 async function openBatch(snap) {
   const sourceSilo = itemConfig.normalizeSiloName(snap.xfrSource) || snap.xfrSource
   const batchId = `XFR-${snap.pollTime.getTime()}`
-  const destinationsJson = JSON.stringify({
-    raw: snap.xfrDestinations.filter(Boolean),
-    siloProductConfig: snap.siloProductConfig,
-  })
+  const destinationsJson = JSON.stringify(buildResolvedDestinations(snap))
   const row = await db.MesSeparationBatch.create({
     batchId,
     sourceSilo,
@@ -107,10 +156,7 @@ async function persistTick(snap) {
     inputVolume: snap.feedTotalLbs || 0,
     creamVolume: snap.creamTotalLbs || 0,
     skimVolume: snap.skimTotalLbs || 0,
-    destinations: JSON.stringify({
-      raw: snap.xfrDestinations.filter(Boolean),
-      siloProductConfig: snap.siloProductConfig,
-    }),
+    destinations: JSON.stringify(buildResolvedDestinations(snap)),
     prevSourceSilo: snap.xfrSource,
     prevDestinationsJson: JSON.stringify(snap.xfrDestinations),
     prevIndexCodesJson: JSON.stringify(snap.siloProductConfig),
