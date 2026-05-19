@@ -44,6 +44,14 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATE,
         allowNull: true,
       },
+      destination: {
+        type: DataTypes.STRING(100),
+        allowNull: true,
+      },
+      siloName: {
+        type: DataTypes.STRING(50),
+        allowNull: true,
+      },
       createdAt: {
         type: DataTypes.DATE,
         allowNull: false,

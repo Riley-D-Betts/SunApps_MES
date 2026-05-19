@@ -93,10 +93,16 @@ async function hydrateFromDb(MesBlendTankBatch) {
   }
 }
 
+// Match line.requestedBy to the tank using the same canonical normalizer the
+// flow-consumer paths use (BT2A ↔ BlendTank2A). Without this, SCADA writing
+// the short form would silently fail the exact-string check and the tank
+// would never see a feeding line, blocking the line-flow batch-open path.
 function linesFeedingTank(lineReadings, tankId) {
+  const tankCanonical = blendTankMesService.normalizeTankRef(tankId)
   return lineReadings.filter(r => {
-    if (r.requestedBy !== tankId) return false
     if (!r.active) return false
+    const reqCanonical = blendTankMesService.normalizeTankRef(r.requestedBy)
+    if (!reqCanonical || !tankCanonical || reqCanonical !== tankCanonical) return false
     const prev = lineState[r.line]
     if (!prev || prev.prevValue === null) return false
     return r.totalizerLbs > prev.prevValue

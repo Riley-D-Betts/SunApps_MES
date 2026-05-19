@@ -43,6 +43,17 @@ db.ensureRuntimeSchema = async function () {
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lastCompletionAt' AND Object_ID = Object_ID(N'MesBlendTankBatches'))
       ALTER TABLE MesBlendTankBatches ADD lastCompletionAt DATETIME2 NULL;
   `)
+  // MesBlendTankInflows: preserve routing strings on unmatched flows so we can
+  // diagnose what SCADA was writing as REQUESTEDBY when no batch matched.
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'destination' AND Object_ID = Object_ID(N'MesBlendTankInflows'))
+      ALTER TABLE MesBlendTankInflows ADD destination NVARCHAR(100) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'siloName' AND Object_ID = Object_ID(N'MesBlendTankInflows'))
+      ALTER TABLE MesBlendTankInflows ADD siloName NVARCHAR(50) NULL;
+  `)
+
   // MesPipeIssueStates: product/silo context for restart recovery
   await sequelize.query(`
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lastProductName' AND Object_ID = Object_ID(N'MesPipeIssueStates'))

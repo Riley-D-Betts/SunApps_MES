@@ -376,6 +376,7 @@ async function processLineFlow(data) {
       blendTankBatchId: null, line,
       ingredientType: lineProductName || ingredientType || 'unknown',
       totalLbs, nsItemId: null, status: 'unmatched', resetTime,
+      destination: destination || null, siloName: siloName || null,
     })
     console.log(`[BlendTankMesService] processLineFlow ${line} reset (${totalLbs.toFixed(1)} lb) — no active batch matched destination "${destination}"`)
     return { success: true, inflowId: record.id, status: 'unmatched' }
@@ -393,6 +394,7 @@ async function processLineFlow(data) {
       blendTankBatchId: targetBatch.id, line,
       ingredientType: lineProductName || ingredientType || 'unknown',
       totalLbs, nsItemId: null, status: 'tick_already_issued', resetTime,
+      destination: destination || null, siloName: siloName || null,
     })
     console.log(`[BlendTankMesService] processLineFlow ${line} reset (${totalLbs.toFixed(1)} lb): tick already issued ${lastIssued.toFixed(1)} — no tail to catch`)
     return { success: true, inflowId: record.id, status: 'tick_already_issued' }
@@ -409,6 +411,8 @@ async function processLineFlow(data) {
     nsItemId: component?.id ? String(component.id) : null,
     status: 'pending',
     resetTime,
+    destination: destination || null,
+    siloName: siloName || null,
   })
 
   if (config.MES_DRY_RUN) {
@@ -776,6 +780,8 @@ async function tickIssuesForBatch(batch, lineReadings) {
       binId,
       productName: reading.productName,
       newBaseline: reading.totalizerLbs,
+      destination: reading.requestedBy || null,
+      siloName: reading.siloName || null,
     })
   }
 
@@ -813,6 +819,8 @@ async function tickIssuesForBatch(batch, lineReadings) {
         binId,
         productName: ps.lastProductName,
         newBaseline: stored,
+        destination: null,
+        siloName: ps.lastSiloName || null,
       })
     }
   }
@@ -906,6 +914,8 @@ async function tickIssuesForBatch(batch, lineReadings) {
           nsIssueId: nsIssueId ? String(nsIssueId) : null,
           status: 'completed',
           resetTime: observedAt,
+          destination: m.destination || null,
+          siloName: m.siloName || null,
         })
       }
       await batch.update({ lastIssueAt: observedAt })
@@ -1055,4 +1065,5 @@ module.exports = {
   issueIngredient,
   tickAllActiveBatches,
   clearStaleBatches,
+  normalizeTankRef,
 }
