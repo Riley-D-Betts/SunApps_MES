@@ -90,8 +90,11 @@ const PRODUCT_CATALOG = [
 ]
 
 const BRAND_ALIASES = {
-  // Alexandre
+  // Alexandre — also catches bare "a2" / "a2/a2" inputs because Alexandre
+  // is the only A2 brand on the surge canonical list. If a non-Alexandre
+  // A2 product is added later, revisit this alias.
   alexandre: 'alexandre', alex: 'alexandre',
+  a2: 'alexandre', 'a2/a2': 'alexandre',
   // American Farmer
   'american farmer': 'americanfarmer', americanfarmer: 'americanfarmer',
   // Barista
