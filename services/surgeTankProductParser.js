@@ -79,7 +79,8 @@ const PRODUCT_CATALOG = [
   // Kirkland (Costco)
   { nsId: 4495, name: 'Kirkland 1% Organic Milk',                                brand: 'kirkland',       fatPct: 1,    modifiers: ['organic'] },
   { nsId: 4501, name: 'Kirkland 2% Organic Lac Free Milk',                       brand: 'kirkland',       fatPct: 2,    modifiers: ['organic', 'lacfree'] },
-  { nsId: null, name: 'Kirkland 2% Organic Lactose Free',                        brand: 'kirkland',       fatPct: 2,    modifiers: ['organic', 'lacfree'] }, // TODO: populate NS item ID when SKU is created
+  // NOTE: "Kirkland 2% Organic Lactose Free" (NS 7462) is the obsolete SKU
+  // and intentionally NOT in the catalog. Use 4501 (Lac Free Milk) instead.
   { nsId: 4498, name: 'Kirkland 2% Organic Milk',                                brand: 'kirkland',       fatPct: 2,    modifiers: ['organic'] },
   { nsId: 4548, name: 'Kirkland Chocolate 2% Organic Milk - Aseptic',            brand: 'kirkland',       fatPct: 2,    modifiers: ['organic', 'chocolate'] },
   { nsId: 6420, name: 'Kirkland Organic Whole Milk',                             brand: 'kirkland',       fatPct: null, modifiers: ['organic', 'whole'] },
