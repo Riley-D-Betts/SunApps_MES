@@ -238,10 +238,11 @@ No gallons-based emptied threshold (drop existing `mainGallons < 10 after ≥ 2 
 
 ## 6. Cross-cutting work not in this plan
 
-Out of scope for the batch-lifecycle redesign but called out by the source description (`Milk Tracking using Sunapps_MES.txt`) — track separately:
+Out of scope for the batch-lifecycle redesign but called out by the source description (`Milk Tracking using Sunapps_MES.txt`) or surfaced during implementation — track separately:
 
-1. **Inventory back-up adjustments.** Bin-tracked transactions fail when a silo is inflowing and outflowing simultaneously. Need a compensating-adjustment service: adjust up when source bin is short, adjust back down when it flattens. Touches all three stages.
-2. **Type-2 BOM expansion.** BTs producing type-2 (standardization in a BT — e.g. raw org skim + raw org cream → raw org 2%) need item resolver coverage. Adjacent to but distinct from this plan.
+1. **Lot-tracked BOM component handling.** Surge tank WO BOMs include lot-tracked vitamin / additive items (NS 530 Vitamin A&D₃, NS 531 Vitamin D₃, NS 7235 Trisodium Citrate) alongside the bin-tracked raw milk inputs. The current `buildWoIssueBody` zeros non-target lines without `inventoryDetail`, and NS rejects with HTTP 400 `"Please configure the inventory detail in line N"` at the first lot-tracked line — *before* validating inventory quantity. Every tick against ST83/ST84 has been getting 400'd at this validator; the "issued 0 lb" on the dashboard is the visible symptom. **Blocks #2 below** (NS never reaches the inventory check until this body shape is fixed). Probe captured in `scripts/probeInventoryShortage.js`. Memory: [[lot-tracked-bom-components]].
+2. **Inventory back-up adjustments.** Bin-tracked transactions fail when a silo is inflowing and outflowing simultaneously. Need a compensating-adjustment service: adjust up when source bin is short, adjust back down when it flattens. Touches all three stages.
+3. **Type-2 BOM expansion.** BTs producing type-2 (standardization in a BT — e.g. raw org skim + raw org cream → raw org 2%) need item resolver coverage. Adjacent to but distinct from this plan.
 
 ---
 
