@@ -210,6 +210,7 @@ const PRODUCT_INDEX_ITEM_MAP = {
 // surge WO and (b) decide whether to warn on a non-canonical feed.
 const RAW_FG_TO_FG_MAP = {
   8333: 3278,  // Raw Alexandre Eco Dairy A2/A2 Organic 4% Whole Milk → Alexandre …
+  8371: 4899,  // Raw Alexandre Eco Dairy A2/A2 Organic Chocolate 4% Milk → Alexandre … Chocolate 4% Milk
   8362: 2793,  // Raw Conventional Milk 1% → Conventional Milk 1%
   8361: 3471,  // Raw Conventional Milk 2% → Conventional Milk 2%
   8360: 2808,  // Raw Conventional Milk 3.25% → Conventional Milk 3.25%

@@ -44,7 +44,7 @@ const PRODUCT_CATALOG = [
   // are intentionally absent.
   // Alexandre Eco Dairy
   { nsId: 8333, name: 'Raw Alexandre Eco Dairy A2/A2 Organic 4% Whole Milk', brand: 'alexandre', fatPct: 4, modifiers: ['organic', 'a2', 'whole'] },
-  { nsId: null, name: 'Raw Alexandre Eco Dairy A2/A2 Organic Chocolate 4% Milk', brand: 'alexandre', fatPct: 4, modifiers: ['organic', 'a2', 'chocolate'] }, // TODO: populate NS item ID when raw SKU is created (sibling of FG 4899)
+  { nsId: 8371, name: 'Raw Alexandre Eco Dairy A2/A2 Organic Chocolate 4% Milk', brand: 'alexandre', fatPct: 4, modifiers: ['organic', 'a2', 'chocolate'] },
 
   // DFI (Diversified Foods Inc)
   { nsId: 8357, name: 'Raw DFI Holiday Nog', brand: 'dfi', fatPct: null, modifiers: ['nog'] },
