@@ -18,6 +18,11 @@ const STATE_RUNNING = 'running'
 
 const IDLE_RPM_THRESHOLD = 100
 const TICKS_TO_CLOSE_ON_IDLE = 30 // 5 min @ 10s/tick
+// Recovery fallback: if SM is IDLE but the separator is clearly running
+// (feedPermit + RPM up + startable) for this many ticks, open a batch even
+// without a rising edge. Catches the post-restart case where feedPermit was
+// already true when the service came back up and no hydratable DB row existed.
+const RECOVERY_TICKS_TO_OPEN = 6 // 60s @ 10s/tick
 
 // End reasons that represent an in-flight boundary change (source/dest/product
 // swap mid-run). Only these warrant a same-tick re-open — transfer_complete,
@@ -34,6 +39,7 @@ let openBatchId = null
 let prevSnapshot = null
 let rpmLowTicks = 0
 let feedPermitZeroTicks = 0
+let runningWhileIdleTicks = 0
 
 function reset() {
   machineState = STATE_IDLE
@@ -41,6 +47,7 @@ function reset() {
   prevSnapshot = null
   rpmLowTicks = 0
   feedPermitZeroTicks = 0
+  runningWhileIdleTicks = 0
 }
 
 /**
@@ -159,6 +166,7 @@ async function openBatch(snap) {
   machineState = STATE_RUNNING
   rpmLowTicks = 0
   feedPermitZeroTicks = 0
+  runningWhileIdleTicks = 0
   console.log(`[SeparatorSM] OPEN batch ${batchId} sourceSilo=${sourceSilo} dest=${snap.xfrDestinations.filter(Boolean).join(', ')}`)
   statusStore.pushEvent('separation.start', `Opened separation batch ${batchId}`, {
     batchId, sourceSilo, destinations: snap.xfrDestinations.filter(Boolean),
@@ -301,6 +309,22 @@ async function tick(historian) {
   } else if (machineState === STATE_IDLE) {
     if (feedPermitRisingEdge(prevSnapshot, snap) && canStart(snap)) {
       await openBatch(snap)
+    } else if (snap.feedPermit && (Number(snap.motorRpm) || 0) >= IDLE_RPM_THRESHOLD && canStart(snap)) {
+      // Recovery: equipment is already running but we never saw a rising edge
+      // (e.g., MES restarted while separator was active and no DB row was
+      // hydratable). Open once we've seen sustained running.
+      runningWhileIdleTicks++
+      if (runningWhileIdleTicks >= RECOVERY_TICKS_TO_OPEN) {
+        console.log(`[SeparatorSM] RECOVERY open: feedPermit+RPM held for ${runningWhileIdleTicks} ticks without rising edge`)
+        statusStore.pushEvent('separation.recovery', `Opened batch via recovery fallback (no rising edge)`, {
+          motorRpm: snap.motorRpm,
+          source: snap.xfrSource,
+          destinations: snap.xfrDestinations.filter(Boolean),
+        })
+        await openBatch(snap)
+      }
+    } else {
+      runningWhileIdleTicks = 0
     }
   }
 
@@ -327,6 +351,8 @@ function setSeparatorStatusSnapshot(snap) {
     itemId: snap.xfrItemId,
     rpmLowTicks,
     feedPermitZeroTicks,
+    runningWhileIdleTicks,
+    recoveryTicksToOpen: RECOVERY_TICKS_TO_OPEN,
   })
 }
 
@@ -374,7 +400,7 @@ async function hydrateFromDb() {
 }
 
 function getState() {
-  return { machineState, openBatchId, rpmLowTicks, feedPermitZeroTicks }
+  return { machineState, openBatchId, rpmLowTicks, feedPermitZeroTicks, runningWhileIdleTicks }
 }
 
 module.exports = {
