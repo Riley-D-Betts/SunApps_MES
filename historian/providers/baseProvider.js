@@ -98,7 +98,11 @@ class BaseProvider {
    *   stepName: string,
    *   active: boolean,
    *   targetComplete: boolean,
-   *   density: number
+   *   density: number,
+   *   memRequestedBy: string,
+   *   memSiloName: string,
+   *   memProductName: string,
+   *   memTotalizerLbs: number
    * }>>}
    */
   async getMilkLineStatus() {

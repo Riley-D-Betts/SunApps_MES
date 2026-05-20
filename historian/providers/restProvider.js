@@ -86,6 +86,13 @@ const TAGS = {
   LINE_TARGET_COMPLETE: '.STAT_TARGETCOMPLETE',
   LINE_INHIBITED:       '.STAT_INHIBITED',
   LINE_MEM_TOTALIZER:   '.MEMBATCHTOTALIZER',    // previous batch totalizer
+  // Memory ("MEM") tags — SCADA latches the just-completed flow's values on
+  // these after the live tags clear to "None". Reliable source for tail-catcher
+  // routing after a totalizer reset, when the live REQUESTEDBY/SILONAME are
+  // already empty.
+  LINE_MEM_REQUESTED_BY:   '.MEMREQUESTEDBY',
+  LINE_MEM_SILO_NAME:      '.MEMSILONAME',
+  LINE_MEM_PRODUCT_NAME:   '.MEMSILOPRODUCTNAME',
 
   // Silo tags — the .GALLONS/.LBS/.LevelValue/.TempValue tags exist under the
   // UPPERCASE prefix but are bad quality (OpcQuality=0). The PLC writes live
@@ -683,17 +690,21 @@ class RestProvider extends BaseProvider {
   async getMilkLineStatus() {
     const lineNames = ['ML1', 'ML2', 'ML3', 'ML4', 'CL1', 'CL2']
     const suffixes = [
-      TAGS.LINE_TOTALIZER,        // 0  - batch totalizer (LBS)
-      TAGS.LINE_PRODUCT_NAME,     // 1  - product name from silo
-      TAGS.LINE_PRODUCT_CODE,     // 2  - product code
-      TAGS.LINE_SILO_NAME,        // 3  - source silo name
-      TAGS.LINE_REQUESTED_BY,     // 4  - destination vessel
-      TAGS.LINE_REQUESTED_TARGET, // 5  - LBS requested
-      TAGS.LINE_MODE,             // 6  - mode string
-      TAGS.LINE_STEP_NAME,        // 7  - batch step name
-      TAGS.LINE_ACTIVE,           // 8  - is active
-      TAGS.LINE_TARGET_COMPLETE,  // 9  - target complete flag
-      TAGS.LINE_DENSITY,          // 10 - product density PPG
+      TAGS.LINE_TOTALIZER,         // 0  - batch totalizer (LBS)
+      TAGS.LINE_PRODUCT_NAME,      // 1  - product name from silo
+      TAGS.LINE_PRODUCT_CODE,      // 2  - product code
+      TAGS.LINE_SILO_NAME,         // 3  - source silo name
+      TAGS.LINE_REQUESTED_BY,      // 4  - destination vessel (live)
+      TAGS.LINE_REQUESTED_TARGET,  // 5  - LBS requested
+      TAGS.LINE_MODE,              // 6  - mode string
+      TAGS.LINE_STEP_NAME,         // 7  - batch step name
+      TAGS.LINE_ACTIVE,            // 8  - is active
+      TAGS.LINE_TARGET_COMPLETE,   // 9  - target complete flag
+      TAGS.LINE_DENSITY,           // 10 - product density PPG
+      TAGS.LINE_MEM_REQUESTED_BY,  // 11 - destination latched after flow ended
+      TAGS.LINE_MEM_SILO_NAME,     // 12 - source silo latched after flow ended
+      TAGS.LINE_MEM_PRODUCT_NAME,  // 13 - product latched after flow ended
+      TAGS.LINE_MEM_TOTALIZER,     // 14 - previous batch total LBS
     ]
 
     // Build all FQNs and fetch in parallel
@@ -719,6 +730,10 @@ class RestProvider extends BaseProvider {
         active: !!val(8),
         targetComplete: !!val(9),
         density: val(10),
+        memRequestedBy: txt(11),
+        memSiloName: txt(12),
+        memProductName: txt(13),
+        memTotalizerLbs: val(14),
       }
     })
   }

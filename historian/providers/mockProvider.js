@@ -307,6 +307,10 @@ class MockProvider extends BaseProvider {
         active,
         targetComplete: false,
         density: active ? 8.6 : 0,
+        memRequestedBy: mockDests[line] || '',
+        memSiloName: mockSilos[line] || '',
+        memProductName: mockProducts[line] || '',
+        memTotalizerLbs: this._lineTotalizers[line],
       }
     })
   }

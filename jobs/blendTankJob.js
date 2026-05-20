@@ -9,9 +9,12 @@ const ALL_LINES_STOPPED_IDLE_MS = 5 * 60 * 1000
 
 const LINE_RESET_THRESHOLD_LBS = 100
 
-// Atlas WO lifecycle string that means "production WO is active." Any other
-// value (Complete / CIP / Idle / Sterile / …) is treated as non-eligible.
-const WO_STATE_RUNNING = 'Running'
+// Atlas WO lifecycle tags (CurrentWOState, JobRunning, CurrentWO, CurrentItem)
+// were observed frozen in the historian for 24+ hours across all four blend
+// tanks — Atlas is no longer maintaining that namespace. We still pass the
+// value through to dashboard/logging as advisory, but it does NOT drive batch
+// open/close. NOTE_STRING + actual line flow are the only signals trusted to
+// decide when a batch is running.
 
 // Sentinel NOTE_STRING values that look like real strings but indicate
 // "not in production." Operators (and the PLC defaults) write things like
@@ -32,19 +35,19 @@ function validStr(val) {
 // sees line flow (a sitting tank between fill and drain) must NOT auto-close.
 // The idle timer only arms once at least one line tick has fed the tank.
 const tankState = {
-  BlendTank1A: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false, openedOnRunning: false },
-  BlendTank1B: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false, openedOnRunning: false },
-  BlendTank2A: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false, openedOnRunning: false },
-  BlendTank2B: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false, openedOnRunning: false },
+  BlendTank1A: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false },
+  BlendTank1B: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false },
+  BlendTank2A: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false },
+  BlendTank2B: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false },
 }
 
 const lineState = {
-  ML1: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
-  ML2: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
-  ML3: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
-  ML4: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
-  CL1: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
-  CL2: { prevValue: null, productName: '', siloName: '', requestedBy: '' },
+  ML1: { prevValue: null, productName: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  ML2: { prevValue: null, productName: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  ML3: { prevValue: null, productName: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  ML4: { prevValue: null, productName: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  CL1: { prevValue: null, productName: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  CL2: { prevValue: null, productName: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
 }
 
 let lastPollTime = new Date()
@@ -70,7 +73,6 @@ async function hydrateFromDb(MesBlendTankBatch) {
       const row = newestByTank[tankId]
       if (!row) continue
       tankState[tankId].productName = row.productName
-      tankState[tankId].currentWOState = WO_STATE_RUNNING
       tankState[tankId].batchActive = true
       tankState[tankId].seeded = true
       tankState[tankId].batchStartedAt = row.detectedAt ? new Date(row.detectedAt).getTime() : now
@@ -80,9 +82,6 @@ async function hydrateFromDb(MesBlendTankBatch) {
       // had been actively filled before. If no flow arrives within 5 min,
       // batch closes; if flow does arrive, lastFlowAt advances normally.
       tankState[tankId].hasSeenFlow = true
-      // Conservatively assume the hydrated batch was opened via WOState=Running
-      // so wo_state_left_running still applies if Atlas closes it.
-      tankState[tankId].openedOnRunning = true
       console.log(`[BlendTankJob] Hydrated ${tankId} from DB: "${row.productName}" (active since ${row.detectedAt})`)
     }
     console.log(`[BlendTankJob] Hydrated tankState from ${rows.length} active row(s)`)
@@ -132,7 +131,6 @@ async function endBatch(tankId, prev, reason) {
   prev.batchStartedAt = null
   prev.lastFlowAt = null
   prev.hasSeenFlow = false
-  prev.openedOnRunning = false
   try {
     await blendTankMesService.processWOEnd({ tankId, productName, detectedAt: new Date().toISOString() })
   } catch (err) {
@@ -154,8 +152,6 @@ async function run(historian) {
 
       const hasProduct = !!validStr(productName)
       const hadProduct = !!prev.productName
-      const isRunning = currentWOState === WO_STATE_RUNNING
-      const wasRunning = prev.currentWOState === WO_STATE_RUNNING
       const feedingLines = linesFeedingTank(lineReadings, tankId)
       if (feedingLines.length > 0) {
         prev.lastFlowAt = now
@@ -163,31 +159,26 @@ async function run(historian) {
       }
 
       if (!prev.seeded) {
-        // First poll: snapshot the current state without firing events. If the
-        // tank is already Running with a product when we boot, hydrateFromDb
-        // should have already opened the batch; we just record observed values.
+        // First poll: snapshot the current state without firing events. If a
+        // batch was active in DB when we booted, hydrateFromDb has already
+        // re-opened it; we just record observed values.
         if (!productName && !currentWOState) continue
         prev.productName = productName
         prev.currentWOState = currentWOState
         prev.seeded = true
-        console.log(`[BlendTankJob] Seeding ${tankId}: product="${productName}" WOState="${currentWOState}"`)
+        console.log(`[BlendTankJob] Seeding ${tankId}: product="${productName}" WOState="${currentWOState}" (advisory only)`)
         continue
       }
 
       // ── END pass ──────────────────────────────────────────────────────
-      // Order matters: explicit WO/state signals take priority over the
-      // line-flow idle test so a CIP that pauses lines mid-batch closes
-      // immediately rather than waiting 5 min. The all_lines_stopped check
-      // only arms once we've actually seen flow on this batch — batches
-      // that open from WOState=Running on a sitting tank shouldn't
-      // auto-close. wo_state_left_running only fires if the batch was
-      // OPENED on the Running signal (openedOnRunning=true). Batches
-      // opened on line-flow alone (WOState stayed Complete from a previous
-      // WO) don't have a Running transition to detect.
+      // Atlas's CurrentWOState is frozen on these tanks and can't be trusted,
+      // so close decisions come from NOTE_STRING activity and the line-flow
+      // idle timer. all_lines_stopped only arms once we've actually seen flow
+      // on this batch — opening a batch from a stale product name and then
+      // sitting idle would otherwise close prematurely.
       let endReason = null
       if (prev.batchActive) {
-        if (prev.openedOnRunning && wasRunning && !isRunning) endReason = 'wo_state_left_running'
-        else if (hadProduct && !hasProduct) endReason = 'note_cleared'
+        if (hadProduct && !hasProduct) endReason = 'note_cleared'
         else if (hasProduct && productName !== prev.productName) endReason = 'product_change'
         else if (prev.hasSeenFlow && prev.lastFlowAt && (now - prev.lastFlowAt) > ALL_LINES_STOPPED_IDLE_MS) endReason = 'all_lines_stopped'
       }
@@ -196,34 +187,33 @@ async function run(historian) {
       }
 
       // ── START pass ────────────────────────────────────────────────────
-      // Open a batch when EITHER Atlas marks WOState=Running OR we see
-      // active line flow into the tank — whichever fires first. Real
-      // operator workflow can lead either way: Atlas may flip Running
-      // before lines start (Atlas-led), or operator may start dispensing
-      // before opening the WO record (operator-led, common at WO
-      // transitions). Caveat: a batch opened on line-flow alone resolves
-      // to whatever NOTE_STRING currently says — if NOTE_STRING is still
-      // stale from the previous WO, the batch will be misattributed until
-      // NOTE_STRING is updated.
-      if (!prev.batchActive && hasProduct && (isRunning || feedingLines.length > 0)) {
-        const reason = isRunning
-          ? (feedingLines.length > 0 ? 'WOState=Running + flow' : 'WOState=Running')
-          : 'line flow (WOState=' + (currentWOState || 'none') + ')'
+      // Open a batch only when an actual line is currently feeding this tank
+      // AND NOTE_STRING names a real product. CurrentWOState=Running is no
+      // longer a trigger — Atlas's tag is stale (stuck Running for ~26 days
+      // on BT1A, "Complete" forever on BT1B/2A/2B), so trusting it caused
+      // continuous flap-open after every idle close.
+      if (!prev.batchActive && hasProduct && feedingLines.length > 0) {
+        const reason = `line flow (${feedingLines.map(l => l.line).join(',')})`
         await startBatch(tankId, prev, status, reason)
-        // Remember how the batch was opened so the END pass knows whether
-        // wo_state_left_running is applicable. Set after startBatch so the
-        // helper's reset of prev fields doesn't clobber it.
-        prev.openedOnRunning = !!isRunning
       }
 
       prev.productName = productName
       prev.currentWOState = currentWOState
     }
 
-    // Line tail-catcher — unchanged. Captures totalizer resets between ticks
-    // so flows that completed inside one 5-min tick window aren't lost.
+    // Line tail-catcher — captures totalizer resets between ticks so flows
+    // that completed inside one polling window aren't lost. Routing data
+    // (destination, source silo, product) comes from MEM* tags, which SCADA
+    // latches the moment BATCHTOTALIZER resets. The live REQUESTEDBY /
+    // CURRENTSILONAME / CURRENTSILOPRODUCTNAME tags clear to "None" at that
+    // same moment, so if a poll lands here we wouldn't have the routing
+    // string otherwise — caching the live values from prior polls was racy
+    // (a flow that ran entirely between two polls would leave them empty).
     for (const reading of lineReadings) {
-      const { line, totalizerLbs, productName, siloName, requestedBy, requestedTargetLbs } = reading
+      const {
+        line, totalizerLbs, productName, siloName, requestedBy, requestedTargetLbs,
+        memRequestedBy, memSiloName, memProductName, memTotalizerLbs,
+      } = reading
       const prev = lineState[line]
       if (!prev) continue
 
@@ -232,22 +222,32 @@ async function run(historian) {
         if (validStr(productName)) prev.productName = productName
         if (validStr(siloName)) prev.siloName = siloName
         if (validStr(requestedBy)) prev.requestedBy = requestedBy
+        prev.prevMemTotalizer = memTotalizerLbs || 0
         continue
       }
 
       const hadProduct = !!prev.productName
       const hasProduct = !!validStr(productName)
       const totalizerReset = prev.prevValue > LINE_RESET_THRESHOLD_LBS && totalizerLbs < LINE_RESET_THRESHOLD_LBS
+      const memTotalizerAdvanced = (memTotalizerLbs || 0) > (prev.prevMemTotalizer || 0) + LINE_RESET_THRESHOLD_LBS
 
       const productCleared = hadProduct && !hasProduct && prev.prevValue > 10
-      if ((totalizerReset || productCleared) && hadProduct) {
-        const batchTotalLbs = totalizerReset ? prev.prevValue : (totalizerLbs > 10 ? totalizerLbs : prev.prevValue)
-        console.log(`[BlendTankJob] Line ${line} batch complete: ${batchTotalLbs.toFixed(1)} LBS of "${prev.productName}" (${prev.siloName || ''} → ${prev.requestedBy || ''})`)
-        statusStore.pushEvent('line.flowComplete', `${line}: ${batchTotalLbs.toFixed(0)} LBS "${prev.productName}" (${prev.siloName || '?'} → ${prev.requestedBy || '?'})`, { line, totalLbs: batchTotalLbs, productName: prev.productName, siloName: prev.siloName, destination: prev.requestedBy })
+      if ((totalizerReset || productCleared || memTotalizerAdvanced) && (hadProduct || validStr(memProductName))) {
+        // Prefer MEM tags — they're SCADA's authoritative "just completed"
+        // record. Fall back to cached live values for any field that's empty.
+        const flowProduct = validStr(memProductName) || prev.productName
+        const flowSilo = validStr(memSiloName) || prev.siloName || ''
+        const flowDest = validStr(memRequestedBy) || prev.requestedBy || ''
+        const batchTotalLbs = memTotalizerLbs > 0
+          ? memTotalizerLbs
+          : (totalizerReset ? prev.prevValue : (totalizerLbs > 10 ? totalizerLbs : prev.prevValue))
+
+        console.log(`[BlendTankJob] Line ${line} batch complete: ${batchTotalLbs.toFixed(1)} LBS of "${flowProduct}" (${flowSilo} → ${flowDest})`)
+        statusStore.pushEvent('line.flowComplete', `${line}: ${batchTotalLbs.toFixed(0)} LBS "${flowProduct}" (${flowSilo || '?'} → ${flowDest || '?'})`, { line, totalLbs: batchTotalLbs, productName: flowProduct, siloName: flowSilo, destination: flowDest })
         try {
           await blendTankMesService.processLineFlow({
-            line, totalLbs: batchTotalLbs, lineProductName: prev.productName,
-            siloName: prev.siloName || '', destination: prev.requestedBy || '',
+            line, totalLbs: batchTotalLbs, lineProductName: flowProduct,
+            siloName: flowSilo, destination: flowDest,
             requestedTargetLbs: prev.requestedTargetLbs || 0, resetTime: new Date().toISOString(),
           })
         } catch (err) {
@@ -260,6 +260,7 @@ async function run(historian) {
       if (validStr(requestedBy)) prev.requestedBy = requestedBy
       if (requestedTargetLbs) prev.requestedTargetLbs = requestedTargetLbs
       prev.prevValue = totalizerLbs
+      prev.prevMemTotalizer = memTotalizerLbs || 0
     }
 
     logStatusSummary(statuses, lineReadings)
