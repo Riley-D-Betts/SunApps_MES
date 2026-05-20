@@ -163,19 +163,33 @@ async function _resolveLayer3Source(data, historian) {
   if (!feedingFromEntName) return null
 
   if (isBlendTankRef(feedingFromEntName)) {
-    const blendBatch = await db.MesBlendTankBatch.findOne({
+    let blendBatch = await db.MesBlendTankBatch.findOne({
       where: { tankId: feedingFromEntName, status: 'active' },
       order: [['detectedAt', 'DESC']],
     })
     if (!blendBatch?.mesItem) {
-      console.warn(`[SurgeTankMesService] _resolveLayer3Source: no active blend batch on ${feedingFromEntName} — deferring`)
+      // Blend tank may have finished before the surge batch resolved. Fall back
+      // to the most recent batch on that tank within 24 h — its mesItem is still
+      // the right component since product just flowed through the UHT.
+      blendBatch = await db.MesBlendTankBatch.findOne({
+        where: {
+          tankId: feedingFromEntName,
+          mesItem: { [db.Sequelize.Op.ne]: null },
+          detectedAt: { [db.Sequelize.Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        },
+        order: [['detectedAt', 'DESC']],
+      })
+    }
+    if (!blendBatch?.mesItem) {
+      console.warn(`[SurgeTankMesService] _resolveLayer3Source: no blend batch (active or recent) on ${feedingFromEntName} — deferring`)
       return null
     }
+    const resolvedFrom = blendBatch.status === 'active' ? 'blend-tank' : 'blend-tank-recent'
     return {
       itemId: String(blendBatch.mesItem),
       itemName: blendBatch.productName,
       binId: itemConfig.getBinId(feedingFromEntName),
-      resolvedFrom: 'blend-tank',
+      resolvedFrom,
       layerSkipReason: null,
     }
   }
@@ -271,19 +285,30 @@ async function resolveSurgeTankComponent(batch, historian) {
   }
 
   if (isBlendTankRef(feedingFromEntName)) {
-    const blendBatch = await db.MesBlendTankBatch.findOne({
+    let blendBatch = await db.MesBlendTankBatch.findOne({
       where: { tankId: feedingFromEntName, status: 'active' },
       order: [['detectedAt', 'DESC']],
     })
     if (!blendBatch?.mesItem) {
-      console.warn(`[SurgeTankMesService] No active blend-tank batch on ${feedingFromEntName} — cannot resolve component`)
+      blendBatch = await db.MesBlendTankBatch.findOne({
+        where: {
+          tankId: feedingFromEntName,
+          mesItem: { [db.Sequelize.Op.ne]: null },
+          detectedAt: { [db.Sequelize.Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        },
+        order: [['detectedAt', 'DESC']],
+      })
+    }
+    if (!blendBatch?.mesItem) {
+      console.warn(`[SurgeTankMesService] No blend-tank batch (active or recent) on ${feedingFromEntName} — cannot resolve component`)
       return null
     }
+    const resolvedFrom = blendBatch.status === 'active' ? 'blend-tank-batch' : 'blend-tank-batch-recent'
     return {
       itemId: String(blendBatch.mesItem),
       itemName: blendBatch.productName,
       binId: itemConfig.getBinId(feedingFromEntName),
-      resolvedFrom: 'blend-tank-batch',
+      resolvedFrom,
     }
   }
 
