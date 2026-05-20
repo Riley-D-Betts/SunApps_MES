@@ -2,6 +2,7 @@ const blendTankMesService = require('../services/blendTankMesService')
 const notifyService = require('../services/notifyService')
 const statusStore = require('../services/statusStore')
 const productParser = require('../services/blendTankProductParser')
+const db = require('../models')
 
 // All-lines-stopped idle window. Once every feeding line has been quiet
 // (inactive or no totalizer advance) for this long, the batch closes with
@@ -271,14 +272,40 @@ async function run(historian) {
     // runs at batch-open time in processWOStart, but waiting for that means
     // operators stare at a raw "Kirkland Whole" string with no NS context
     // until a feeding line fires. Cheap to run every poll — pure string match.
+
+    // Latest completed (or any) batch per tank — shown when idle so the
+    // operator can see the most recent WO without needing to scroll history.
+    const latestBatchRows = await Promise.all(
+      statuses.map(s => db.MesBlendTankBatch.findOne({
+        where: { tankId: s.tankId },
+        order: [['detectedAt', 'DESC']],
+        attributes: ['tankId', 'productName', 'nsWorkOrderId', 'nsWorkOrderNumber', 'status', 'detectedAt', 'completedAt'],
+      }))
+    )
+    const latestByTank = {}
+    for (const row of latestBatchRows) {
+      if (row) latestByTank[row.tankId] = row
+    }
+
     const tanks = statuses.map(s => {
       const parsed = s.productName ? productParser.parseProductName(s.productName) : null
+      const latest = latestByTank[s.tankId]
       return {
         ...s,
         batchActive: !!tankState[s.tankId]?.batchActive,
         parsed: parsed
           ? { nsId: parsed.nsId, name: parsed.name, confidence: parsed.confidence }
           : (s.productName ? { nsId: null, name: null, confidence: 'none' } : null),
+        latestBatch: latest
+          ? {
+              nsWorkOrderId: latest.nsWorkOrderId,
+              nsWorkOrderNumber: latest.nsWorkOrderNumber,
+              status: latest.status,
+              productName: latest.productName,
+              detectedAt: latest.detectedAt,
+              completedAt: latest.completedAt,
+            }
+          : null,
       }
     })
     statusStore.setBlendTanks({
