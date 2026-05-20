@@ -315,13 +315,27 @@ async function tick(historian) {
       // hydratable). Open once we've seen sustained running.
       runningWhileIdleTicks++
       if (runningWhileIdleTicks >= RECOVERY_TICKS_TO_OPEN) {
-        console.log(`[SeparatorSM] RECOVERY open: feedPermit+RPM held for ${runningWhileIdleTicks} ticks without rising edge`)
-        statusStore.pushEvent('separation.recovery', `Opened batch via recovery fallback (no rising edge)`, {
-          motorRpm: snap.motorRpm,
-          source: snap.xfrSource,
-          destinations: snap.xfrDestinations.filter(Boolean),
-        })
-        await openBatch(snap)
+        console.log(`[SeparatorSM] RECOVERY attempt: feedPermit+RPM held for ${runningWhileIdleTicks} ticks without rising edge`)
+        // Reset BEFORE awaiting openBatch so a thrown error doesn't leave the
+        // counter pinned ≥ threshold and spam an open attempt every tick. On
+        // failure we throttle back to one attempt per recovery window.
+        runningWhileIdleTicks = 0
+        try {
+          await openBatch(snap)
+          statusStore.pushEvent('separation.recovery', `Opened batch via recovery fallback (no rising edge)`, {
+            motorRpm: snap.motorRpm,
+            source: snap.xfrSource,
+            destinations: snap.xfrDestinations.filter(Boolean),
+          })
+        } catch (err) {
+          console.error(`[SeparatorSM] RECOVERY open failed: ${err.message}`)
+          statusStore.pushEvent('separation.recovery.error', `Recovery open failed: ${err.message}`, {
+            motorRpm: snap.motorRpm,
+            source: snap.xfrSource,
+            destinations: snap.xfrDestinations.filter(Boolean),
+            stack: err.stack,
+          })
+        }
       }
     } else {
       runningWhileIdleTicks = 0
