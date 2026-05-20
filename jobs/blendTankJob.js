@@ -1,6 +1,7 @@
 const blendTankMesService = require('../services/blendTankMesService')
 const notifyService = require('../services/notifyService')
 const statusStore = require('../services/statusStore')
+const productParser = require('../services/blendTankProductParser')
 
 // All-lines-stopped idle window. Once every feeding line has been quiet
 // (inactive or no totalizer advance) for this long, the batch closes with
@@ -265,10 +266,21 @@ async function run(historian) {
 
     logStatusSummary(statuses, lineReadings)
 
-    const tanks = statuses.map(s => ({
-      ...s,
-      batchActive: !!tankState[s.tankId]?.batchActive,
-    }))
+    // Parse NOTE_STRING up-front so the dashboard can show the resolved item
+    // (NS id + confidence + name) even before a batch opens. The same parser
+    // runs at batch-open time in processWOStart, but waiting for that means
+    // operators stare at a raw "Kirkland Whole" string with no NS context
+    // until a feeding line fires. Cheap to run every poll — pure string match.
+    const tanks = statuses.map(s => {
+      const parsed = s.productName ? productParser.parseProductName(s.productName) : null
+      return {
+        ...s,
+        batchActive: !!tankState[s.tankId]?.batchActive,
+        parsed: parsed
+          ? { nsId: parsed.nsId, name: parsed.name, confidence: parsed.confidence }
+          : (s.productName ? { nsId: null, name: null, confidence: 'none' } : null),
+      }
+    })
     statusStore.setBlendTanks({
       tanks,
       lines: lineReadings,
