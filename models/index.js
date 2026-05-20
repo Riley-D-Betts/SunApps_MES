@@ -107,6 +107,22 @@ db.ensureRuntimeSchema = async function () {
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lastTickAt' AND Object_ID = Object_ID(N'MesSeparationBatches'))
       ALTER TABLE MesSeparationBatches ADD lastTickAt DATETIME2 NULL;
   `)
+  // destinations / prev*Json originally created as NVARCHAR(500). The
+  // resolved destinations payload (raw + resolved + source) blows past that,
+  // breaking every openBatch with "string or binary data would be truncated".
+  // max_length=-1 in sys.columns means NVARCHAR(MAX), so this is idempotent.
+  await sequelize.query(`
+    IF EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'destinations' AND Object_ID = Object_ID(N'MesSeparationBatches') AND max_length <> -1)
+      ALTER TABLE MesSeparationBatches ALTER COLUMN destinations NVARCHAR(MAX) NULL;
+  `)
+  await sequelize.query(`
+    IF EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'prevDestinationsJson' AND Object_ID = Object_ID(N'MesSeparationBatches') AND max_length <> -1)
+      ALTER TABLE MesSeparationBatches ALTER COLUMN prevDestinationsJson NVARCHAR(MAX) NULL;
+  `)
+  await sequelize.query(`
+    IF EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'prevIndexCodesJson' AND Object_ID = Object_ID(N'MesSeparationBatches') AND max_length <> -1)
+      ALTER TABLE MesSeparationBatches ALTER COLUMN prevIndexCodesJson NVARCHAR(MAX) NULL;
+  `)
 
   // Seed MesFgInputPairings from the canonical RAW_FG_TO_FG_MAP. Idempotent —
   // findOrCreate on the unique (fgItemId, rawInputItemId) index skips existing

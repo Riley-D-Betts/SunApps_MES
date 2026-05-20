@@ -49,7 +49,7 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
       },
       destinations: {
-        type: DataTypes.STRING(500),
+        type: DataTypes.TEXT,
         allowNull: true,
       },
       itemId: {
@@ -97,11 +97,11 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
       },
       prevDestinationsJson: {
-        type: DataTypes.STRING(500),
+        type: DataTypes.TEXT,
         allowNull: true,
       },
       prevIndexCodesJson: {
-        type: DataTypes.STRING(500),
+        type: DataTypes.TEXT,
         allowNull: true,
       },
       // Last per-tick observation timestamp. lastTickAt vs createdAt tells us
