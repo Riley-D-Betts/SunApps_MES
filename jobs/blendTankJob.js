@@ -147,6 +147,48 @@ async function run(historian) {
     const lineReadings = await historian.getMilkLineStatus()
     const now = Date.now()
 
+    // Pre-statuses tail-catcher pass: fire processLineFlow for any line resets
+    // BEFORE the statuses loop can close batches. Without this ordering, a poll
+    // where NOTE_STRING clears at the same time as a line reset causes endBatch
+    // to mark the batch 'completed' first, leaving processLineFlow with no active
+    // batch to match — the flow lands as 'unmatched' and the NS WO gets no issues
+    // or completions (WO1383 root cause).
+    for (const reading of lineReadings) {
+      const {
+        line, totalizerLbs, productName, siloName, requestedBy, requestedTargetLbs,
+        memRequestedBy, memSiloName, memProductName, memTotalizerLbs,
+      } = reading
+      const prev = lineState[line]
+      if (!prev || prev.prevValue === null) continue
+
+      const hadProduct = !!prev.productName
+      const hasProduct = !!validStr(productName)
+      const totalizerReset = prev.prevValue > LINE_RESET_THRESHOLD_LBS && totalizerLbs < LINE_RESET_THRESHOLD_LBS
+      const memTotalizerAdvanced = (memTotalizerLbs || 0) > (prev.prevMemTotalizer || 0) + LINE_RESET_THRESHOLD_LBS
+      const productCleared = hadProduct && !hasProduct && prev.prevValue > 10
+
+      if ((totalizerReset || productCleared || memTotalizerAdvanced) && (hadProduct || validStr(memProductName))) {
+        const flowProduct = validStr(memProductName) || prev.productName
+        const flowSilo = validStr(memSiloName) || prev.siloName || ''
+        const flowDest = validStr(memRequestedBy) || prev.requestedBy || ''
+        const batchTotalLbs = memTotalizerLbs > 0
+          ? memTotalizerLbs
+          : (totalizerReset ? prev.prevValue : (totalizerLbs > 10 ? totalizerLbs : prev.prevValue))
+
+        console.log(`[BlendTankJob] Line ${line} batch complete: ${batchTotalLbs.toFixed(1)} LBS of "${flowProduct}" (${flowSilo} → ${flowDest})`)
+        statusStore.pushEvent('line.flowComplete', `${line}: ${batchTotalLbs.toFixed(0)} LBS "${flowProduct}" (${flowSilo || '?'} → ${flowDest || '?'})`, { line, totalLbs: batchTotalLbs, productName: flowProduct, siloName: flowSilo, destination: flowDest })
+        try {
+          await blendTankMesService.processLineFlow({
+            line, totalLbs: batchTotalLbs, lineProductName: flowProduct,
+            siloName: flowSilo, destination: flowDest,
+            requestedTargetLbs: prev.requestedTargetLbs || 0, resetTime: new Date().toISOString(),
+          })
+        } catch (err) {
+          console.error(`[BlendTankJob] processLineFlow failed for ${line}:`, err.message)
+        }
+      }
+    }
+
     for (const status of statuses) {
       const { tankId, productName, currentWOState } = status
       const prev = tankState[tankId]
@@ -203,18 +245,13 @@ async function run(historian) {
       prev.currentWOState = currentWOState
     }
 
-    // Line tail-catcher — captures totalizer resets between ticks so flows
-    // that completed inside one polling window aren't lost. Routing data
-    // (destination, source silo, product) comes from MEM* tags, which SCADA
-    // latches the moment BATCHTOTALIZER resets. The live REQUESTEDBY /
-    // CURRENTSILONAME / CURRENTSILOPRODUCTNAME tags clear to "None" at that
-    // same moment, so if a poll lands here we wouldn't have the routing
-    // string otherwise — caching the live values from prior polls was racy
-    // (a flow that ran entirely between two polls would leave them empty).
+    // State-update pass: advance prevValue and other line state now that
+    // the tail-catcher (pre-statuses pass above) and endBatch have both run.
+    // MEM* routing tags come from the pre-pass; live tags update here.
     for (const reading of lineReadings) {
       const {
         line, totalizerLbs, productName, siloName, requestedBy, requestedTargetLbs,
-        memRequestedBy, memSiloName, memProductName, memTotalizerLbs,
+        memTotalizerLbs,
       } = reading
       const prev = lineState[line]
       if (!prev) continue
@@ -226,35 +263,6 @@ async function run(historian) {
         if (validStr(requestedBy)) prev.requestedBy = requestedBy
         prev.prevMemTotalizer = memTotalizerLbs || 0
         continue
-      }
-
-      const hadProduct = !!prev.productName
-      const hasProduct = !!validStr(productName)
-      const totalizerReset = prev.prevValue > LINE_RESET_THRESHOLD_LBS && totalizerLbs < LINE_RESET_THRESHOLD_LBS
-      const memTotalizerAdvanced = (memTotalizerLbs || 0) > (prev.prevMemTotalizer || 0) + LINE_RESET_THRESHOLD_LBS
-
-      const productCleared = hadProduct && !hasProduct && prev.prevValue > 10
-      if ((totalizerReset || productCleared || memTotalizerAdvanced) && (hadProduct || validStr(memProductName))) {
-        // Prefer MEM tags — they're SCADA's authoritative "just completed"
-        // record. Fall back to cached live values for any field that's empty.
-        const flowProduct = validStr(memProductName) || prev.productName
-        const flowSilo = validStr(memSiloName) || prev.siloName || ''
-        const flowDest = validStr(memRequestedBy) || prev.requestedBy || ''
-        const batchTotalLbs = memTotalizerLbs > 0
-          ? memTotalizerLbs
-          : (totalizerReset ? prev.prevValue : (totalizerLbs > 10 ? totalizerLbs : prev.prevValue))
-
-        console.log(`[BlendTankJob] Line ${line} batch complete: ${batchTotalLbs.toFixed(1)} LBS of "${flowProduct}" (${flowSilo} → ${flowDest})`)
-        statusStore.pushEvent('line.flowComplete', `${line}: ${batchTotalLbs.toFixed(0)} LBS "${flowProduct}" (${flowSilo || '?'} → ${flowDest || '?'})`, { line, totalLbs: batchTotalLbs, productName: flowProduct, siloName: flowSilo, destination: flowDest })
-        try {
-          await blendTankMesService.processLineFlow({
-            line, totalLbs: batchTotalLbs, lineProductName: flowProduct,
-            siloName: flowSilo, destination: flowDest,
-            requestedTargetLbs: prev.requestedTargetLbs || 0, resetTime: new Date().toISOString(),
-          })
-        } catch (err) {
-          console.error(`[BlendTankJob] processLineFlow failed for ${line}:`, err.message)
-        }
       }
 
       if (validStr(productName)) prev.productName = productName
