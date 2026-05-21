@@ -249,6 +249,14 @@ async function closeBatch(snap, endReason) {
     })
   } catch (err) {
     console.error(`[SeparatorSM] NS-emit failed for batch ${closedBatchId}: ${err.message}`)
+    try {
+      await db.MesSeparationBatch.update(
+        { status: 'error', errorMessage: err.message },
+        { where: { id: closedBatchId } },
+      )
+    } catch (updateErr) {
+      console.error(`[SeparatorSM] Could not mark batch ${closedBatchId} as error: ${updateErr.message}`)
+    }
     if (err.summary) statusStore.pushSeparationBatch(err.summary)
     statusStore.pushEvent('separation.batch.error', `NS emit failed for closed batch`, { error: err.message })
   }

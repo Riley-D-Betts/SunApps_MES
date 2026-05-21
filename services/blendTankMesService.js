@@ -52,6 +52,7 @@ async function buildWoIssueBody(targetItemId, quantity, preferredBinId, bomLines
   }
 
   let allocations = null
+  let resolvedBinId = preferredBinId
   if (tracking.isLot) {
     allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
     const allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
@@ -64,9 +65,19 @@ async function buildWoIssueBody(targetItemId, quantity, preferredBinId, bomLines
       err.allocations = allocations
       throw err
     }
+  } else if (tracking.useBins) {
+    resolvedBinId = await nsInventory.findBinForItem(targetItemId, preferredBinId)
+    if (!resolvedBinId) {
+      const err = new Error(`Insufficient inventory for item ${targetItemId}: no on-hand stock found in any bin at this location`)
+      err.code = 'INSUFFICIENT_INVENTORY'
+      err.itemId = targetItemId
+      err.needed = quantity
+      err.available = 0
+      throw err
+    }
   }
 
-  const assignmentItems = nsInventory.buildAssignmentItems(tracking, quantity, allocations, preferredBinId)
+  const assignmentItems = nsInventory.buildAssignmentItems(tracking, quantity, allocations, resolvedBinId)
 
   const componentEntry = { lineNumber: targetLine.line, quantity }
   if (assignmentItems && assignmentItems.length > 0) {

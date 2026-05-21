@@ -141,6 +141,45 @@ async function findInventoryAllocations(itemId, neededQty, preferredBinId = null
 }
 
 /**
+ * Resolve which bin actually has on-hand stock for a non-lot-tracked item.
+ * Tries preferredBinId first (same preferred-first pattern as
+ * findInventoryAllocations); falls back to any bin at NS_LOCATION_ID that
+ * has positive on-hand. Returns the resolved binId string, or null if NS
+ * reports zero inventory everywhere.
+ */
+async function findBinForItem(itemId, preferredBinId = null) {
+  if (!itemId) return null
+
+  const q = `
+    SELECT bin.id AS bin_id, bal.quantityonhand AS qty
+    FROM inventorybalance bal
+    JOIN bin ON bin.id = bal.binnumber
+    WHERE bal.item = ${Number(itemId)}
+      AND bal.location = ${NS_LOCATION_ID}
+      AND bal.quantityonhand > 0
+    ORDER BY bal.quantityonhand DESC
+  `
+
+  let rows
+  try {
+    const res = await core.netsuitePost('/query/v1/suiteql', { q })
+    rows = res?.body?.items || res?.items || []
+  } catch (err) {
+    console.warn(`[NsInventoryLookup] findBinForItem suiteql failed for item ${itemId}:`, err.message.slice(0, 200))
+    return null
+  }
+
+  if (rows.length === 0) return null
+
+  if (preferredBinId != null) {
+    const preferred = rows.find(r => String(r.bin_id) === String(preferredBinId))
+    if (preferred) return String(preferred.bin_id)
+  }
+
+  return String(rows[0].bin_id)
+}
+
+/**
  * Compose the assignment-item array for one BOM line based on its tracking
  * class. allocations is the output of findInventoryAllocations (when
  * lot-tracked) or null (when bin-only — we use preferredBinId directly).
@@ -176,6 +215,7 @@ function buildAssignmentItems({ isLot, useBins }, totalQty, allocations, preferr
 module.exports = {
   getItemTracking,
   findInventoryAllocations,
+  findBinForItem,
   buildAssignmentItems,
   NS_LOCATION_ID,
 }

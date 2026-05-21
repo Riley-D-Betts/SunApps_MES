@@ -174,6 +174,7 @@ async function _resolveLayer3Source(data, historian) {
       blendBatch = await db.MesBlendTankBatch.findOne({
         where: {
           tankId: feedingFromEntName,
+          status: 'completed',
           mesItem: { [db.Sequelize.Op.ne]: null },
           detectedAt: { [db.Sequelize.Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) },
         },
@@ -293,6 +294,7 @@ async function resolveSurgeTankComponent(batch, historian) {
       blendBatch = await db.MesBlendTankBatch.findOne({
         where: {
           tankId: feedingFromEntName,
+          status: 'completed',
           mesItem: { [db.Sequelize.Op.ne]: null },
           detectedAt: { [db.Sequelize.Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) },
         },
