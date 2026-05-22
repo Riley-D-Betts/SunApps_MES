@@ -24,6 +24,40 @@ function clearBomCache(nsWorkOrderId) {
   _bomCache.delete(nsWorkOrderId)
 }
 
+// If targetItemId isn't already on the WO BOM, PATCH the WO to append it at
+// qty=0, then refetch to pick up the line number NS assigned. Mutates the
+// passed-in bomLines array (and the cache) in place so subsequent issues in
+// the same tick see the new line.
+// Lifted from scripts/recoverBlendTank2AFill.js — same recipe that produced
+// the dynamic raw-FG line operators have been seeing on existing WOs.
+async function ensureItemOnWoBom(nsWorkOrderId, targetItemId, bomLines) {
+  const targetIdStr = String(targetItemId)
+  const existing = bomLines.find(c => String(c.itemId) === targetIdStr)
+  if (existing) return existing
+
+  console.log(`[BlendTankMesService] Item ${targetIdStr} not on WO ${nsWorkOrderId} BOM (lines: ${bomLines.map(b => b.itemId).join(', ') || '(empty)'}) — PATCHing to append`)
+  const wrap = await core.netsuiteGet(`/record/v1/workOrder/${nsWorkOrderId}?expandSubResources=true`)
+  const wo = wrap?.body || wrap
+  const merged = (wo?.item?.items || []).map(c => ({
+    item: { id: String(c.item?.id) },
+    quantity: c.quantity,
+    ...(c.units?.id ? { units: { id: String(c.units.id) } } : {}),
+  }))
+  merged.push({ item: { id: targetIdStr }, quantity: 0 })
+  await core.netsuitePatch(`/record/v1/workOrder/${nsWorkOrderId}`, { item: { items: merged } })
+
+  const refetched = (await core.netsuiteGet(`/record/v1/workOrder/${nsWorkOrderId}?expandSubResources=true`))?.body
+  const newLines = (refetched?.item?.items || []).map(c => ({ line: c.line, itemId: String(c.item?.id) }))
+  const newRow = newLines.find(c => c.itemId === targetIdStr)
+  if (!newRow) throw new Error(`PATCH appended item ${targetIdStr} to WO ${nsWorkOrderId} but it didn't appear on refetch`)
+  console.log(`[BlendTankMesService] Item ${targetIdStr} added to WO ${nsWorkOrderId} at line ${newRow.line}`)
+
+  _bomCache.set(nsWorkOrderId, newLines)
+  bomLines.length = 0
+  bomLines.push(...newLines)
+  return newRow
+}
+
 // Build the transform body for a workOrderIssue that issues quantity lbs of
 // one component (the "target" item) against the named WO BOM line. Returns
 // { body, allocations } — body goes to NS, allocations carries per-(lot,bin)
@@ -43,13 +77,9 @@ function clearBomCache(nsWorkOrderId) {
 //   - status: 1 ("Good") — silently ignored, kept for parity with manufacturing
 //
 // See [[ns-wo-issue-shape]] and [[lot-tracked-bom-components]] memories.
-async function buildWoIssueBody(targetItemId, quantity, preferredBinId, bomLines) {
+async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferredBinId, bomLines) {
   const tracking = await nsInventory.getItemTracking(targetItemId)
-  const targetIdStr = String(targetItemId)
-  const targetLine = bomLines.find(c => String(c.itemId) === targetIdStr)
-  if (!targetLine) {
-    throw new Error(`Item ${targetItemId} is not on the WO BOM (lines: ${bomLines.map(b => b.itemId).join(', ')})`)
-  }
+  const targetLine = await ensureItemOnWoBom(nsWorkOrderId, targetItemId, bomLines)
 
   let allocations = null
   let resolvedBinId = preferredBinId
@@ -446,7 +476,7 @@ async function processLineFlow(data) {
   const bomLines = await fetchWoBomLines(targetBatch.nsWorkOrderId)
   let body, allocations
   try {
-    const built = await buildWoIssueBody(component.id, delta, binId, bomLines)
+    const built = await buildWoIssueBody(targetBatch.nsWorkOrderId, component.id, delta, binId, bomLines)
     body = built.body
     allocations = built.allocations
   } catch (err) {
@@ -883,7 +913,7 @@ async function tickIssuesForBatch(batch, lineReadings) {
 
     let body, allocations
     try {
-      const built = await buildWoIssueBody(g.component.id, g.totalDelta, g.binId, bomLines)
+      const built = await buildWoIssueBody(batch.nsWorkOrderId, g.component.id, g.totalDelta, g.binId, bomLines)
       body = built.body
       allocations = built.allocations
     } catch (err) {

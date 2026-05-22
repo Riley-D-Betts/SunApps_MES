@@ -28,17 +28,45 @@ function clearBomCache(nsWorkOrderId) {
   _bomCache.delete(nsWorkOrderId)
 }
 
+// Mirror of blendTankMesService.ensureItemOnWoBom — see that file for the
+// detailed rationale. PATCHes the WO to append targetItemId at qty=0 when
+// missing from the BOM, refetches for the line number, and mutates bomLines
+// + cache in place.
+async function ensureItemOnWoBom(nsWorkOrderId, targetItemId, bomLines) {
+  const targetIdStr = String(targetItemId)
+  const existing = bomLines.find(c => String(c.itemId) === targetIdStr)
+  if (existing) return existing
+
+  console.log(`[SurgeTankMesService] Item ${targetIdStr} not on WO ${nsWorkOrderId} BOM (lines: ${bomLines.map(b => b.itemId).join(', ') || '(empty)'}) — PATCHing to append`)
+  const wrap = await core.netsuiteGet(`/record/v1/workOrder/${nsWorkOrderId}?expandSubResources=true`)
+  const wo = wrap?.body || wrap
+  const merged = (wo?.item?.items || []).map(c => ({
+    item: { id: String(c.item?.id) },
+    quantity: c.quantity,
+    ...(c.units?.id ? { units: { id: String(c.units.id) } } : {}),
+  }))
+  merged.push({ item: { id: targetIdStr }, quantity: 0 })
+  await core.netsuitePatch(`/record/v1/workOrder/${nsWorkOrderId}`, { item: { items: merged } })
+
+  const refetched = (await core.netsuiteGet(`/record/v1/workOrder/${nsWorkOrderId}?expandSubResources=true`))?.body
+  const newLines = (refetched?.item?.items || []).map(c => ({ line: c.line, itemId: String(c.item?.id) }))
+  const newRow = newLines.find(c => c.itemId === targetIdStr)
+  if (!newRow) throw new Error(`PATCH appended item ${targetIdStr} to WO ${nsWorkOrderId} but it didn't appear on refetch`)
+  console.log(`[SurgeTankMesService] Item ${targetIdStr} added to WO ${nsWorkOrderId} at line ${newRow.line}`)
+
+  _bomCache.set(nsWorkOrderId, newLines)
+  bomLines.length = 0
+  bomLines.push(...newLines)
+  return newRow
+}
+
 // Mirror of blendTankMesService.buildWoIssueBody — see that file for the
 // detailed rationale. Lowercase componentinventorydetail + omit non-target
 // lines + raw string IDs. Looks up tracking class (lot / bin / both) and
 // allocations from NS via nsInventoryLookup.
-async function buildWoIssueBody(targetItemId, quantity, preferredBinId, bomLines) {
+async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferredBinId, bomLines) {
   const tracking = await nsInventory.getItemTracking(targetItemId)
-  const targetIdStr = String(targetItemId)
-  const targetLine = bomLines.find(c => String(c.itemId) === targetIdStr)
-  if (!targetLine) {
-    throw new Error(`Item ${targetItemId} is not on the WO BOM (lines: ${bomLines.map(b => b.itemId).join(', ')})`)
-  }
+  const targetLine = await ensureItemOnWoBom(nsWorkOrderId, targetItemId, bomLines)
 
   let allocations = null
   if (tracking.isLot) {
@@ -664,7 +692,7 @@ async function tickIssueForBatch(batch, historian) {
 
   let body, allocations
   try {
-    const built = await buildWoIssueBody(component.itemId, deltaLbs, component.binId, bomLines)
+    const built = await buildWoIssueBody(batch.nsWorkOrderId, component.itemId, deltaLbs, component.binId, bomLines)
     body = built.body
     allocations = built.allocations
   } catch (err) {
