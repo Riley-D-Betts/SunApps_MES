@@ -197,20 +197,24 @@ async function _resolveLayer3Source(data, historian) {
     })
     if (!blendBatch?.mesItem) {
       // Blend tank may have finished before the surge batch resolved. Fall back
-      // to the most recent batch on that tank within 24 h — its mesItem is still
-      // the right component since product just flowed through the UHT.
+      // to the most recent batch on that tank within 48 h that actually completed
+      // some product (cumulativeCompletedLbs > 0). Phantom batches (9-second
+      // NOTE_STRING transients with 0 lbs) are explicitly excluded — they have
+      // no NS inventory and would cause every surge tick to fail with
+      // "Insufficient inventory".
       blendBatch = await db.MesBlendTankBatch.findOne({
         where: {
           tankId: feedingFromEntName,
           status: 'completed',
           mesItem: { [db.Sequelize.Op.ne]: null },
-          detectedAt: { [db.Sequelize.Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+          cumulativeCompletedLbs: { [db.Sequelize.Op.gt]: 0 },
+          detectedAt: { [db.Sequelize.Op.gte]: new Date(Date.now() - 72 * 60 * 60 * 1000) },
         },
         order: [['detectedAt', 'DESC']],
       })
     }
     if (!blendBatch?.mesItem) {
-      console.warn(`[SurgeTankMesService] _resolveLayer3Source: no blend batch (active or recent) on ${feedingFromEntName} — deferring`)
+      console.warn(`[SurgeTankMesService] _resolveLayer3Source: no blend batch (active or recent with completions) on ${feedingFromEntName} — deferring`)
       return null
     }
     const resolvedFrom = blendBatch.status === 'active' ? 'blend-tank' : 'blend-tank-recent'
@@ -319,18 +323,21 @@ async function resolveSurgeTankComponent(batch, historian) {
       order: [['detectedAt', 'DESC']],
     })
     if (!blendBatch?.mesItem) {
+      // Same phantom-exclusion filter as _resolveLayer3Source: require > 0 lbs
+      // completed and extend to 48h so real older batches aren't missed.
       blendBatch = await db.MesBlendTankBatch.findOne({
         where: {
           tankId: feedingFromEntName,
           status: 'completed',
           mesItem: { [db.Sequelize.Op.ne]: null },
-          detectedAt: { [db.Sequelize.Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+          cumulativeCompletedLbs: { [db.Sequelize.Op.gt]: 0 },
+          detectedAt: { [db.Sequelize.Op.gte]: new Date(Date.now() - 72 * 60 * 60 * 1000) },
         },
         order: [['detectedAt', 'DESC']],
       })
     }
     if (!blendBatch?.mesItem) {
-      console.warn(`[SurgeTankMesService] No blend-tank batch (active or recent) on ${feedingFromEntName} — cannot resolve component`)
+      console.warn(`[SurgeTankMesService] No blend-tank batch (active or recent with completions) on ${feedingFromEntName} — cannot resolve component`)
       return null
     }
     const resolvedFrom = blendBatch.status === 'active' ? 'blend-tank-batch' : 'blend-tank-batch-recent'
@@ -636,10 +643,16 @@ async function tickIssueForBatch(batch, historian) {
     where: { surgeTankBatchId: batch.id, uhtId: batch.feedingUhtId },
   })
   if (!state) {
+    // Baseline on the current totalizer so the first tick only issues the
+    // delta that accumulates AFTER this batch started, not the entire UHT
+    // run history since the last IDLE→PROCESS reset. The accumulator
+    // (_uhtMilkGal) is in-memory and never resets between consecutive surge
+    // batches, so initialising to 0 would try to issue hundreds of thousands
+    // of gallons on the very first tick and always fail for insufficient inventory.
     state = await db.MesSurgeTankIssueState.create({
       surgeTankBatchId: batch.id,
       uhtId: batch.feedingUhtId,
-      lastIssuedUhtGal: 0,
+      lastIssuedUhtGal: currentGal,
       lastTotalizerGal: currentGal,
       lastObservedAt: observedAt,
       lastFromEntName: batch.feedingFromEntName || null,

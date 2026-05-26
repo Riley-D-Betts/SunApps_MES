@@ -9,6 +9,15 @@ const db = require('../models')
 // reason='all_lines_stopped'. Matches the BATCH_LIFECYCLE_PLAN.md spec.
 const ALL_LINES_STOPPED_IDLE_MS = 5 * 60 * 1000
 
+// Minimum batch lifetime before a note_cleared or product_change END can fire.
+// Phantom batches (< 60 s) are created when the NOTE_STRING is written briefly
+// during changeover then immediately corrected or cleared — the batch opens on
+// one poll, closes on the next. Suppressing early closes eliminates these
+// phantom NS WOs (which have 0 lbs and pollute blend-tank-recent resolution).
+// all_lines_stopped is NOT subject to this guard since it only arms after
+// real flow has occurred.
+const MIN_BATCH_AGE_MS = 2 * 60 * 1000
+
 const LINE_RESET_THRESHOLD_LBS = 100
 
 // Atlas WO lifecycle tags (CurrentWOState, JobRunning, CurrentWO, CurrentItem)
@@ -225,6 +234,17 @@ async function run(historian) {
         if (hadProduct && !hasProduct) endReason = 'note_cleared'
         else if (hasProduct && productName !== prev.productName) endReason = 'product_change'
         else if (prev.hasSeenFlow && prev.lastFlowAt && (now - prev.lastFlowAt) > ALL_LINES_STOPPED_IDLE_MS) endReason = 'all_lines_stopped'
+      }
+      // Suppress premature note_cleared / product_change closes on very young
+      // batches. These are phantom runs where NOTE_STRING was written briefly
+      // during changeover and then corrected or cleared on the very next poll.
+      // all_lines_stopped is exempt — it only arms after real sustained flow.
+      if (endReason && endReason !== 'all_lines_stopped') {
+        const batchAgeMs = prev.batchStartedAt ? now - prev.batchStartedAt : Infinity
+        if (batchAgeMs < MIN_BATCH_AGE_MS) {
+          console.log(`[BlendTankJob] Suppressing premature ${endReason} on ${tankId} (batch ${Math.round(batchAgeMs / 1000)}s old, min ${MIN_BATCH_AGE_MS / 1000}s)`)
+          endReason = null
+        }
       }
       if (endReason) {
         await endBatch(tankId, prev, endReason)

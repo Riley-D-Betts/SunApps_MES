@@ -227,7 +227,28 @@ async function run(historian) {
         // (getUhtStatus() has a valve-state fallback when the raw tag is empty).
         // The old getUhtFromEntName() read the raw tag without the fallback and
         // returned '' for every poll, leaving feedingFromEntName permanently null.
-        const feedingFromEntName = feedingUhtStatus?.fromEntName || null
+        let feedingFromEntName = feedingUhtStatus?.fromEntName || null
+
+        // Valve fallback in getUhtStatus() only covers blend-tank outlet valves.
+        // When the UHT feeds directly from a silo (e.g. A2 Whole bypasses
+        // blend tanks), no blend-tank valve is open so fromEntName stays ''.
+        // Fall back to the milk-line requestedBy tag — its destination field
+        // names the receiving vessel ("UHT1", "BlendTank1A", etc.) and the
+        // siloName field gives us the source silo we need.
+        if (!feedingFromEntName && feedingUht) {
+          try {
+            const lineReadings = await historian.getMilkLineStatus()
+            const feedingLine = lineReadings.find(r =>
+              String(r.requestedBy || '').toUpperCase().includes(feedingUht.toUpperCase())
+            )
+            if (feedingLine?.siloName) {
+              feedingFromEntName = feedingLine.siloName
+              console.log(`[SurgeTankJob] Silo fallback: ${feedingUht} fed from ${feedingFromEntName} (via getMilkLineStatus)`)
+            }
+          } catch (err) {
+            console.warn(`[SurgeTankJob] getMilkLineStatus fallback for ${feedingUht} failed: ${err.message}`)
+          }
+        }
 
         console.log(`[SurgeTankJob] BATCH START (${FILL_TICKS_FOR_START}-tick gate cleared) on ${tankId}: "${productName}" (UHT=${feedingUht || '?'}, from=${feedingFromEntName || '?'})`)
         statusStore.pushEvent('surgeTank.batchStart', `${tankId}: "${productName}" started`, { tankId, productName, feedingUhtId: feedingUht, feedingFromEntName })
