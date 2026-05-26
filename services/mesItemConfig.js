@@ -73,6 +73,20 @@ const SEPARATION_BOM_MAP = {
   '5403_25': 253, // Organic A2 → Fat Free / Skim (Raw Organic A2 Milk to A2 Skim and Cream)
 }
 
+// Operators occasionally leave skim-destination silos on conventional indices
+// (1-5) even when running organic source (5404). The cream silo has the same
+// issue (idx 11 = conv cream while fed organic) which is already handled by
+// getCreamItemForSource(). Apply the same tolerance for skim: if source is
+// organic and skim index is in the conventional range (1-5), translate to the
+// organic equivalent (idx + 5) so BOM lookup and item derivation both land on
+// the correct organic item and BOM.
+function normalizeSkimIndex(sourceItemId, skimProductIndex) {
+  const src = Number(sourceItemId)
+  const idx = Number(skimProductIndex)
+  if (src === 5404 && idx >= 1 && idx <= 5) return idx + 5
+  return idx
+}
+
 function getSeparationBomId(assemblyItemId, skimProductIndex) {
   if (!assemblyItemId || !skimProductIndex) return null
   return SEPARATION_BOM_MAP[`${assemblyItemId}_${skimProductIndex}`] || null
@@ -330,6 +344,7 @@ async function resolveNSItemByMesCode(mesItemCode) {
 module.exports = {
   SEPARATION_BOM_MAP,
   getSeparationBomId,
+  normalizeSkimIndex,
   SILO_ITEM_MAP,
   HISTORIAN_ITEM_MAP,
   BLEND_TANK_ITEM_MAP,

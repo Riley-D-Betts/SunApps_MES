@@ -69,7 +69,11 @@ async function fireUnbuild(row) {
   // We must send those same item IDs (NOT the source silo's raw-milk item IDs)
   // so NS updates existing BOM lines with our exact quantities instead of trying
   // to add new lines to a static sublist.
-  const skimProductIndex = skimDest?.productIndex
+  const rawSkimProductIndex = skimDest?.productIndex
+  const skimProductIndex = itemConfig.normalizeSkimIndex(sourceItem.id, rawSkimProductIndex)
+  if (skimProductIndex !== rawSkimProductIndex) {
+    console.log(`[retryFailedUnbuilds] Normalized skim index ${rawSkimProductIndex} → ${skimProductIndex} (organic source ${sourceItem.id} with conventional skim index)`)
+  }
   const bomId = itemConfig.getSeparationBomId(sourceItem.id, skimProductIndex)
   if (!bomId) throw new Error(`No BOM mapped for source=${sourceItem.id} skim productIndex=${skimProductIndex}`)
 

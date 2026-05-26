@@ -223,7 +223,11 @@ async function processSeparationBatch(data) {
     // NOT the source silo's raw-milk item. We send the BOM AND component items
     // using those BOM-matching item IDs so NS updates the BOM lines with exact
     // quantities instead of trying to add new lines to a static sublist.
-    const skimProductIndex = skimDest?.productIndex
+    const rawSkimProductIndex = skimDest?.productIndex
+    const skimProductIndex = itemConfig.normalizeSkimIndex(sourceItem.id, rawSkimProductIndex)
+    if (skimProductIndex !== rawSkimProductIndex) {
+      console.log(`[MilkMesService] Normalized skim index ${rawSkimProductIndex} → ${skimProductIndex} (organic source ${sourceItem.id} with conventional skim index)`)
+    }
     const bomId = itemConfig.getSeparationBomId(sourceItem.id, skimProductIndex)
     if (!bomId) throw new Error(`No BOM mapped for source=${sourceItem.id} skim productIndex=${skimProductIndex}`)
 
