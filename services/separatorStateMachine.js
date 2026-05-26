@@ -8,6 +8,7 @@
  *
  * See BATCH_LIFECYCLE_PLAN.md §2 for the full spec.
  */
+const { Op } = require('sequelize')
 const db = require('../models')
 const statusStore = require('./statusStore')
 const itemConfig = require('./mesItemConfig')
@@ -24,14 +25,18 @@ const TICKS_TO_CLOSE_ON_IDLE = 30 // 5 min @ 10s/tick
 // already true when the service came back up and no hydratable DB row existed.
 const RECOVERY_TICKS_TO_OPEN = 6 // 60s @ 10s/tick
 
-// End reasons that represent an in-flight boundary change (source/dest/product
-// swap mid-run). Only these warrant a same-tick re-open — transfer_complete,
+// End reasons that represent an in-flight boundary change (source/dest swap
+// mid-run). Only these warrant a same-tick re-open — transfer_complete,
 // cip_started, and the idle reasons mean the transfer is genuinely over, and
 // re-opening on them creates a phantom batch that posts a duplicate NS unbuild.
+// product_index_changed is intentionally excluded: a label/index update on an
+// existing silo is a SCADA configuration change, not a physical pipe re-route.
+// Re-opening same-tick on it creates a duplicate batch with identical volumes
+// (the totalizer doesn't reset on index change). Close the batch normally and
+// wait for the next feedPermit rising edge to start a fresh one.
 const BOUNDARY_END_REASONS = new Set([
   'source_changed',
   'destination_changed',
-  'product_index_changed',
 ])
 
 let machineState = STATE_IDLE
@@ -329,12 +334,40 @@ async function tick(historian) {
         // failure we throttle back to one attempt per recovery window.
         runningWhileIdleTicks = 0
         try {
-          await openBatch(snap)
-          statusStore.pushEvent('separation.recovery', `Opened batch via recovery fallback (no rising edge)`, {
-            motorRpm: snap.motorRpm,
-            source: snap.xfrSource,
-            destinations: snap.xfrDestinations.filter(Boolean),
-          })
+          // Guard: if a recent failed/pending batch from the same source silo
+          // has volumes within 5% of current, the separator is still running
+          // the same physical transfer that MES already recorded before restart.
+          // Suppress re-open to avoid a duplicate batch with identical volumes.
+          const sourceSiloForGuard = itemConfig.normalizeSiloName(snap.xfrSource) || snap.xfrSource
+          const recentFailed = sourceSiloForGuard ? await db.MesSeparationBatch.findOne({
+            where: {
+              sourceSilo: sourceSiloForGuard,
+              status: { [Op.in]: ['error', 'pending_ns', 'pending'] },
+              lastTickAt: { [Op.gte]: new Date(Date.now() - 8 * 60 * 60 * 1000) },
+            },
+            order: [['lastTickAt', 'DESC']],
+          }) : null
+          if (recentFailed) {
+            const prevVol = Number(recentFailed.inputVolume) || 0
+            const currVol = Number(snap.feedTotalLbs) || 0
+            const maxVol = Math.max(prevVol, currVol, 1)
+            if (Math.abs(prevVol - currVol) / maxVol < 0.05) {
+              console.log(`[SeparatorSM] RECOVERY suppressed: recent ${recentFailed.status} batch ${recentFailed.batchId} has matching volumes (prev=${prevVol} curr=${currVol} lbs) — same physical run`)
+              statusStore.pushEvent('separation.recovery.suppressed', `Recovery suppressed (duplicate volume guard)`, {
+                existingBatchId: recentFailed.batchId, prevVol, currVol,
+              })
+            } else {
+              await openBatch(snap)
+              statusStore.pushEvent('separation.recovery', `Opened batch via recovery fallback (no rising edge)`, {
+                motorRpm: snap.motorRpm, source: snap.xfrSource, destinations: snap.xfrDestinations.filter(Boolean),
+              })
+            }
+          } else {
+            await openBatch(snap)
+            statusStore.pushEvent('separation.recovery', `Opened batch via recovery fallback (no rising edge)`, {
+              motorRpm: snap.motorRpm, source: snap.xfrSource, destinations: snap.xfrDestinations.filter(Boolean),
+            })
+          }
         } catch (err) {
           console.error(`[SeparatorSM] RECOVERY open failed: ${err.message}`)
           statusStore.pushEvent('separation.recovery.error', `Recovery open failed: ${err.message}`, {
