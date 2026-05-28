@@ -125,6 +125,13 @@ sequelize.sync().then(async () => {
 app.use(bodyParser.json({ limit: '50mb' }))
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }))
 
+// Legacy accessor — routes read req.app.locals.historian to grab the current
+// provider. Backed by a getter so a hot-swap on providerHolder.current
+// transparently flows through to every existing consumer.
+Object.defineProperty(app.locals, 'historian', {
+  get() { return providerHolder.current },
+})
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
