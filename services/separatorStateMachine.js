@@ -190,6 +190,11 @@ async function persistTick(snap) {
     prevIndexCodesJson: JSON.stringify(snap.siloProductConfig),
     lastTickAt: snap.pollTime,
   }, { where: { id: openBatchId } })
+  // Keep the dashboard's recentBatches ring in sync with the freshly-persisted
+  // row. Without this, in-flight batches show stale volumes (last hydrated
+  // value) until close — the separator card and the batch row diverge.
+  const refreshed = await db.MesSeparationBatch.findByPk(openBatchId)
+  if (refreshed) statusStore.pushSeparationBatchFromDbRow(refreshed)
 }
 
 async function closeBatch(snap, endReason) {

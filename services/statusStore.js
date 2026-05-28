@@ -299,10 +299,26 @@ function surgeBatchSummary(b) {
 }
 
 function pushSeparationBatch(batch) {
-  state.recentBatches.unshift({ t: now(), ...batch })
-  if (state.recentBatches.length > MAX_RECENT_BATCHES) {
-    state.recentBatches.length = MAX_RECENT_BATCHES
+  const entry = { t: now(), ...batch }
+  // Upsert by batchId so per-tick refreshes for an in-flight batch replace the
+  // existing ring entry instead of accumulating duplicates. The close path
+  // (which produces a richer summary with nsTransactionId / errorMessage) wins
+  // because it overwrites the same slot.
+  const idx = entry.batchId
+    ? state.recentBatches.findIndex(b => b.batchId === entry.batchId)
+    : -1
+  if (idx >= 0) {
+    state.recentBatches[idx] = entry
+  } else {
+    state.recentBatches.unshift(entry)
+    if (state.recentBatches.length > MAX_RECENT_BATCHES) {
+      state.recentBatches.length = MAX_RECENT_BATCHES
+    }
   }
+}
+
+function pushSeparationBatchFromDbRow(row) {
+  pushSeparationBatch(summaryFromDbRow(row))
 }
 
 /**
@@ -488,6 +504,7 @@ module.exports = {
   setUhts,
   setSurgeTanks,
   pushSeparationBatch,
+  pushSeparationBatchFromDbRow,
   hydrateSeparationBatches,
   setTick,
   hydrateTickState,
