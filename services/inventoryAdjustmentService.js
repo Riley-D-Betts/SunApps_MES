@@ -19,6 +19,7 @@
  */
 const core = require('../clients/coreClient')
 const nsInventory = require('./nsInventoryLookup')
+const statusStore = require('./statusStore')
 const config = require('../config')
 const db = require('../models')
 
@@ -161,10 +162,13 @@ function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
     }
   }
 
+  // Line-level `location` is rejected by NS REST inventoryAdjustment with
+  // USER_ERROR "Invalid Field Value <id>" — the line inherits the header
+  // location implicitly. Header-level `location` (set below) is the only
+  // location field NS accepts on this endpoint.
   const item = {
     item: { id: String(itemId) },
     adjustQtyBy: signedQty,
-    location: { id: NS_LOCATION_ID },
     inventoryDetail: {
       inventoryAssignment: { items: [assignment] },
     },
@@ -231,6 +235,11 @@ async function submitInventoryAdjustment(args) {
   if (lot.unresolved) {
     const reason = `lot-tracked item ${itemId} has no existing lot in bin ${binId} and no lastWoNumber for a new-lot ${qtyDelta < 0 ? 'down-' : 'up-'}adjust`
     console.warn(`[InventoryAdjustment] Skipping (${source}) ${tankName || ''}: ${reason}`)
+    statusStore.pushEvent(
+      'inventoryAdjustment.skipped',
+      `${tankName || `bin ${binId}`}: Δ${qtyDelta.toFixed(0)} lb skipped — no lot context`,
+      { source, tankName, binId, itemId, qtyDelta, reason }
+    )
     await safeAudit({
       source, tankName, binId, itemId, qtyDelta, observedLbs, nsQtyBefore,
       lotId: null, lotName: null, nsAdjustmentId: null, memo,
@@ -268,6 +277,11 @@ async function submitInventoryAdjustment(args) {
     return { ok: true, nsAdjustmentId, lotId: lot.lotId, lotName: lot.lotName }
   } catch (err) {
     console.error(`[InventoryAdjustment] FAILED (${source}) tank=${tankName} bin=${binId} item=${itemId} Δ=${qtyDelta.toFixed(2)}:`, err.message.slice(0, 400))
+    statusStore.pushEvent(
+      'inventoryAdjustment.error',
+      `${source} adjustment failed for ${tankName || `bin ${binId}`} (item ${itemId}, Δ${qtyDelta.toFixed(0)} lb): ${extractNsErrorDetail(err) || err.message.slice(0, 200)}`,
+      { source, tankName, binId, itemId, qtyDelta, error: err.message.slice(0, 500) }
+    )
     await safeAudit({
       source, tankName, binId, itemId, qtyDelta, observedLbs, nsQtyBefore,
       lotId: lot.lotId, lotName: lot.lotName, nsAdjustmentId: null,
@@ -275,6 +289,13 @@ async function submitInventoryAdjustment(args) {
     })
     return { ok: false, error: err.message, nsAdjustmentId: null, lotId: lot.lotId, lotName: lot.lotName }
   }
+}
+
+// Try to pull the NS USER_ERROR detail out of the wrapped error message so the
+// event-stream entry is human-readable instead of a wall of escaped JSON.
+function extractNsErrorDetail(err) {
+  const m = String(err?.message || '').match(/"detail":"([^"]+)"/)
+  return m ? m[1] : null
 }
 
 /**

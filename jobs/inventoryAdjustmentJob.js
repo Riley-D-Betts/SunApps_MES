@@ -8,11 +8,16 @@ async function run(historian) {
   try {
     const result = await tankAtRestSweepService.tick(historian)
     lastPollTime = new Date()
-    if (result?.adjustments?.length > 0) {
+    const ok = result?.adjustments?.length || 0
+    const failed = result?.failures?.length || 0
+    if (ok > 0 || failed > 0) {
+      const summary = failed > 0
+        ? `Sweep: ${ok} ok, ${failed} failed`
+        : `Sweep posted ${ok} adjustment(s)`
       statusStore.pushEvent(
-        'inventoryAdjustment.sweep',
-        `Sweep posted ${result.adjustments.length} adjustment(s)`,
-        { count: result.adjustments.length, adjustments: result.adjustments }
+        failed > 0 ? 'inventoryAdjustment.sweepPartial' : 'inventoryAdjustment.sweep',
+        summary,
+        { ok, failed, adjustments: result.adjustments, failures: result.failures }
       )
     }
     return result

@@ -123,7 +123,7 @@ async function sweepSilo({ silo, activeRoutes, historian, windowStart, windowEnd
     nsQtyBefore: nsQty,
     memo: `Sweep: ${tankName} 5-min avg ${reading.avgLbs.toFixed(0)} vs NS ${nsQty.toFixed(0)} lb`,
   })
-  return { tankName, adjusted: true, delta, ...result }
+  return { tankName, adjusted: !!result?.ok, failed: !result?.ok, delta, ...result }
 }
 
 async function sweepBlendTank({ tank, activeRoutes, historian, windowStart, windowEnd }) {
@@ -177,7 +177,7 @@ async function sweepBlendTank({ tank, activeRoutes, historian, windowStart, wind
     lastWoNumber,
     memo: `Sweep: ${tankName} 5-min avg ${reading.avgLbs.toFixed(0)} vs NS ${nsQty.toFixed(0)} lb (item ${itemId})`,
   })
-  return { tankName, adjusted: true, delta, ...result }
+  return { tankName, adjusted: !!result?.ok, failed: !result?.ok, delta, ...result }
 }
 
 let lastPollTime = new Date()
@@ -229,16 +229,18 @@ async function tick(historian) {
     }
   }
 
-  const adjustments = [...siloResults, ...blendResults].filter(r => r.adjusted)
-  const skipped = [...siloResults, ...blendResults].filter(r => r.skipped)
-  console.log(`[TankAtRestSweep] Sweep complete: ${adjustments.length} adjustment(s), ${skipped.length} skip(s)`)
+  const all = [...siloResults, ...blendResults]
+  const adjustments = all.filter(r => r.adjusted)
+  const failures = all.filter(r => r.failed)
+  const skipped = all.filter(r => r.skipped)
+  console.log(`[TankAtRestSweep] Sweep complete: ${adjustments.length} ok, ${failures.length} failed, ${skipped.length} skipped`)
   if (skipped.length > 0) {
     const grouped = skipped.reduce((m, r) => { m[r.skipped] = (m[r.skipped] || 0) + 1; return m }, {})
     console.log(`[TankAtRestSweep] Skip reasons: ${JSON.stringify(grouped)}`)
   }
 
   lastPollTime = new Date()
-  return { adjustments, skipped }
+  return { adjustments, failures, skipped }
 }
 
 function getLastPollTime() {
