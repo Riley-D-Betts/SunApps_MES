@@ -38,17 +38,41 @@ app.locals.providerHolder = providerHolder
 // reschedules with the given expressions — invoked at boot and on every
 // runtime-config change.
 const cronTasks = {}
+
+// Per-job concurrency guards. When the historian is slow (or sim-time
+// cadence outpaces a poll's wall-clock duration), the previous tick may
+// still be in flight when cron fires the next one. Stacking concurrent
+// ticks queues more FQN fetches behind the in-flight ones and creates a
+// death spiral. Skip the next fire instead.
+const jobRunning = {}
+function guarded(name, fn) {
+  return async () => {
+    if (jobRunning[name]) {
+      console.log(`[Cron] Skipping ${name} tick — previous still in flight`)
+      return
+    }
+    jobRunning[name] = true
+    try {
+      await fn()
+    } catch (err) {
+      console.error(`[Cron] ${name} tick threw:`, err.message)
+    } finally {
+      jobRunning[name] = false
+    }
+  }
+}
+
 function applyCrons(crons) {
   for (const [k, task] of Object.entries(cronTasks)) {
     if (task) { try { task.stop() } catch {} }
     cronTasks[k] = null
   }
-  cronTasks.separation = cron.schedule(crons.separation, () => separationJob.run(providerHolder.current))
-  cronTasks.bulkMilk   = cron.schedule(crons.bulkMilk,   () => bulkMilkJob.run(providerHolder.current))
-  cronTasks.blendTank  = cron.schedule(crons.blendTank,  () => blendTankJob.run(providerHolder.current))
-  cronTasks.surgeTank  = cron.schedule(crons.surgeTank,  () => surgeTankJob.run(providerHolder.current))
-  cronTasks.equipment  = cron.schedule(crons.equipment,  () => equipmentJob.run(providerHolder.current))
-  cronTasks.tick       = cron.schedule(crons.tick,       () => issueCompletionJob.run(providerHolder.current))
+  cronTasks.separation = cron.schedule(crons.separation, guarded('separation', () => separationJob.run(providerHolder.current)))
+  cronTasks.bulkMilk   = cron.schedule(crons.bulkMilk,   guarded('bulkMilk',   () => bulkMilkJob.run(providerHolder.current)))
+  cronTasks.blendTank  = cron.schedule(crons.blendTank,  guarded('blendTank',  () => blendTankJob.run(providerHolder.current)))
+  cronTasks.surgeTank  = cron.schedule(crons.surgeTank,  guarded('surgeTank',  () => surgeTankJob.run(providerHolder.current)))
+  cronTasks.equipment  = cron.schedule(crons.equipment,  guarded('equipment',  () => equipmentJob.run(providerHolder.current)))
+  cronTasks.tick       = cron.schedule(crons.tick,       guarded('tick',       () => issueCompletionJob.run(providerHolder.current)))
   console.log('[Server] Cron schedule applied:', JSON.stringify(crons))
 }
 
