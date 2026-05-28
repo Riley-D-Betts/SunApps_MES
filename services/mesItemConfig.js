@@ -94,33 +94,33 @@ function getSeparationBomId(assemblyItemId, skimProductIndex) {
 
 const BLEND_TANK_ITEM_MAP = {}
 
-// NS bin IDs for each silo and blend tank at location 23 (bin names: Silo-Raw-N, Silo-Cream-N, Blend-NA/B)
+// NS bin IDs for each silo and blend tank at location 30 (bin names: Silo-Raw-N, Silo-Cream-N, Blend-NA/B)
 const SILO_BIN_MAP = {
-  MSilo1: 1006,
-  MSilo2: 1002,
-  MSilo3: 1003,
-  MSilo4: 1005,
-  MSilo5: 1001,
-  CSilo1: 1013,
-  CSilo2: 1008,
-  CSilo3: 1007,
+  MSilo1: 4931,
+  MSilo2: 4932,
+  MSilo3: 4933,
+  MSilo4: 4934,
+  MSilo5: 4935,
+  CSilo1: 4928,
+  CSilo2: 4929,
+  CSilo3: 4930,
 }
 
 const TANK_BIN_MAP = {
-  BlendTank1A: 1016,
-  BlendTank1B: 1017,
-  BlendTank2A: 1019,
-  BlendTank2B: 1020,
+  BlendTank1A: 3105,
+  BlendTank1B: 3106,
+  BlendTank2A: 3107,
+  BlendTank2B: 3108,
 }
 
 // Aseptic surge tanks (post-UHT). Operator routes any UHT to any ST per run,
 // so completion bin for a UHT-direct WO is whichever ST is connected at the
 // time. NS bin names: Surge-81/82/83/84.
 const SURGE_TANK_BIN_MAP = {
-  ST81: 1011,
-  ST82: 1012,
-  ST83: 1014,
-  ST84: 1015,
+  ST81: 4995,
+  ST82: 4996,
+  ST83: 4997,
+  ST84: 4998,
 }
 
 // SCADA strings for silos aren't perfectly consistent — operators sometimes
