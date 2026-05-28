@@ -34,6 +34,10 @@ module.exports = {
   // Tick that fires periodic blend-tank WO issues + completions. Production cadence
   // is once every 5 minutes; sandbox can override to e.g. '*/30 * * * * *' for testing.
   TICK_CRON: process.env.TICK_CRON || '*/5 * * * *',
+  // Tank-at-rest inventory adjustment sweep. Same 5-min cadence as the tick —
+  // matches the 5-min average window the sweep service uses to denoise the
+  // ~±800 lb level sensor jitter on idle tanks.
+  INVENTORY_ADJUSTMENT_CRON: process.env.INVENTORY_ADJUSTMENT_CRON || '*/5 * * * *',
   // Min delta (lbs) to actually fire a workOrderIssue / workOrderCompletion. Below
   // this we just defer to the next tick so we don't spam NS with sub-pound noise.
   MES_MIN_ISSUE_LBS: parseFloat(process.env.MES_MIN_ISSUE_LBS || '10'),

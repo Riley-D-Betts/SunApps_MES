@@ -3,6 +3,7 @@ const itemConfig = require('./mesItemConfig')
 const productParser = require('./blendTankProductParser')
 const lineMapper = require('./lineIngredientMapper')
 const nsInventory = require('./nsInventoryLookup')
+const inventoryAdjustment = require('./inventoryAdjustmentService')
 const config = require('../config')
 const db = require('../models')
 const clock = require('../sim/clock')
@@ -86,25 +87,45 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
   let resolvedBinId = preferredBinId
   if (tracking.isLot) {
     allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
-    const allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
+    let allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
     if (allocatedQty + 1e-6 < quantity) {
-      const err = new Error(`Insufficient inventory for item ${targetItemId}: need ${quantity}, found ${allocatedQty} across ${allocations.length} lot(s)`)
-      err.code = 'INSUFFICIENT_INVENTORY'
-      err.itemId = targetItemId
-      err.needed = quantity
-      err.available = allocatedQty
-      err.allocations = allocations
-      throw err
+      const shortfall = quantity - allocatedQty
+      const adjusted = await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall })
+      if (adjusted) {
+        allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
+        allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
+      }
+      if (allocatedQty + 1e-6 < quantity) {
+        const err = new Error(`Insufficient inventory for item ${targetItemId}: need ${quantity}, found ${allocatedQty} across ${allocations.length} lot(s)`)
+        err.code = 'INSUFFICIENT_INVENTORY'
+        err.itemId = targetItemId
+        err.needed = quantity
+        err.available = allocatedQty
+        err.allocations = allocations
+        throw err
+      }
     }
   } else if (tracking.useBins) {
     resolvedBinId = await nsInventory.findBinForItem(targetItemId, preferredBinId)
     if (!resolvedBinId) {
-      const err = new Error(`Insufficient inventory for item ${targetItemId}: no on-hand stock found in any bin at this location`)
-      err.code = 'INSUFFICIENT_INVENTORY'
-      err.itemId = targetItemId
-      err.needed = quantity
-      err.available = 0
-      throw err
+      // No bin has on-hand stock anywhere. If the caller named a preferred bin
+      // (typical: source silo/tank), bump it up by exactly the shortfall so
+      // the next NS issue posts. With no preferred bin we don't know which
+      // bin to credit, so just throw — the caller decides whether to retry.
+      const adjusted = preferredBinId
+        ? await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall: quantity })
+        : false
+      if (adjusted) {
+        resolvedBinId = await nsInventory.findBinForItem(targetItemId, preferredBinId)
+      }
+      if (!resolvedBinId) {
+        const err = new Error(`Insufficient inventory for item ${targetItemId}: no on-hand stock found in any bin at this location`)
+        err.code = 'INSUFFICIENT_INVENTORY'
+        err.itemId = targetItemId
+        err.needed = quantity
+        err.available = 0
+        throw err
+      }
     }
   }
 
@@ -122,6 +143,36 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
     allocations,
     tracking,
   }
+}
+
+// Source-bin auto-adjust hook for the WO-issue path. When NS has less on-hand
+// in the source bin than the line totalizer says we just consumed, bump the
+// source up by exactly the shortfall and signal the caller to retry the
+// allocation lookup. Returns true on a successful adjust, false otherwise —
+// the caller decides whether to retry the issue or surface INSUFFICIENT_INVENTORY.
+async function tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall }) {
+  if (!preferredBinId || !(shortfall > 0)) return false
+  let lastWoNumber = null
+  let tankName = null
+  try {
+    const batch = await db.MesBlendTankBatch.findOne({
+      where: { nsWorkOrderId: String(nsWorkOrderId) },
+      attributes: ['tankId', 'nsWorkOrderNumber'],
+    })
+    lastWoNumber = batch?.nsWorkOrderNumber || null
+    tankName = batch?.tankId || null
+  } catch (err) {
+    console.warn(`[BlendTankMesService] tryShortfallAutoAdjust DB lookup failed: ${err.message}`)
+  }
+  const result = await inventoryAdjustment.applyShortfallAdjustment({
+    sourceBinId: preferredBinId,
+    itemId: targetItemId,
+    shortfallQty: shortfall,
+    lastWoNumber,
+    tankName,
+    memo: `Auto-adjust: blend WO ${nsWorkOrderId} issue shortfall (+${shortfall.toFixed(2)} lb)`,
+  })
+  return !!result?.ok
 }
 
 function extractNsIssueId(nsResult) {

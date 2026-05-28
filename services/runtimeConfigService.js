@@ -22,6 +22,7 @@ const DEFAULT_REPLAY_CRONS = {
   surgeTank: '*/5 * * * * *',
   equipment: '*/10 * * * * *',
   tick: '*/30 * * * * *',
+  invAdjust: '*/30 * * * * *',
 }
 
 let cached = null

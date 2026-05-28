@@ -3,6 +3,7 @@ const itemConfig = require('./mesItemConfig')
 const productParser = require('./surgeTankProductParser')
 const lineMapper = require('./lineIngredientMapper')
 const nsInventory = require('./nsInventoryLookup')
+const inventoryAdjustment = require('./inventoryAdjustmentService')
 const config = require('../config')
 const db = require('../models')
 const clock = require('../sim/clock')
@@ -72,15 +73,23 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
   let allocations = null
   if (tracking.isLot) {
     allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
-    const allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
+    let allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
     if (allocatedQty + 1e-6 < quantity) {
-      const err = new Error(`Insufficient inventory for item ${targetItemId}: need ${quantity}, found ${allocatedQty} across ${allocations.length} lot(s)`)
-      err.code = 'INSUFFICIENT_INVENTORY'
-      err.itemId = targetItemId
-      err.needed = quantity
-      err.available = allocatedQty
-      err.allocations = allocations
-      throw err
+      const shortfall = quantity - allocatedQty
+      const adjusted = await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall })
+      if (adjusted) {
+        allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
+        allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
+      }
+      if (allocatedQty + 1e-6 < quantity) {
+        const err = new Error(`Insufficient inventory for item ${targetItemId}: need ${quantity}, found ${allocatedQty} across ${allocations.length} lot(s)`)
+        err.code = 'INSUFFICIENT_INVENTORY'
+        err.itemId = targetItemId
+        err.needed = quantity
+        err.available = allocatedQty
+        err.allocations = allocations
+        throw err
+      }
     }
   }
 
@@ -98,6 +107,33 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
     allocations,
     tracking,
   }
+}
+
+// Source-bin auto-adjust hook for the surge-WO issue path. Mirror of
+// blendTankMesService.tryShortfallAutoAdjust — see that file for rationale.
+async function tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall }) {
+  if (!preferredBinId || !(shortfall > 0)) return false
+  let lastWoNumber = null
+  let tankName = null
+  try {
+    const batch = await db.MesSurgeTankBatch.findOne({
+      where: { nsWorkOrderId: String(nsWorkOrderId) },
+      attributes: ['tankId', 'nsWorkOrderNumber'],
+    })
+    lastWoNumber = batch?.nsWorkOrderNumber || null
+    tankName = batch?.tankId || null
+  } catch (err) {
+    console.warn(`[SurgeTankMesService] tryShortfallAutoAdjust DB lookup failed: ${err.message}`)
+  }
+  const result = await inventoryAdjustment.applyShortfallAdjustment({
+    sourceBinId: preferredBinId,
+    itemId: targetItemId,
+    shortfallQty: shortfall,
+    lastWoNumber,
+    tankName,
+    memo: `Auto-adjust: surge WO ${nsWorkOrderId} issue shortfall (+${shortfall.toFixed(2)} lb)`,
+  })
+  return !!result?.ok
 }
 
 function extractNsIssueId(nsResult) {

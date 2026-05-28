@@ -1,5 +1,6 @@
 const core = require('../clients/coreClient')
 const itemConfig = require('./mesItemConfig')
+const inventoryAdjustment = require('./inventoryAdjustmentService')
 const config = require('../config')
 const db = require('../models')
 const clock = require('../sim/clock')
@@ -290,6 +291,26 @@ async function processSeparationBatch(data) {
         payload: JSON.stringify(data), result: JSON.stringify({ dryRun: true, body }), success: true,
       })
       return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'dry_run', wastePercent: parseFloat(wastePercent.toFixed(2)), summary: { ...summary, status: 'dry_run' } }
+    }
+
+    // Pre-check source bin on-hand. NS will 400 the unbuild outright if the
+    // source assembly item doesn't have enough in the source bin, so bump the
+    // bin up by exactly the shortfall before submitting. Source items here
+    // are bin-tracked / not lot-tracked (raw conventional/organic milk), so a
+    // bin-only adjustment lands cleanly.
+    if (sourceItem?.id && sourceBinId && inputVolume > 0) {
+      const onHand = await inventoryAdjustment.getBinQtyOnHand(sourceItem.id, sourceBinId)
+      if (onHand + 1e-6 < inputVolume) {
+        const shortfall = inputVolume - onHand
+        console.log(`[MilkMesService] Source bin short for unbuild on batch ${batchId}: item ${sourceItem.id} bin ${sourceBinId} has ${onHand.toFixed(1)}, need ${inputVolume.toFixed(1)} (Δ ${shortfall.toFixed(1)}) — auto-adjusting`)
+        await inventoryAdjustment.applyShortfallAdjustment({
+          sourceBinId,
+          itemId: sourceItem.id,
+          shortfallQty: shortfall,
+          tankName: sourceSilo,
+          memo: `Auto-adjust: separation unbuild batch ${batchId} shortfall (+${shortfall.toFixed(2)} lb)`,
+        })
+      }
     }
 
     const nsResult = await core.netsuitePost('/record/v1/assemblyUnbuild', body)

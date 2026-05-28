@@ -12,6 +12,7 @@ const blendTankJob = require('./jobs/blendTankJob')
 const surgeTankJob = require('./jobs/surgeTankJob')
 const equipmentJob = require('./jobs/equipmentJob')
 const issueCompletionJob = require('./jobs/issueCompletionJob')
+const inventoryAdjustmentJob = require('./jobs/inventoryAdjustmentJob')
 const statusStore = require('./services/statusStore')
 const runtimeConfigService = require('./services/runtimeConfigService')
 const historianRoutes = require('./routes/historianRoutes')
@@ -73,6 +74,7 @@ function applyCrons(crons) {
   cronTasks.surgeTank  = cron.schedule(crons.surgeTank,  guarded('surgeTank',  () => surgeTankJob.run(providerHolder.current)))
   cronTasks.equipment  = cron.schedule(crons.equipment,  guarded('equipment',  () => equipmentJob.run(providerHolder.current)))
   cronTasks.tick       = cron.schedule(crons.tick,       guarded('tick',       () => issueCompletionJob.run(providerHolder.current)))
+  cronTasks.invAdjust  = cron.schedule(crons.invAdjust,  guarded('invAdjust',  () => inventoryAdjustmentJob.run(providerHolder.current)))
   console.log('[Server] Cron schedule applied:', JSON.stringify(crons))
 }
 
@@ -83,6 +85,7 @@ const PROD_CRONS = {
   surgeTank:  config.SURGE_TANK_CRON,
   equipment:  config.EQUIPMENT_CRON,
   tick:       config.TICK_CRON,
+  invAdjust:  config.INVENTORY_ADJUSTMENT_CRON,
 }
 
 // Reconcile provider + cron + sim clock to the persisted runtime config.
@@ -108,6 +111,7 @@ function reconcileMode(rtConfig) {
       equipmentJob.reset()
       issueCompletionJob.reset()
       separationJob.reset()
+      inventoryAdjustmentJob.reset()
     }
     applyCrons(rtConfig.replayCrons)
     console.log(`[Server] Replay mode ON — provider=historical, simStart=${rtConfig.simStart}, speedup=${rtConfig.speedup}x`)
@@ -121,6 +125,7 @@ function reconcileMode(rtConfig) {
       equipmentJob.reset()
       issueCompletionJob.reset()
       separationJob.reset()
+      inventoryAdjustmentJob.reset()
     }
     applyCrons(PROD_CRONS)
     console.log(`[Server] Replay mode OFF — provider=${baseProviderType}, env CRONs`)
