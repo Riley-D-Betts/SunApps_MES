@@ -87,7 +87,7 @@ async function fireUnbuild(row) {
     item: { id: sourceItem.id },
     quantity: inputVolume,
     location: { id: 23 },
-    subsidiary: { id: 2 },
+    subsidiary: { id: 3 },
     billOfMaterials: { id: bomId },
     custbody_milk_source_silo: sourceSilo,
     custbody_milk_batch_start: row.batchStart,

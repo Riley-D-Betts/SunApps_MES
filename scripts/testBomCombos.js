@@ -49,7 +49,7 @@ async function fireOne(sourceItemId, skimProductIndex) {
     item: { id: sourceItemId },
     quantity: sourceQty,
     location: { id: 23 },
-    subsidiary: { id: 2 },
+    subsidiary: { id: 3 },
     billOfMaterials: { id: bomId },
     custbody_milk_transfer_name: label,
     custbody_milk_destinations: 'TEST',
