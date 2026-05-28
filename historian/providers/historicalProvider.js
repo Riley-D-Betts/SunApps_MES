@@ -50,6 +50,10 @@ class HistoricalProvider extends RestProvider {
     this._inflight = 0
     // FIFO of resolve callbacks for callers waiting on a slot.
     this._waitQueue = []
+    // Aggregated fetch-failure stats so we log a summary instead of one
+    // event per failed tag.
+    this._fetchFailures = 0
+    this._lastFailLogMs = 0
   }
 
   _now() {
@@ -81,10 +85,10 @@ class HistoricalProvider extends RestProvider {
     }
     await this._acquire()
     let pv = null
+    let lastErr = null
     try {
       const pinned = new Date(simNow)
       const windowStart = new Date(pinned.getTime() - VALUE_AT_WINDOW_MS)
-      let lastErr = null
       for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
         try {
           const values = await this._queryProcessValues(fqn, windowStart, pinned, { verbose: false })
@@ -98,9 +102,22 @@ class HistoricalProvider extends RestProvider {
           }
         }
       }
-      if (lastErr) throw lastErr
     } finally {
       this._release()
+    }
+    if (lastErr) {
+      // After exhausted retries: swallow the error, return null, and let the
+      // tick continue with partial data instead of failing the whole job.
+      // Job code already handles null PVs gracefully (val(i)?.Value ?? 0
+      // pattern everywhere). Log + count rather than spamming the event
+      // stream — the summary lands in /health.
+      this._fetchFailures++
+      const now = Date.now()
+      if (now - this._lastFailLogMs > 30_000) {
+        console.warn(`[HistoricalProvider] ${this._fetchFailures} historian fetch failure(s) since last log; latest: ${fqn} → ${lastErr.message}`)
+        this._lastFailLogMs = now
+      }
+      return null
     }
     this._fqnCache.set(fqn, { simT: simNow, value: pv })
     if (verbose) {
