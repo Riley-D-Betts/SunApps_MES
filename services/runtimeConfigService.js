@@ -11,14 +11,17 @@ const db = require('../models')
  * + sim clock state from the new config.
  */
 
-// Defaults applied when the row is missing fields or fresh.
+// Defaults applied when the row is missing fields or fresh. Kept gentle on
+// the on-prem historian — 5s wall × SPEEDUP=60 = 5 sim-minutes per tick,
+// roughly matching production cadence in sim time without hammering the
+// AVEVA REST API with hundreds of concurrent NTLM queries.
 const DEFAULT_REPLAY_CRONS = {
-  separation: '*/1 * * * * *',
-  bulkMilk: '*/5 * * * * *',
-  blendTank: '*/1 * * * * *',
-  surgeTank: '*/1 * * * * *',
-  equipment: '*/1 * * * * *',
-  tick: '*/5 * * * * *',
+  separation: '*/5 * * * * *',
+  bulkMilk: '*/30 * * * * *',
+  blendTank: '*/5 * * * * *',
+  surgeTank: '*/5 * * * * *',
+  equipment: '*/10 * * * * *',
+  tick: '*/30 * * * * *',
 }
 
 let cached = null
