@@ -23,7 +23,7 @@
  */
 const core = require('../clients/coreClient')
 
-const NS_LOCATION_ID = 23 // Suntado plant — only location MES touches
+const NS_LOCATION_ID = 30 // Suntado plant — only location MES touches
 
 const _trackingCache = new Map()
 
