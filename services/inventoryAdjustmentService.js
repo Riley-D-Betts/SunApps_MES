@@ -26,6 +26,9 @@ const db = require('../models')
 // Suntado plant — only location MES touches. Matches nsInventoryLookup.
 const NS_LOCATION_ID = nsInventory.NS_LOCATION_ID
 const NS_SUBSIDIARY_ID = 3
+// GL account id 476 = "525000 Inventory Adjustment" — required by NS at the
+// header of every inventoryAdjustment.
+const NS_ADJ_ACCOUNT_ID = 476
 
 /**
  * Look up the current lot id sitting in (item, bin, location). Returns null
@@ -188,6 +191,7 @@ function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
   return {
     subsidiary: { id: NS_SUBSIDIARY_ID },
     location: { id: NS_LOCATION_ID },
+    account: { id: NS_ADJ_ACCOUNT_ID },
     memo: memo || 'MES auto inventory adjustment',
     inventory: { items: [item] },
   }
