@@ -27,10 +27,6 @@ const db = require('../models')
 const NS_LOCATION_ID = nsInventory.NS_LOCATION_ID
 const NS_SUBSIDIARY_ID = 3
 
-// Inventory status id 1 = "Good" — the only status MES touches. Matches the
-// componentInventoryDetail items elsewhere in this repo.
-const NS_INV_STATUS_GOOD = 1
-
 /**
  * Look up the current lot id sitting in (item, bin, location). Returns null
  * if no lot has on-hand here. Used by the adjustment path to:
@@ -142,18 +138,18 @@ async function resolveLotForBinAdjustment({ binId, itemId, qtyDelta, lastWoNumbe
  * keys, raw string IDs for nested fields. inventoryStatus is included
  * because adjustments against status-managed items require it.
  */
-// Build the inventoryAdjustment body, branching on the item's tracking class:
-//   - bin-only (silo items 5417/5404/etc): `binnumber` on the LINE; NS rejects
-//     inventoryDetail outright for these with "You cannot create an inventory
-//     detail for this item."
-//   - lot + bin (blend tank items): inventoryDetail wraps the assignment that
-//     pairs bin + lot.
-//   - lot only: inventoryDetail with the lot, no bin.
-//   - neither tracking class: just item + adjustQtyBy.
-//
-// Both `subsidiary` and `location` are REQUIRED at the line level on this
-// endpoint — header values do not implicitly inherit. NS surfaces the gap as
-// USER_ERROR "Please enter value(s) for: Location." at inventory.items[0].
+// Build the inventoryAdjustment body. `location` is required at both header
+// and line level; NS surfaces missing line-level location as USER_ERROR
+// "Please enter value(s) for: Location." Tracking class drives whether the
+// inventoryDetail block is needed and what fields it carries:
+//   - lot + bin (blend tank raw FG): assignment pairs binnumber + lot.
+//   - bin-only (silo items 5417/5404/etc): assignment carries binnumber only.
+//   - lot-only: assignment carries the lot only.
+//   - no tracking: omit inventoryDetail.
+// Shape mirrors the assemblyUnbuild body already used in this repo —
+// `binnumber: { id }` object form, NO inventoryStatus field. NS rejects the
+// status field on items that aren't status-managed with the misleading
+// "You cannot create an inventory detail for this item."
 function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
   const adjAbs = Math.abs(qtyDelta)
   const signedQty = qtyDelta
@@ -165,28 +161,28 @@ function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
     location: { id: NS_LOCATION_ID },
   }
 
+  const assignment = { quantity: adjAbs }
+  let needAssignment = false
+  if (tracking.useBins && binId) {
+    assignment.binnumber = { id: String(binId) }
+    needAssignment = true
+  }
   if (tracking.isLot) {
-    const assignment = {
-      quantity: adjAbs,
-      inventoryStatus: { id: NS_INV_STATUS_GOOD },
-    }
-    if (tracking.useBins && binId) {
-      assignment.binnumber = { id: String(binId) }
-    }
-    if (lot.isNewLot && lot.lotName) {
+    if (lot?.isNewLot && lot.lotName) {
       assignment.receiptInventoryNumber = lot.lotName
-    } else if (lot.lotId) {
+    } else if (lot?.lotId) {
       if (signedQty >= 0) {
         assignment.receiptInventoryNumber = { id: String(lot.lotId) }
       } else {
         assignment.issueInventoryNumber = { id: String(lot.lotId) }
       }
     }
+    needAssignment = true
+  }
+  if (needAssignment) {
     item.inventoryDetail = {
       inventoryAssignment: { items: [assignment] },
     }
-  } else if (tracking.useBins && binId) {
-    item.binnumber = { id: String(binId) }
   }
 
   return {
