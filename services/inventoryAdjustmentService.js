@@ -142,36 +142,49 @@ async function resolveLotForBinAdjustment({ binId, itemId, qtyDelta, lastWoNumbe
  * keys, raw string IDs for nested fields. inventoryStatus is included
  * because adjustments against status-managed items require it.
  */
+// Build the inventoryAdjustment body, branching on the item's tracking class:
+//   - bin-only (silo items 5417/5404/etc): `binnumber` on the LINE; NS rejects
+//     inventoryDetail outright for these with "You cannot create an inventory
+//     detail for this item."
+//   - lot + bin (blend tank items): inventoryDetail wraps the assignment that
+//     pairs bin + lot.
+//   - lot only: inventoryDetail with the lot, no bin.
+//   - neither tracking class: just item + adjustQtyBy.
+//
+// Line-level `location` is unused — NS rejects it with USER_ERROR and the line
+// implicitly inherits the header location.
 function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
   const adjAbs = Math.abs(qtyDelta)
   const signedQty = qtyDelta
+  const tracking = lot?.tracking || { isLot: false, useBins: false }
 
-  const assignment = {
-    quantity: adjAbs,
-    binnumber: { id: String(binId) },
-    inventoryStatus: { id: NS_INV_STATUS_GOOD },
-  }
-  if (lot?.isNewLot && lot.lotName) {
-    // New lot: NS wants the lot name as a string in receiptInventoryNumber.
-    assignment.receiptInventoryNumber = lot.lotName
-  } else if (lot?.lotId) {
-    if (signedQty >= 0) {
-      assignment.receiptInventoryNumber = { id: String(lot.lotId) }
-    } else {
-      assignment.issueInventoryNumber = { id: String(lot.lotId) }
-    }
-  }
-
-  // Line-level `location` is rejected by NS REST inventoryAdjustment with
-  // USER_ERROR "Invalid Field Value <id>" — the line inherits the header
-  // location implicitly. Header-level `location` (set below) is the only
-  // location field NS accepts on this endpoint.
   const item = {
     item: { id: String(itemId) },
     adjustQtyBy: signedQty,
-    inventoryDetail: {
+  }
+
+  if (tracking.isLot) {
+    const assignment = {
+      quantity: adjAbs,
+      inventoryStatus: { id: NS_INV_STATUS_GOOD },
+    }
+    if (tracking.useBins && binId) {
+      assignment.binnumber = { id: String(binId) }
+    }
+    if (lot.isNewLot && lot.lotName) {
+      assignment.receiptInventoryNumber = lot.lotName
+    } else if (lot.lotId) {
+      if (signedQty >= 0) {
+        assignment.receiptInventoryNumber = { id: String(lot.lotId) }
+      } else {
+        assignment.issueInventoryNumber = { id: String(lot.lotId) }
+      }
+    }
+    item.inventoryDetail = {
       inventoryAssignment: { items: [assignment] },
-    },
+    }
+  } else if (tracking.useBins && binId) {
+    item.binnumber = { id: String(binId) }
   }
 
   return {
