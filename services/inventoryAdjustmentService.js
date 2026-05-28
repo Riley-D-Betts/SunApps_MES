@@ -151,8 +151,9 @@ async function resolveLotForBinAdjustment({ binId, itemId, qtyDelta, lastWoNumbe
 //   - lot only: inventoryDetail with the lot, no bin.
 //   - neither tracking class: just item + adjustQtyBy.
 //
-// Line-level `location` is unused — NS rejects it with USER_ERROR and the line
-// implicitly inherits the header location.
+// Both `subsidiary` and `location` are REQUIRED at the line level on this
+// endpoint — header values do not implicitly inherit. NS surfaces the gap as
+// USER_ERROR "Please enter value(s) for: Location." at inventory.items[0].
 function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
   const adjAbs = Math.abs(qtyDelta)
   const signedQty = qtyDelta
@@ -161,6 +162,7 @@ function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
   const item = {
     item: { id: String(itemId) },
     adjustQtyBy: signedQty,
+    location: { id: NS_LOCATION_ID },
   }
 
   if (tracking.isLot) {
