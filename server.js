@@ -141,7 +141,7 @@ app.use('/api/mes/milk', milkMesRoutes)
 app.use('/api/mes/live-status', liveStatusRoutes)
 app.use('/api/mes/fg-pairings', fgPairingRoutes)
 app.use('/api/milk', milkRoutes)
-app.use('/api/dev/replay', devRoutes)
+app.use('/api/mes/dev/replay', devRoutes)
 
 app.listen(config.PORT, () => {
   console.log(`SunApps MES Service running on port ${config.PORT}`)
