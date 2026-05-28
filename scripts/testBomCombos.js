@@ -48,7 +48,7 @@ async function fireOne(sourceItemId, skimProductIndex) {
   const body = {
     item: { id: sourceItemId },
     quantity: sourceQty,
-    location: { id: 23 },
+    location: { id: 30 },
     subsidiary: { id: 3 },
     billOfMaterials: { id: bomId },
     custbody_milk_transfer_name: label,

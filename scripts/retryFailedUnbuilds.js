@@ -86,7 +86,7 @@ async function fireUnbuild(row) {
   const body = {
     item: { id: sourceItem.id },
     quantity: inputVolume,
-    location: { id: 23 },
+    location: { id: 30 },
     subsidiary: { id: 3 },
     billOfMaterials: { id: bomId },
     custbody_milk_source_silo: sourceSilo,

@@ -501,7 +501,7 @@ async function processWOStart(data, historian) {
     const body = {
       assemblyItem: { id: assemblyItem.id },
       quantity: 1,
-      location: { id: 23 },
+      location: { id: 30 },
       subsidiary: { id: 3 },
       // isWip MUST be true — see blendTankMesService.processWOStart for the
       // discovery context. NS rejects every workOrderIssue against a WO with

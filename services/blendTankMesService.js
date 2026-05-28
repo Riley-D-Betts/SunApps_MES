@@ -224,7 +224,7 @@ async function processWOStart(data) {
     const body = {
       assemblyItem: { id: assemblyItem.id },
       quantity: batchSize || 1,
-      location: { id: 23 },
+      location: { id: 30 },
       subsidiary: { id: 3 },
       // isWip MUST be true — controls whether NS lets us create
       // workOrderIssue transactions against the WO. Without it, NS rejects
