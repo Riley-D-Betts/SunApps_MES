@@ -206,7 +206,8 @@ class RestProvider extends BaseProvider {
           console.log(`[RestProvider] <-- RAW BODY (first 500 chars): ${res.body?.slice(0, 500)}`)
         }
         if (res.statusCode !== 200) {
-          return reject(new Error(`Historian API ${res.statusCode}: ${res.body?.slice(0, 300)}`))
+          const tail = (res.body && res.body.length > 0) ? ` body=${res.body.slice(0, 300)}` : ''
+          return reject(new Error(`Historian API ${res.statusCode} on ${url}${tail}`))
         }
         try {
           // Historian sometimes prepends a BOM
