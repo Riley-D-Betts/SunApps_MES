@@ -2,18 +2,18 @@ const RestProvider = require('./restProvider')
 const clock = require('../../sim/clock')
 
 // How long a fetched value is reused before the historian is asked again, in
-// SIM-time milliseconds. The on-prem historian gets unhappy under 60×-cadence
-// load when every cron fires every FQN at full sim speed; with this cache,
-// each FQN is only refetched every CACHE_TTL_SIM_MS of simulated time even if
-// every job asks for it on every tick.
-const CACHE_TTL_SIM_MS = 5 * 60 * 1000  // 5 sim-minutes
+// SIM-time milliseconds. Tuned to ONLY de-dup the within-tick burst (multiple
+// jobs reading the same FQN within the same cron fire) — must stay shorter
+// than the cron interval or delta-tracked tags break (surge gallons,
+// totalizers, the XFR rising-edge bit all need fresh values per tick).
+const CACHE_TTL_SIM_MS = 15 * 1000  // 15 sim-seconds
 
 // Max concurrent historian queries in flight. The on-prem AVEVA returns 500s
 // (empty body) when the request rate gets too high — observed in production
 // at >20 concurrent NTLM ProcessValues queries. This semaphore caps the
 // in-flight count so a single tick's burst of dozens of FQN fetches drains
 // in queued batches rather than overwhelming the server.
-const MAX_INFLIGHT = 5
+const MAX_INFLIGHT = 8
 
 // Narrower window than RestProvider's default 30-min lookback so the
 // historian doesn't have to scan and return huge ranges per tag per tick.
