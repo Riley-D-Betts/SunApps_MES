@@ -84,4 +84,8 @@ function stats() {
   return result
 }
 
-module.exports = { record, query, listFqns, stats }
+function clear() {
+  store.clear()
+}
+
+module.exports = { record, query, listFqns, stats, clear }

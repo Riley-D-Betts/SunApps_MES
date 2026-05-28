@@ -1,4 +1,5 @@
 const db = require('../models')
+const clock = require('../sim/clock')
 
 async function listPairings({ status } = {}) {
   const where = {}
@@ -20,7 +21,7 @@ async function approvePairing(id, { decidedBy, notes } = {}) {
   await row.update({
     status: 'approved',
     decidedBy: decidedBy || null,
-    decidedAt: new Date(),
+    decidedAt: new Date(clock.now()),
     notes: notes != null ? notes : row.notes,
   })
   console.log(`[FgPairingService] Pairing ${id} (FG ${row.fgItemId} ← raw ${row.rawInputItemId}) approved by ${decidedBy || 'unknown'}`)

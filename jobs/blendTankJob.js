@@ -3,6 +3,7 @@ const notifyService = require('../services/notifyService')
 const statusStore = require('../services/statusStore')
 const productParser = require('../services/blendTankProductParser')
 const db = require('../models')
+const clock = require('../sim/clock')
 
 // All-lines-stopped idle window. Once every feeding line has been quiet
 // (inactive or no totalizer advance) for this long, the batch closes with
@@ -79,7 +80,7 @@ async function hydrateFromDb(MesBlendTankBatch) {
     for (const r of rows) {
       if (!newestByTank[r.tankId]) newestByTank[r.tankId] = r
     }
-    const now = Date.now()
+    const now = clock.now()
     for (const tankId of Object.keys(tankState)) {
       const row = newestByTank[tankId]
       if (!row) continue
@@ -124,11 +125,11 @@ async function startBatch(tankId, prev, status, reason) {
   console.log(`[BlendTankJob] BATCH START on ${tankId}: "${productName}" (${reason})`)
   statusStore.pushEvent('blendTank.batchStart', `${tankId}: "${productName}" started`, { tankId, productName, batchSize, fromEntName, toEntName, reason })
   prev.batchActive = true
-  prev.batchStartedAt = Date.now()
+  prev.batchStartedAt = clock.now()
   prev.lastFlowAt = null
   prev.hasSeenFlow = false
   try {
-    await blendTankMesService.processWOStart({ tankId, productName, batchSize, fromEntName, toEntName, detectedAt: new Date().toISOString() })
+    await blendTankMesService.processWOStart({ tankId, productName, batchSize, fromEntName, toEntName, detectedAt: new Date(clock.now()).toISOString() })
   } catch (err) {
     console.error(`[BlendTankJob] processWOStart failed for ${tankId}:`, err.message)
   }
@@ -143,7 +144,7 @@ async function endBatch(tankId, prev, reason) {
   prev.lastFlowAt = null
   prev.hasSeenFlow = false
   try {
-    await blendTankMesService.processWOEnd({ tankId, productName, detectedAt: new Date().toISOString() })
+    await blendTankMesService.processWOEnd({ tankId, productName, detectedAt: new Date(clock.now()).toISOString() })
   } catch (err) {
     console.error(`[BlendTankJob] processWOEnd failed for ${tankId}:`, err.message)
   }
@@ -154,7 +155,7 @@ async function run(historian) {
   try {
     const statuses = await historian.getBlendTankStatus()
     const lineReadings = await historian.getMilkLineStatus()
-    const now = Date.now()
+    const now = clock.now()
 
     // Pre-statuses tail-catcher pass: fire processLineFlow for any line resets
     // BEFORE the statuses loop can close batches. Without this ordering, a poll
@@ -190,7 +191,7 @@ async function run(historian) {
           await blendTankMesService.processLineFlow({
             line, totalLbs: batchTotalLbs, lineProductName: flowProduct,
             siloName: flowSilo, destination: flowDest,
-            requestedTargetLbs: prev.requestedTargetLbs || 0, resetTime: new Date().toISOString(),
+            requestedTargetLbs: prev.requestedTargetLbs || 0, resetTime: new Date(clock.now()).toISOString(),
           })
         } catch (err) {
           console.error(`[BlendTankJob] processLineFlow failed for ${line}:`, err.message)
@@ -384,4 +385,13 @@ function getLastPollTime() {
   return lastPollTime
 }
 
-module.exports = { run, getLastPollTime, hydrateFromDb }
+function reset() {
+  for (const k of Object.keys(tankState)) {
+    tankState[k] = { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false }
+  }
+  for (const k of Object.keys(lineState)) {
+    lineState[k] = { prevValue: null, productName: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 }
+  }
+}
+
+module.exports = { run, getLastPollTime, hydrateFromDb, reset }

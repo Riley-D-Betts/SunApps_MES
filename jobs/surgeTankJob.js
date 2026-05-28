@@ -1,6 +1,7 @@
 const surgeTankMesService = require('../services/surgeTankMesService')
 const notifyService = require('../services/notifyService')
 const statusStore = require('../services/statusStore')
+const clock = require('../sim/clock')
 
 const EMPTY_THRESHOLD_GAL = 10
 // Minimum batch lifetime before the "tank emptied" END can fire. Prevents a
@@ -94,7 +95,7 @@ async function hydrateFromDb(MesSurgeTankBatch) {
       tankState[tankId].productName = row.productName
       tankState[tankId].batchActive = true
       tankState[tankId].seeded = true
-      tankState[tankId].batchStartedAt = row.detectedAt ? new Date(row.detectedAt).getTime() : Date.now()
+      tankState[tankId].batchStartedAt = row.detectedAt ? new Date(row.detectedAt).getTime() : clock.now()
       tankState[tankId].feedingUhtId = row.feedingUhtId || null
       tankState[tankId].feedingFromEntName = row.feedingFromEntName || null
       console.log(`[SurgeTankJob] Hydrated ${tankId} from DB: "${row.productName}" (active since ${row.detectedAt})`)
@@ -159,7 +160,7 @@ async function run(historian) {
       const hadProduct = !!prev.productName
       const hasProduct = !!productName
 
-      const batchAgeMs = prev.batchStartedAt ? Date.now() - prev.batchStartedAt : Infinity
+      const batchAgeMs = prev.batchStartedAt ? clock.now() - prev.batchStartedAt : Infinity
       if (prev.batchActive && hasProduct && gallons < EMPTY_THRESHOLD_GAL && batchAgeMs < MIN_BATCH_DURATION_MS) {
         console.log(`[SurgeTankJob] Suppressing false BATCH END on ${tankId}: gal=${Math.round(gallons)} but batch only ${Math.round(batchAgeMs / 1000)}s old`)
       }
@@ -170,7 +171,7 @@ async function run(historian) {
         prev.batchStartedAt = null
         prev.fillTickCount = 0
         try {
-          await surgeTankMesService.processWOEnd({ tankId, productName: prev.productName, detectedAt: new Date().toISOString() }, historian)
+          await surgeTankMesService.processWOEnd({ tankId, productName: prev.productName, detectedAt: new Date(clock.now()).toISOString() }, historian)
         } catch (err) {
           console.error(`[SurgeTankJob] processWOEnd failed for ${tankId}:`, err.message)
         }
@@ -192,7 +193,7 @@ async function run(historian) {
           prev.batchActive = false
           prev.batchStartedAt = null
           try {
-            await surgeTankMesService.processWOEnd({ tankId, productName: prev.productName, detectedAt: new Date().toISOString() }, historian)
+            await surgeTankMesService.processWOEnd({ tankId, productName: prev.productName, detectedAt: new Date(clock.now()).toISOString() }, historian)
           } catch (err) {
             console.error(`[SurgeTankJob] processWOEnd failed for ${tankId}:`, err.message)
           }
@@ -253,7 +254,7 @@ async function run(historian) {
         console.log(`[SurgeTankJob] BATCH START (${FILL_TICKS_FOR_START}-tick gate cleared) on ${tankId}: "${productName}" (UHT=${feedingUht || '?'}, from=${feedingFromEntName || '?'})`)
         statusStore.pushEvent('surgeTank.batchStart', `${tankId}: "${productName}" started`, { tankId, productName, feedingUhtId: feedingUht, feedingFromEntName })
         prev.batchActive = true
-        prev.batchStartedAt = Date.now()
+        prev.batchStartedAt = clock.now()
         prev.feedingUhtId = feedingUht
         prev.feedingFromEntName = feedingFromEntName
         prev.fillTickCount = 0
@@ -263,7 +264,7 @@ async function run(historian) {
             productName,
             feedingUhtId: feedingUht,
             feedingFromEntName,
-            detectedAt: new Date().toISOString(),
+            detectedAt: new Date(clock.now()).toISOString(),
           }, historian)
         } catch (err) {
           console.error(`[SurgeTankJob] processWOStart failed for ${tankId}:`, err.message)
@@ -277,7 +278,7 @@ async function run(historian) {
         prev.batchStartedAt = null
         prev.fillTickCount = 0
         try {
-          await surgeTankMesService.processWOEnd({ tankId, productName: prev.productName, detectedAt: new Date().toISOString() }, historian)
+          await surgeTankMesService.processWOEnd({ tankId, productName: prev.productName, detectedAt: new Date(clock.now()).toISOString() }, historian)
         } catch (err) {
           console.error(`[SurgeTankJob] processWOEnd failed for ${tankId}:`, err.message)
         }
@@ -301,4 +302,10 @@ function getLastPollTime() {
   return lastPollTime
 }
 
-module.exports = { run, getLastPollTime, hydrateFromDb }
+function reset() {
+  for (const k of Object.keys(tankState)) {
+    tankState[k] = blankTankState()
+  }
+}
+
+module.exports = { run, getLastPollTime, hydrateFromDb, reset }

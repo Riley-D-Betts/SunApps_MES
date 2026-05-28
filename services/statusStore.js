@@ -8,6 +8,8 @@
  * (Use the poll-store or DB for durable history.)
  */
 
+const clock = require('../sim/clock')
+
 const MAX_EVENTS = 500
 const MAX_RECENT_BATCHES = 20
 const MAX_RECENT_TANK_BATCHES = 25
@@ -36,7 +38,7 @@ const state = {
 }
 
 function now() {
-  return new Date().toISOString()
+  return new Date(clock.now()).toISOString()
 }
 
 function pushEvent(type, message, data) {
@@ -350,7 +352,7 @@ function summaryFromDbRow(row) {
   const cream = resolvedList.find(d => d.kind === 'cream') || null
   const skim = resolvedList.find(d => d.kind === 'skim' && (d.silo || d.raw) !== row.sourceSilo) || null
 
-  const ts = row.processedAt || row.createdAt || new Date()
+  const ts = row.processedAt || row.createdAt || new Date(clock.now())
   return {
     t: (ts instanceof Date ? ts : new Date(ts)).toISOString(),
     batchId: row.batchId,
@@ -495,6 +497,21 @@ function events({ since, limit } = {}) {
   return list
 }
 
+function clear() {
+  state.separator = null
+  state.blendTanks = null
+  state.bulkMilk = null
+  state.silos = null
+  state.uhts = null
+  state.surgeTanks = null
+  state.lastPoll = { separator: null, blendTank: null, bulkMilk: null, equipment: null }
+  state.events.length = 0
+  state.recentBatches.length = 0
+  state.recentBlendBatches.length = 0
+  state.recentSurgeBatches.length = 0
+  state.tick = null
+}
+
 module.exports = {
   pushEvent,
   setSeparator,
@@ -512,4 +529,5 @@ module.exports = {
   hydrateRecentSurgeBatches,
   snapshot,
   events,
+  clear,
 }

@@ -122,4 +122,8 @@ async function run(historian) {
   }
 }
 
-module.exports = { run }
+function reset() {
+  for (const k of Object.keys(_fillState)) delete _fillState[k]
+}
+
+module.exports = { run, reset }

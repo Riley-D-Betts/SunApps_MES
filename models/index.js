@@ -129,6 +129,21 @@ db.ensureRuntimeSchema = async function () {
   // rows on every boot. Newly-added entries in RAW_FG_TO_FG_MAP get auto-seeded
   // on the next deploy; rows added by ops via the approval flow are untouched.
   await seedFgInputPairings()
+
+  // Ensure the single-row MesRuntimeConfig exists. On first create, honor any
+  // env-based replay settings so existing dev configs migrate cleanly; after
+  // that the DB row is authoritative and env vars are ignored.
+  if (db.MesRuntimeConfig) {
+    await db.MesRuntimeConfig.findOrCreate({
+      where: { id: 1 },
+      defaults: {
+        id: 1,
+        replayMode: process.env.HISTORIAN_PROVIDER === 'historical',
+        simStart: process.env.SIM_START || null,
+        speedup: parseFloat(process.env.SPEEDUP || '60'),
+      },
+    })
+  }
 }
 
 async function seedFgInputPairings() {
@@ -161,5 +176,7 @@ async function seedFgInputPairings() {
   }
   if (inserted > 0) console.log(`[Models] Seeded ${inserted} canonical FG input pairing(s)`)
 }
+
+db.seedFgInputPairings = seedFgInputPairings
 
 module.exports = db

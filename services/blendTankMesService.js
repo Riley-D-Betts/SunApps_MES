@@ -5,6 +5,7 @@ const lineMapper = require('./lineIngredientMapper')
 const nsInventory = require('./nsInventoryLookup')
 const config = require('../config')
 const db = require('../models')
+const clock = require('../sim/clock')
 
 // Per-process BOM cache keyed by nsWorkOrderId. Fetched once per WO and reused
 // across ticks. Cleared when the batch closes.
@@ -152,12 +153,12 @@ async function processWOStart(data) {
   const recentBatch = await db.MesBlendTankBatch.findOne({
     where: {
       tankId,
-      detectedAt: { [db.Sequelize.Op.gte]: new Date(Date.now() - COOLDOWN_MINUTES * 60 * 1000) },
+      detectedAt: { [db.Sequelize.Op.gte]: new Date(clock.now() - COOLDOWN_MINUTES * 60 * 1000) },
     },
     order: [['detectedAt', 'DESC']],
   })
   if (recentBatch) {
-    const ageSec = Math.round((Date.now() - new Date(recentBatch.detectedAt).getTime()) / 1000)
+    const ageSec = Math.round((clock.now() - new Date(recentBatch.detectedAt).getTime()) / 1000)
     console.warn(`[BlendTankMesService] COOLDOWN: "${productName}" on ${tankId} rejected — last batch "${recentBatch.productName}" was ${ageSec}s ago (min ${COOLDOWN_MINUTES * 60}s)`)
     return { success: true, cooldown: true, tankId, productName, lastBatchAge: ageSec }
   }
@@ -193,7 +194,7 @@ async function processWOStart(data) {
     toEntName: toEntName || null,
     parserConfidence: assemblyItem.confidence,
     status: 'active',
-    detectedAt: detectedAt || new Date(),
+    detectedAt: detectedAt || new Date(clock.now()),
   })
 
   let nsResult = null
@@ -324,7 +325,7 @@ async function processWOEnd(data) {
   })
   await record.reload()
 
-  await record.update({ status: 'completed', completedAt: detectedAt || new Date() })
+  await record.update({ status: 'completed', completedAt: detectedAt || new Date(clock.now()) })
   if (record.nsWorkOrderId) clearBomCache(record.nsWorkOrderId)
   await db.MesProcessingLog.create({
     eventType: 'blend_tank_wo_complete',
@@ -501,16 +502,16 @@ async function processLineFlow(data) {
     await inflowRecord.update({ nsIssueId: nsIssueId ? String(nsIssueId) : null, status: 'completed' })
     // Bring the pipe state up to the peak so the next tick doesn't re-issue
     if (pipeState) {
-      await pipeState.update({ lastIssuedTotalizerLbs: totalLbs, lastIssueAt: new Date() })
+      await pipeState.update({ lastIssuedTotalizerLbs: totalLbs, lastIssueAt: new Date(clock.now()) })
     } else {
       await db.MesPipeIssueState.create({
         blendTankBatchId: targetBatch.id, line,
-        lastIssuedTotalizerLbs: totalLbs, lastIssueAt: new Date(),
-        lastTotalizerLbs: totalLbs, lastObservedAt: new Date(),
+        lastIssuedTotalizerLbs: totalLbs, lastIssueAt: new Date(clock.now()),
+        lastTotalizerLbs: totalLbs, lastObservedAt: new Date(clock.now()),
       })
     }
     await targetBatch.increment({ cumulativeIssuedLbs: delta })
-    await targetBatch.update({ lastIssueAt: new Date() })
+    await targetBatch.update({ lastIssueAt: new Date(clock.now()) })
 
     await db.MesProcessingLog.create({
       eventType: 'blend_tank_tail_issue', sourceId: targetBatch.nsWorkOrderId,
@@ -759,7 +760,7 @@ async function tickIssuesForBatch(batch, lineReadings) {
     }
   }
 
-  const observedAt = new Date()
+  const observedAt = new Date(clock.now())
   const candidates = []
   const activeLines = new Set()
 
@@ -1007,7 +1008,7 @@ async function tickCompletionForBatch(batch) {
 
   if (target < config.MES_MIN_COMPLETION_LBS) return false
   if (config.MES_DRY_RUN) {
-    await batch.update({ cumulativeCompletedLbs: cumulativeIssued, lastCompletionAt: new Date() })
+    await batch.update({ cumulativeCompletedLbs: cumulativeIssued, lastCompletionAt: new Date(clock.now()) })
     console.log(`[BlendTankMesService] DRY RUN tick completion ${batch.tankId}: ${target.toFixed(1)} lb`)
     return true
   }
@@ -1020,7 +1021,7 @@ async function tickCompletionForBatch(batch) {
     : batch.tankId
   const completionBinId = itemConfig.getBinId(completionDest)
 
-  const now = new Date()
+  const now = new Date(clock.now())
   const mm = String(now.getMonth() + 1).padStart(2, '0')
   const dd = String(now.getDate()).padStart(2, '0')
   const yy = String(now.getFullYear()).slice(-2)
@@ -1056,7 +1057,7 @@ async function tickCompletionForBatch(batch) {
 
     await batch.update({
       cumulativeCompletedLbs: cumulativeIssued,
-      lastCompletionAt: new Date(),
+      lastCompletionAt: new Date(clock.now()),
     })
 
     await db.MesProcessingLog.create({
@@ -1090,11 +1091,15 @@ async function clearStaleBatches() {
 
   for (const batch of stale) {
     console.log(`[BlendTankMesService] Cancelling stale batch: ${batch.tankId} / "${batch.productName}" (id=${batch.id})`)
-    await batch.update({ status: 'cancelled', completedAt: new Date() })
+    await batch.update({ status: 'cancelled', completedAt: new Date(clock.now()) })
   }
 
   console.log(`[BlendTankMesService] Cleared ${stale.length} stale batch(es)`)
   return { success: true, cleared: stale.length }
+}
+
+function clearCaches() {
+  _bomCache.clear()
 }
 
 module.exports = {
@@ -1107,4 +1112,5 @@ module.exports = {
   tickAllActiveBatches,
   clearStaleBatches,
   normalizeTankRef,
+  clearCaches,
 }

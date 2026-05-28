@@ -20,4 +20,8 @@ function getLastPollTime() {
   return lastPollTime
 }
 
-module.exports = { run, getLastPollTime }
+function reset() {
+  separatorStateMachine.reset()
+}
+
+module.exports = { run, getLastPollTime, reset }

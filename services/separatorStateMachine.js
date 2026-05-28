@@ -13,6 +13,7 @@ const db = require('../models')
 const statusStore = require('./statusStore')
 const itemConfig = require('./mesItemConfig')
 const milkMesService = require('./milkMesService')
+const clock = require('../sim/clock')
 
 const STATE_IDLE = 'idle'
 const STATE_RUNNING = 'running'
@@ -348,7 +349,7 @@ async function tick(historian) {
             where: {
               sourceSilo: sourceSiloForGuard,
               status: { [Op.in]: ['error', 'pending_ns', 'pending'] },
-              lastTickAt: { [Op.gte]: new Date(Date.now() - 8 * 60 * 60 * 1000) },
+              lastTickAt: { [Op.gte]: new Date(clock.now() - 8 * 60 * 60 * 1000) },
             },
             order: [['lastTickAt', 'DESC']],
           }) : null

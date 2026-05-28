@@ -176,6 +176,10 @@ class RestProvider extends BaseProvider {
     this._uhtPrevMode = { UHT1: 'IDLE', UHT2: 'IDLE' }
   }
 
+  // Current time hook. HistoricalProvider overrides to return sim time so the
+  // UHT software-totalizer integrates against sim-elapsed intervals.
+  _now() { return Date.now() }
+
   // ── OData helpers ──────────────────────────────────────────────────
 
   /**
@@ -884,7 +888,7 @@ class RestProvider extends BaseProvider {
       // Software-integrate milk flow (FT1102_Output, slot 13) while in PROCESS.
       // Reset accumulator on each IDLE/CIP→PROCESS transition so galActual
       // reflects only the current run's milk volume.
-      const nowMs = Date.now()
+      const nowMs = this._now()
       const prevMode   = this._uhtPrevMode[uhtId]
       const lastPollMs = this._uhtPollMs[uhtId]
       if (mode === 'PROCESS') {

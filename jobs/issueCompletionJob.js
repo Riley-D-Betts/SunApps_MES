@@ -77,4 +77,10 @@ function getLastSurgeSummary() {
   return lastSurgeSummary
 }
 
-module.exports = { run, getLastTickAt, getLastSummary, getLastSurgeSummary }
+function reset() {
+  lastTickAt = null
+  lastSummary = null
+  lastSurgeSummary = null
+}
+
+module.exports = { run, getLastTickAt, getLastSummary, getLastSurgeSummary, reset }

@@ -79,5 +79,11 @@ module.exports = {
   HISTORIAN_USERNAME: process.env.HISTORIAN_USERNAME,
   HISTORIAN_PASSWORD: process.env.HISTORIAN_PASSWORD,
   TEAMS_WEBHOOK_URL: process.env.TEAMS_WEBHOOK_URL,
+  // Historical-replay defaults. SIM_START is the wall-clock moment the sim
+  // clock begins ticking from; SPEEDUP is the multiplier (60 = sim time
+  // advances 60x faster than wall). Only consumed when HISTORIAN_PROVIDER
+  // is 'historical' — for live/mock providers these are ignored.
+  SIM_START: process.env.SIM_START || null,
+  SPEEDUP: parseFloat(process.env.SPEEDUP || '60'),
   sequelize,
 }

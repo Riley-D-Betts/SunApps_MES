@@ -2,6 +2,7 @@ const core = require('../clients/coreClient')
 const itemConfig = require('./mesItemConfig')
 const config = require('../config')
 const db = require('../models')
+const clock = require('../sim/clock')
 
 async function processSeparationBatch(data) {
   const {
@@ -207,7 +208,7 @@ async function processSeparationBatch(data) {
 
     if (gaps.length > 0 && !config.MES_DRY_RUN) {
       console.warn(`[MilkMesService] Batch ${batchId} missing: ${gaps.join('; ')} — saving pending_ns`)
-      await record.update({ status: 'pending_ns', processedAt: new Date() })
+      await record.update({ status: 'pending_ns', processedAt: new Date(clock.now()) })
       await db.MesProcessingLog.create({
         eventType: 'separation_unbuild', sourceId: batchId,
         nsTransactionType: 'assemblyUnbuild', nsTransactionId: null,
@@ -282,7 +283,7 @@ async function processSeparationBatch(data) {
 
     if (config.MES_DRY_RUN) {
       console.log(`[MilkMesService] DRY RUN — batch ${batchId} saved, skipping NS unbuild. Payload:\n${JSON.stringify(body, null, 2)}`)
-      await record.update({ status: 'dry_run', processedAt: new Date() })
+      await record.update({ status: 'dry_run', processedAt: new Date(clock.now()) })
       await db.MesProcessingLog.create({
         eventType: 'separation_unbuild', sourceId: batchId,
         nsTransactionType: 'assemblyUnbuild', nsTransactionId: null,
@@ -297,7 +298,7 @@ async function processSeparationBatch(data) {
     const locId = locHeader.match(/\/(\d+)(?:\?.*)?$/)?.[1] || null
     const nsTransactionId = nsResult?.body?.id || nsResult?.body?.unbuildId || nsResult?.id || locId || null
 
-    await record.update({ status: 'completed', nsTransactionId, processedAt: new Date() })
+    await record.update({ status: 'completed', nsTransactionId, processedAt: new Date(clock.now()) })
     await db.MesProcessingLog.create({
       eventType: 'separation_unbuild', sourceId: batchId,
       nsTransactionType: 'assemblyUnbuild', nsTransactionId,
@@ -309,7 +310,7 @@ async function processSeparationBatch(data) {
 
   } catch (err) {
     console.error(`[MilkMesService] Failed to create unbuild for batch ${batchId}:`, err.message)
-    await record.update({ status: 'error', errorMessage: err.message, processedAt: new Date() })
+    await record.update({ status: 'error', errorMessage: err.message, processedAt: new Date(clock.now()) })
     await db.MesProcessingLog.create({
       eventType: 'separation_unbuild', sourceId: batchId,
       nsTransactionType: 'assemblyUnbuild', nsTransactionId: null,
@@ -405,7 +406,7 @@ async function completeBulkMilkRun(data) {
   const run = await db.MesBulkMilkRun.findOne({ where: { workOrderId, status: 'active' } })
   if (!run) throw new Error(`No active bulk milk run found for work order ${workOrderId}`)
 
-  await run.update({ status: 'completed', completedAt: new Date() })
+  await run.update({ status: 'completed', completedAt: new Date(clock.now()) })
 
   console.log(`[MilkMesService] Completed bulk milk run: WO ${workOrderId} — Cream: ${run.cumulativeCream}, Skim: ${run.cumulativeSkim}`)
   return { success: true, workOrderId, cumulativeCream: parseFloat(run.cumulativeCream), cumulativeSkim: parseFloat(run.cumulativeSkim) }

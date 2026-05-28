@@ -5,6 +5,7 @@ const lineMapper = require('./lineIngredientMapper')
 const nsInventory = require('./nsInventoryLookup')
 const config = require('../config')
 const db = require('../models')
+const clock = require('../sim/clock')
 
 // UHT software totalizer is gallons; NS workOrder lines run in lbs. Use a
 // single density constant — UHT throughput is mixed during product changes,
@@ -208,7 +209,7 @@ async function _resolveLayer3Source(data, historian) {
           status: 'completed',
           mesItem: { [db.Sequelize.Op.ne]: null },
           cumulativeCompletedLbs: { [db.Sequelize.Op.gt]: 0 },
-          detectedAt: { [db.Sequelize.Op.gte]: new Date(Date.now() - 72 * 60 * 60 * 1000) },
+          detectedAt: { [db.Sequelize.Op.gte]: new Date(clock.now() - 72 * 60 * 60 * 1000) },
         },
         order: [['detectedAt', 'DESC']],
       })
@@ -331,7 +332,7 @@ async function resolveSurgeTankComponent(batch, historian) {
           status: 'completed',
           mesItem: { [db.Sequelize.Op.ne]: null },
           cumulativeCompletedLbs: { [db.Sequelize.Op.gt]: 0 },
-          detectedAt: { [db.Sequelize.Op.gte]: new Date(Date.now() - 72 * 60 * 60 * 1000) },
+          detectedAt: { [db.Sequelize.Op.gte]: new Date(clock.now() - 72 * 60 * 60 * 1000) },
         },
         order: [['detectedAt', 'DESC']],
       })
@@ -411,12 +412,12 @@ async function processWOStart(data, historian) {
   const recentBatch = await db.MesSurgeTankBatch.findOne({
     where: {
       tankId,
-      detectedAt: { [db.Sequelize.Op.gte]: new Date(Date.now() - COOLDOWN_MINUTES * 60 * 1000) },
+      detectedAt: { [db.Sequelize.Op.gte]: new Date(clock.now() - COOLDOWN_MINUTES * 60 * 1000) },
     },
     order: [['detectedAt', 'DESC']],
   })
   if (recentBatch) {
-    const ageSec = Math.round((Date.now() - new Date(recentBatch.detectedAt).getTime()) / 1000)
+    const ageSec = Math.round((clock.now() - new Date(recentBatch.detectedAt).getTime()) / 1000)
     console.warn(`[SurgeTankMesService] COOLDOWN: "${productName}" on ${tankId} rejected — last batch "${recentBatch.productName}" was ${ageSec}s ago (min ${COOLDOWN_MINUTES * 60}s)`)
     return { success: true, cooldown: true, tankId, productName, lastBatchAge: ageSec }
   }
@@ -470,7 +471,7 @@ async function processWOStart(data, historian) {
     pairingStatus: resolvedComponent?.pairingStatus || null,
     parserConfidence: assemblyItem.confidence,
     status: 'active',
-    detectedAt: detectedAt || new Date(),
+    detectedAt: detectedAt || new Date(clock.now()),
   })
 
   let nsResult = null
@@ -595,7 +596,7 @@ async function processWOEnd(data, historian) {
   }
   await record.reload()
 
-  await record.update({ status: 'completed', completedAt: detectedAt || new Date() })
+  await record.update({ status: 'completed', completedAt: detectedAt || new Date(clock.now()) })
   if (record.nsWorkOrderId) clearBomCache(record.nsWorkOrderId)
   await db.MesProcessingLog.create({
     eventType: 'surge_tank_wo_complete',
@@ -637,7 +638,7 @@ async function tickIssueForBatch(batch, historian) {
   }
 
   const currentGal = await historian.getUhtMilkTotalizer(batch.feedingUhtId)
-  const observedAt = new Date()
+  const observedAt = new Date(clock.now())
 
   let state = await db.MesSurgeTankIssueState.findOne({
     where: { surgeTankBatchId: batch.id, uhtId: batch.feedingUhtId },
@@ -770,14 +771,14 @@ async function tickCompletionForBatch(batch) {
 
   if (target < config.MES_MIN_COMPLETION_LBS) return false
   if (config.MES_DRY_RUN) {
-    await batch.update({ cumulativeCompletedLbs: cumulativeIssued, lastCompletionAt: new Date() })
+    await batch.update({ cumulativeCompletedLbs: cumulativeIssued, lastCompletionAt: new Date(clock.now()) })
     console.log(`[SurgeTankMesService] DRY RUN tick completion ${batch.tankId}: ${target.toFixed(1)} lb`)
     return true
   }
   if (!batch.nsWorkOrderId) return false
 
   const completionBinId = itemConfig.getBinId(batch.tankId)
-  const now = new Date()
+  const now = new Date(clock.now())
   const mm = String(now.getMonth() + 1).padStart(2, '0')
   const dd = String(now.getDate()).padStart(2, '0')
   const yy = String(now.getFullYear()).slice(-2)
@@ -809,7 +810,7 @@ async function tickCompletionForBatch(batch) {
 
     await batch.update({
       cumulativeCompletedLbs: cumulativeIssued,
-      lastCompletionAt: new Date(),
+      lastCompletionAt: new Date(clock.now()),
     })
 
     await db.MesProcessingLog.create({
@@ -863,6 +864,10 @@ async function tickAllActiveBatches(historian) {
   return summary
 }
 
+function clearCaches() {
+  _bomCache.clear()
+}
+
 module.exports = {
   processWOStart,
   processWOEnd,
@@ -870,4 +875,5 @@ module.exports = {
   tickCompletionForBatch,
   tickAllActiveBatches,
   resolveSurgeTankComponent,
+  clearCaches,
 }

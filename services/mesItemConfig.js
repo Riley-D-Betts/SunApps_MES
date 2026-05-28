@@ -341,7 +341,12 @@ async function resolveNSItemByMesCode(mesItemCode) {
   return resolved
 }
 
+function clearCaches() {
+  for (const k of Object.keys(_resolvedItemCache)) delete _resolvedItemCache[k]
+}
+
 module.exports = {
+  clearCaches,
   SEPARATION_BOM_MAP,
   getSeparationBomId,
   normalizeSkimIndex,
