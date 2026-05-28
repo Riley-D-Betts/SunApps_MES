@@ -9,11 +9,17 @@ const clock = require('../../sim/clock')
 const CACHE_TTL_SIM_MS = 15 * 1000  // 15 sim-seconds
 
 // Max concurrent historian queries in flight. The on-prem AVEVA returns 500s
-// (empty body) when the request rate gets too high — observed in production
-// at >20 concurrent NTLM ProcessValues queries. This semaphore caps the
-// in-flight count so a single tick's burst of dozens of FQN fetches drains
-// in queued batches rather than overwhelming the server.
-const MAX_INFLIGHT = 8
+// (empty body) under sustained ProcessValues load — even at 5–8 concurrent
+// requests with 10-min windows. Drop to 3 so the historian sees a steady
+// trickle instead of a burst. This makes ticks take longer to drain but
+// avoids the server giving up entirely.
+const MAX_INFLIGHT = 3
+
+// Failed-call retry with exponential backoff. Single retry handles the
+// transient overload case — if the historian is still dying after one
+// backoff, the cache won't refetch for CACHE_TTL_SIM_MS anyway so we
+// won't spam it again immediately.
+const RETRY_DELAYS_MS = [250, 750]
 
 // Narrower window than RestProvider's default 30-min lookback so the
 // historian doesn't have to scan and return huge ranges per tag per tick.
@@ -78,8 +84,21 @@ class HistoricalProvider extends RestProvider {
     try {
       const pinned = new Date(simNow)
       const windowStart = new Date(pinned.getTime() - VALUE_AT_WINDOW_MS)
-      const values = await this._queryProcessValues(fqn, windowStart, pinned, { verbose: false })
-      pv = values.length > 0 ? values[values.length - 1] : null
+      let lastErr = null
+      for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+        try {
+          const values = await this._queryProcessValues(fqn, windowStart, pinned, { verbose: false })
+          pv = values.length > 0 ? values[values.length - 1] : null
+          lastErr = null
+          break
+        } catch (err) {
+          lastErr = err
+          if (attempt < RETRY_DELAYS_MS.length) {
+            await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt]))
+          }
+        }
+      }
+      if (lastErr) throw lastErr
     } finally {
       this._release()
     }
