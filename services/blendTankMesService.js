@@ -864,10 +864,13 @@ async function tickIssuesForBatch(batch, lineReadings) {
   // Diagnostic: log REQUESTEDBY state for each line so we can tell whether
   // AVEVA is populating it (helps diagnose the silo-fallback path being taken).
   if (batch.nsWorkOrderId) {
-    const hasAnyFlow = lineReadings.some(r => r.totalizerLbs > 0)
+    // Gate "hasAnyFlow" on MES_MIN_ISSUE_LBS so 1-lb residual sensor noise on
+    // idle lines doesn't fire a false noMatchingLines alarm right after a
+    // line.flowComplete reset.
+    const hasAnyFlow = lineReadings.some(r => r.totalizerLbs >= config.MES_MIN_ISSUE_LBS)
     if (hasAnyFlow && matchingLines.length === 0) {
       const lineSnapshot = lineReadings
-        .filter(r => r.totalizerLbs > 0 || r.active)
+        .filter(r => r.totalizerLbs >= config.MES_MIN_ISSUE_LBS || r.active)
         .map(r => `${r.line}(tot=${Math.round(r.totalizerLbs)}lb requestedBy="${r.requestedBy}" silo="${r.siloName}")`)
         .join(', ')
       console.warn(`[BlendTankMesService] tick ${batch.tankId} (WO ${batch.nsWorkOrderId}): no matching lines despite flow — ${lineSnapshot || 'all zero'}`)
