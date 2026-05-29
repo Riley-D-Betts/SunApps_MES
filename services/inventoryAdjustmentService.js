@@ -154,7 +154,6 @@ async function resolveLotForBinAdjustment({ binId, itemId, qtyDelta, lastWoNumbe
 // status field on items that aren't status-managed with the misleading
 // "You cannot create an inventory detail for this item."
 function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
-  const adjAbs = Math.abs(qtyDelta)
   const signedQty = qtyDelta
   const tracking = lot?.tracking || { isLot: false, useBins: false }
 
@@ -164,7 +163,10 @@ function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
     location: { id: NS_LOCATION_ID },
   }
 
-  const assignment = { quantity: adjAbs }
+  // assignment.quantity must match the sign of adjustQtyBy — NS rejects a
+  // positive assignment quantity on a down-adjust with "You must enter a
+  // negative quantity."
+  const assignment = { quantity: signedQty }
   let needAssignment = false
   if (tracking.useBins && binId) {
     assignment.binnumber = { id: String(binId) }
@@ -172,7 +174,9 @@ function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
   }
   if (tracking.isLot) {
     if (lot?.isNewLot && lot.lotName) {
-      assignment.receiptInventoryNumber = lot.lotName
+      // New lot: NS rejects a bare string here with INVALID_VALUE. Object
+      // form with `inventoryNumber` carries the new lot name.
+      assignment.receiptInventoryNumber = { inventoryNumber: lot.lotName }
     } else if (lot?.lotId) {
       if (signedQty >= 0) {
         assignment.receiptInventoryNumber = { id: String(lot.lotId) }
