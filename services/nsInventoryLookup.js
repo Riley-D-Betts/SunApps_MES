@@ -80,23 +80,26 @@ async function getItemTracking(itemId) {
 async function findInventoryAllocations(itemId, neededQty, preferredBinId = null) {
   if (!itemId || !(neededQty > 0)) return []
 
-  // Pull every (lot, bin) row with positive on-hand. inventorybalance is a
-  // moderately heavy view; we filter at item + location to keep it tight.
-  // ORDER BY lot id ASC = oldest lot first (FIFO), bin pref is applied in JS
-  // after the query so we don't pay a second roundtrip.
+  // Pull every (lot, bin) row with positive AVAILABLE qty. We use
+  // quantityavailable, not quantityonhand — NS reserves/commits portions of a
+  // lot to open transactions, and an issue rejects with "You only have N
+  // available" if we try to take more than the available figure. Falls back
+  // to quantityonhand only when available is null (older NS lot rows that
+  // pre-date the availability tracker). ORDER BY lot id ASC = oldest first
+  // (FIFO); bin preference is applied in JS after the query.
   const q = `
     SELECT
-      inv.id              AS lot_id,
-      inv.inventorynumber AS lot_name,
-      bin.id              AS bin_id,
-      bin.binnumber       AS bin_name,
-      bal.quantityonhand  AS qty
+      inv.id                                       AS lot_id,
+      inv.inventorynumber                          AS lot_name,
+      bin.id                                       AS bin_id,
+      bin.binnumber                                AS bin_name,
+      COALESCE(bal.quantityavailable, bal.quantityonhand) AS qty
     FROM inventorybalance bal
     JOIN inventorynumber inv ON inv.id = bal.inventorynumber
     JOIN bin             bin ON bin.id = bal.binnumber
     WHERE bal.item = ${Number(itemId)}
       AND bal.location = ${NS_LOCATION_ID}
-      AND bal.quantityonhand > 0
+      AND COALESCE(bal.quantityavailable, bal.quantityonhand) > 0
     ORDER BY inv.id ASC
   `
 
@@ -151,13 +154,15 @@ async function findBinForItem(itemId, preferredBinId = null) {
   if (!itemId) return null
 
   const q = `
-    SELECT bin.id AS bin_id, bal.quantityonhand AS qty
+    SELECT
+      bin.id                                              AS bin_id,
+      COALESCE(bal.quantityavailable, bal.quantityonhand) AS qty
     FROM inventorybalance bal
     JOIN bin ON bin.id = bal.binnumber
     WHERE bal.item = ${Number(itemId)}
       AND bal.location = ${NS_LOCATION_ID}
-      AND bal.quantityonhand > 0
-    ORDER BY bal.quantityonhand DESC
+      AND COALESCE(bal.quantityavailable, bal.quantityonhand) > 0
+    ORDER BY COALESCE(bal.quantityavailable, bal.quantityonhand) DESC
   `
 
   let rows

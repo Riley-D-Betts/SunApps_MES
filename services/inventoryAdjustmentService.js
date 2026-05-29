@@ -38,17 +38,19 @@ const NS_ADJ_ACCOUNT_ID = 476
  */
 async function findExistingLotInBin(itemId, binId) {
   if (!itemId || !binId) return null
+  // Match nsInventoryLookup.findInventoryAllocations — use the available qty
+  // (post-committed) since that's what NS will let us issue against.
   const q = `
     SELECT TOP 1
-      inv.id              AS lot_id,
-      inv.inventorynumber AS lot_name,
-      bal.quantityonhand  AS qty
+      inv.id                                              AS lot_id,
+      inv.inventorynumber                                 AS lot_name,
+      COALESCE(bal.quantityavailable, bal.quantityonhand) AS qty
     FROM inventorybalance bal
     JOIN inventorynumber inv ON inv.id = bal.inventorynumber
     WHERE bal.item = ${Number(itemId)}
       AND bal.binnumber = ${Number(binId)}
       AND bal.location = ${NS_LOCATION_ID}
-      AND bal.quantityonhand > 0
+      AND COALESCE(bal.quantityavailable, bal.quantityonhand) > 0
     ORDER BY inv.id DESC
   `
   try {
