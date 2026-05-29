@@ -173,16 +173,14 @@ function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
     needAssignment = true
   }
   if (tracking.isLot) {
-    // NS inventoryAdjustment uses the generic `inventoryNumber` field on
-    // each assignment item — no receipt/issue prefix. UI shows the same
-    // Serial/Lot Number column for + and - adjustments, so a single field
-    // on the REST schema mirrors that. Shape:
+    // Lowercase `inventorynumber` matches the WO issue assignment convention
+    // already established in this repo (see nsInventoryLookup.buildAssignmentItems).
     //   - existing lot: { id: <lotId> }
     //   - new lot:      { inventoryNumber: <lotName> } (find-or-create by name)
     if (lot?.lotId) {
-      assignment.inventoryNumber = { id: String(lot.lotId) }
+      assignment.inventorynumber = { id: String(lot.lotId) }
     } else if (lot?.lotName) {
-      assignment.inventoryNumber = { inventoryNumber: lot.lotName }
+      assignment.inventorynumber = { inventoryNumber: lot.lotName }
     }
     needAssignment = true
   }
@@ -285,6 +283,7 @@ async function submitInventoryAdjustment(args) {
 
   try {
     console.log(`[InventoryAdjustment] POST (${source}) tank=${tankName} bin=${binId} item=${itemId} Δ=${qtyDelta.toFixed(2)} lot=${lot.lotName || lot.lotId || 'none'}`)
+    console.log(`[InventoryAdjustment] Body: ${JSON.stringify(body)}`)
     const nsResult = await core.netsuitePost('/record/v1/inventoryAdjustment', body)
     const nsAdjustmentId = extractNsAdjustmentId(nsResult)
     console.log(`[InventoryAdjustment] OK (${source}) ${tankName || ''}: NS id=${nsAdjustmentId}`)
