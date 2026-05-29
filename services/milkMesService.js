@@ -146,51 +146,55 @@ async function processSeparationBatch(data) {
     source: { silo: sourceSilo, productIndex: sourceIndex, productName: sourceName, nsItemId: sourceItem.id },
   })
 
+  const numericPayload = {
+    inputVolume,
+    creamVolume: creamVolume || 0,
+    skimVolume: skimVolume || 0,
+    wasteVolume: parseFloat(wasteVolume.toFixed(2)),
+    wastePercent: parseFloat(wastePercent.toFixed(2)),
+    targetVolume: targetVolume ?? null,
+  }
+
   let record
-  if (stateMachineRow) {
-    // State machine flow: update the existing row with resolution data.
-    // batchStart was set at open; preserve it. batchEnd was set at close.
-    await stateMachineRow.update({
-      inputVolume,
-      creamVolume: creamVolume || 0,
-      skimVolume: skimVolume || 0,
-      wasteVolume: parseFloat(wasteVolume.toFixed(2)),
-      wastePercent: parseFloat(wastePercent.toFixed(2)),
-      transferName: transferName || stateMachineRow.transferName,
-      destinations: destinationsJson,
-      itemId: itemId || stateMachineRow.itemId,
-      unit: unit || stateMachineRow.unit,
-      targetVolume: targetVolume ?? stateMachineRow.targetVolume,
-      endReason: endReason || stateMachineRow.endReason,
-      status: 'pending',
-    })
-    record = stateMachineRow
-  } else {
-    try {
+  try {
+    if (stateMachineRow) {
+      // State machine flow: update the existing row with resolution data.
+      // batchStart was set at open; preserve it. batchEnd was set at close.
+      await stateMachineRow.update({
+        ...numericPayload,
+        transferName: transferName || stateMachineRow.transferName,
+        destinations: destinationsJson,
+        itemId: itemId || stateMachineRow.itemId,
+        unit: unit || stateMachineRow.unit,
+        targetVolume: numericPayload.targetVolume ?? stateMachineRow.targetVolume,
+        endReason: endReason || stateMachineRow.endReason,
+        status: 'pending',
+      })
+      record = stateMachineRow
+    } else {
       record = await db.MesSeparationBatch.create({
         batchId,
         sourceSilo,
-        inputVolume,
-        creamVolume: creamVolume || 0,
-        skimVolume: skimVolume || 0,
-        wasteVolume: parseFloat(wasteVolume.toFixed(2)),
-        wastePercent: parseFloat(wastePercent.toFixed(2)),
+        ...numericPayload,
         batchStart,
         batchEnd,
         transferName: transferName || null,
         destinations: destinationsJson,
         itemId: itemId || null,
         unit: unit || null,
-        targetVolume: targetVolume ?? null,
         status: 'pending',
       })
-    } catch (err) {
-      if (err.name === 'SequelizeUniqueConstraintError') {
-        console.log(`[MilkMesService] Batch ${batchId} / ${sourceSilo} lost insert race — skipping`)
-        return { success: true, duplicate: true, batchId, status: 'race_dedup' }
-      }
-      throw err
     }
+  } catch (err) {
+    if (err.name === 'SequelizeUniqueConstraintError') {
+      console.log(`[MilkMesService] Batch ${batchId} / ${sourceSilo} lost insert race — skipping`)
+      return { success: true, duplicate: true, batchId, status: 'race_dedup' }
+    }
+    // DECIMAL overflow / numeric coercion failures don't tell us which column.
+    // Log the full numeric payload so we can spot the bad value.
+    console.error(`[MilkMesService] Batch ${batchId} / ${sourceSilo} persist failed: ${err.message}`)
+    console.error(`[MilkMesService] Numeric payload: ${JSON.stringify(numericPayload)}`)
+    throw err
   }
 
   try {
