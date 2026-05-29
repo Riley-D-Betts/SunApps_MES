@@ -173,15 +173,16 @@ function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
     needAssignment = true
   }
   if (tracking.isLot) {
-    // NS inventoryAdjustment uses issueInventoryNumber for BOTH up- and
-    // down-adjusts — receiptInventoryNumber is rejected here. Shape carries
-    // the lot reference:
+    // NS inventoryAdjustment uses the generic `inventoryNumber` field on
+    // each assignment item — no receipt/issue prefix. UI shows the same
+    // Serial/Lot Number column for + and - adjustments, so a single field
+    // on the REST schema mirrors that. Shape:
     //   - existing lot: { id: <lotId> }
-    //   - new lot:      { inventoryNumber: <lotName> } (find-or-create)
+    //   - new lot:      { inventoryNumber: <lotName> } (find-or-create by name)
     if (lot?.lotId) {
-      assignment.issueInventoryNumber = { id: String(lot.lotId) }
+      assignment.inventoryNumber = { id: String(lot.lotId) }
     } else if (lot?.lotName) {
-      assignment.issueInventoryNumber = { inventoryNumber: lot.lotName }
+      assignment.inventoryNumber = { inventoryNumber: lot.lotName }
     }
     needAssignment = true
   }
