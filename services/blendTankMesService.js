@@ -94,6 +94,15 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
   const tracking = await nsInventory.getItemTracking(targetItemId)
   const targetLine = await ensureItemOnWoBom(nsWorkOrderId, targetItemId, bomLines)
 
+  // Floor the request to 2-decimal lbs precision. Totalizer deltas come in
+  // at full float precision (e.g. 20671.83897702), and when we echo that
+  // value back into the inventoryAssignment, JS number serialization can
+  // drift to a value microscopically higher than NS's stored available —
+  // NS then rejects with "You only have N available." Truncating below
+  // sensor precision keeps the request strictly under whatever NS has,
+  // and a sub-penny remainder doesn't matter for lbs-tracked inventory.
+  quantity = Math.floor(quantity * 100) / 100
+
   let allocations = null
   let resolvedBinId = preferredBinId
   if (tracking.isLot) {

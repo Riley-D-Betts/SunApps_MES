@@ -77,6 +77,11 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
   const tracking = await nsInventory.getItemTracking(targetItemId)
   const targetLine = await ensureItemOnWoBom(nsWorkOrderId, targetItemId, bomLines)
 
+  // Floor request to 2-decimal lbs precision so JS float serialization
+  // can't drift the assignment qty above NS's stored available. See the
+  // matching block in blendTankMesService.buildWoIssueBody for details.
+  quantity = Math.floor(quantity * 100) / 100
+
   let allocations = null
   if (tracking.isLot) {
     allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
