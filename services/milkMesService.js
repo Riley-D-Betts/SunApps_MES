@@ -191,9 +191,13 @@ async function processSeparationBatch(data) {
       return { success: true, duplicate: true, batchId, status: 'race_dedup' }
     }
     // DECIMAL overflow / numeric coercion failures don't tell us which column.
-    // Log the full numeric payload so we can spot the bad value.
+    // Log the full numeric payload so we can spot the bad value, AND attach
+    // it to the error so it surfaces in the dashboard event-stream data
+    // (separatorStateMachine forwards err.message + .data into pushEvent).
     console.error(`[MilkMesService] Batch ${batchId} / ${sourceSilo} persist failed: ${err.message}`)
     console.error(`[MilkMesService] Numeric payload: ${JSON.stringify(numericPayload)}`)
+    err.numericPayload = numericPayload
+    err.message = `${err.message} | payload=${JSON.stringify(numericPayload)}`
     throw err
   }
 
