@@ -127,18 +127,27 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
     // will reject with "you only have N available."
     resolvedBinId = await nsInventory.findBinForItem(targetItemId, preferredBinId, quantity)
     if (!resolvedBinId) {
-      const adjusted = preferredBinId
-        ? await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall: quantity })
+      // Compute the actual shortfall using current on-hand (which can be
+      // NEGATIVE when prior issues consumed past the bin's real balance).
+      // shortfall = quantity - currentOnHand. If on-hand is -20k and we
+      // need 21k, the real shortfall is 41k — not 21k. NS otherwise
+      // rejects the issue with "Bin not available: On Hand: -20549..."
+      const currentOnHand = preferredBinId
+        ? await inventoryAdjustment.getBinQtyOnHand(targetItemId, preferredBinId)
+        : 0
+      const realShortfall = quantity - currentOnHand
+      const adjusted = preferredBinId && realShortfall > 0
+        ? await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall: realShortfall })
         : false
       if (adjusted) {
         resolvedBinId = await pollBinForItem(targetItemId, preferredBinId, quantity)
       }
       if (!resolvedBinId) {
-        const err = new Error(`Insufficient inventory for item ${targetItemId}: preferred bin ${preferredBinId} has less than ${quantity} lb available`)
+        const err = new Error(`Insufficient inventory for item ${targetItemId}: preferred bin ${preferredBinId} has less than ${quantity} lb available (on-hand ${currentOnHand.toFixed(2)})`)
         err.code = 'INSUFFICIENT_INVENTORY'
         err.itemId = targetItemId
         err.needed = quantity
-        err.available = 0
+        err.available = currentOnHand
         throw err
       }
     }
