@@ -1144,9 +1144,12 @@ async function tickIssuesForBatch(batch, lineReadings) {
       issuesFired++
     } catch (err) {
       console.error(`[BlendTankMesService] tick issue failed for ${memberLabel} → WO ${batch.nsWorkOrderId}:`, err.message)
+      const allocSummary = (allocations || [])
+        .map(a => `lot ${a.lotName}(id=${a.lotId})@bin ${a.binName}(id=${a.binId}) take=${a.qty.toFixed(2)}`)
+        .join('; ') || '(no lots)'
       statusStore.pushEvent(
         'blendTick.issueFailed',
-        `${batch.tankId} ${memberLabel}: NS workOrderIssue POST failed (${g.totalDelta.toFixed(0)} lb) — ${nsErrShort(err)}`,
+        `${batch.tankId} ${memberLabel}: NS workOrderIssue POST failed (${g.totalDelta.toFixed(0)} lb, prefBin=${g.binId}) — ${nsErrShort(err)} [allocs: ${allocSummary}]`,
         {
           tankId: batch.tankId,
           nsWorkOrderId: batch.nsWorkOrderId,
@@ -1154,6 +1157,7 @@ async function tickIssuesForBatch(batch, lineReadings) {
           itemId: g.component.id,
           binId: g.binId,
           totalDelta: g.totalDelta,
+          allocations: allocations || [],
           error: err.message.slice(0, 500),
         }
       )

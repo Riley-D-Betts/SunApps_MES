@@ -80,6 +80,15 @@ async function getItemTracking(itemId) {
 async function findInventoryAllocations(itemId, neededQty, preferredBinId = null) {
   if (!itemId || !(neededQty > 0)) return []
 
+  // Source issues must come from the named source bin (silo / blend tank).
+  // Falling back to any-bin-with-stock will pick up unrelated inventory
+  // sitting in other bins — e.g. a stale lot in a destination silo — which
+  // NS then rejects on the issue. When preferredBinId is given, we filter
+  // the SQL itself so the allocator never sees other bins' rows.
+  const binFilter = preferredBinId != null
+    ? `AND bal.binnumber = ${Number(preferredBinId)}`
+    : ''
+
   // Pull every (lot, bin) row with positive AVAILABLE qty. We use
   // quantityavailable, not quantityonhand — NS reserves/commits portions of a
   // lot to open transactions, and an issue rejects with "You only have N
@@ -100,6 +109,7 @@ async function findInventoryAllocations(itemId, neededQty, preferredBinId = null
     WHERE bal.item = ${Number(itemId)}
       AND bal.location = ${NS_LOCATION_ID}
       AND COALESCE(bal.quantityavailable, bal.quantityonhand) > 0
+      ${binFilter}
     ORDER BY inv.id ASC
   `
 
@@ -113,15 +123,8 @@ async function findInventoryAllocations(itemId, neededQty, preferredBinId = null
   }
 
   if (rows.length === 0) return []
-
-  // Sort: preferred-bin rows first (preserving FIFO within each group)
-  if (preferredBinId != null) {
-    rows.sort((a, b) => {
-      const aPref = String(a.bin_id) === String(preferredBinId) ? 0 : 1
-      const bPref = String(b.bin_id) === String(preferredBinId) ? 0 : 1
-      return aPref - bPref
-    })
-  }
+  // SQL already filtered to preferredBinId when supplied; FIFO across lots is
+  // preserved by the ORDER BY inv.id ASC on the query.
 
   const allocations = []
   let remaining = neededQty
@@ -160,6 +163,12 @@ async function findInventoryAllocations(itemId, neededQty, preferredBinId = null
 async function findBinForItem(itemId, preferredBinId = null) {
   if (!itemId) return null
 
+  // Strict-preferred-bin: when the caller names a source bin, only that bin
+  // counts as a valid result. Falling back to any-bin-with-stock would let
+  // an issue draw from an unrelated bin and confuse downstream accounting.
+  const binFilter = preferredBinId != null
+    ? `AND bal.binnumber = ${Number(preferredBinId)}`
+    : ''
   const q = `
     SELECT
       bin.id                                              AS bin_id,
@@ -169,6 +178,7 @@ async function findBinForItem(itemId, preferredBinId = null) {
     WHERE bal.item = ${Number(itemId)}
       AND bal.location = ${NS_LOCATION_ID}
       AND COALESCE(bal.quantityavailable, bal.quantityonhand) > 0
+      ${binFilter}
     ORDER BY COALESCE(bal.quantityavailable, bal.quantityonhand) DESC
   `
 
@@ -182,12 +192,6 @@ async function findBinForItem(itemId, preferredBinId = null) {
   }
 
   if (rows.length === 0) return null
-
-  if (preferredBinId != null) {
-    const preferred = rows.find(r => String(r.bin_id) === String(preferredBinId))
-    if (preferred) return String(preferred.bin_id)
-  }
-
   return String(rows[0].bin_id)
 }
 
