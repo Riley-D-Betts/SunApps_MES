@@ -141,59 +141,55 @@ async function resolveLotForBinAdjustment({ binId, itemId, qtyDelta, lastWoNumbe
  * keys, raw string IDs for nested fields. inventoryStatus is included
  * because adjustments against status-managed items require it.
  */
-// Build the inventoryAdjustment body. `location` is required at both header
-// and line level; NS surfaces missing line-level location as USER_ERROR
-// "Please enter value(s) for: Location." Tracking class drives whether the
-// inventoryDetail block is needed and what fields it carries:
-//   - lot + bin (blend tank raw FG): assignment pairs binnumber + lot.
-//   - bin-only (silo items 5417/5404/etc): assignment carries binnumber only.
-//   - lot-only: assignment carries the lot only.
-//   - no tracking: omit inventoryDetail.
-// Shape mirrors the assemblyUnbuild body already used in this repo —
-// `binnumber: { id }` object form, NO inventoryStatus field. NS rejects the
-// status field on items that aren't status-managed with the misleading
-// "You cannot create an inventory detail for this item."
+// Build the inventoryAdjustment body. Shape mirrors the working pattern in
+// SunApps/src/components/views/pallets/PalletAdjust.vue line 688 — the only
+// inventoryAdjustment code in the org we know NS accepts. Key differences
+// from other endpoints in this repo:
+//   - Header `account`/`adjLocation`/`subsidiary`/`department` are raw
+//     numbers/ids, NOT `{ id }`-wrapped objects.
+//   - `customForm: 10` (Standard Inventory Adjustment) is required.
+//   - Line `item` is a raw integer, line `location` is a raw integer, line
+//     `department` is `{ id: '<string>' }`.
+//   - Assignment uses `status: 1` (raw, not `inventoryStatus: { id: 1 }`).
+//   - For lot-tracked items, `receiptInventoryNumber` is a raw STRING (the
+//     lot name) used for BOTH up- and down-adjusts; signed quantity at the
+//     line AND assignment levels carries the direction. The PalletAdjust
+//     code explicitly notes "NetSuite REST API may not support
+//     issueInventoryNumber" — confirmed by our own trial-and-error here.
 function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
   const signedQty = qtyDelta
   const tracking = lot?.tracking || { isLot: false, useBins: false }
 
-  const item = {
-    item: { id: String(itemId) },
-    adjustQtyBy: signedQty,
-    location: { id: NS_LOCATION_ID },
+  const assignment = {
+    status: 1,
+    quantity: signedQty,
   }
-
-  // assignment.quantity must match the sign of adjustQtyBy — NS rejects a
-  // positive assignment quantity on a down-adjust with "You must enter a
-  // negative quantity."
-  const assignment = { quantity: signedQty }
-  let needAssignment = false
   if (tracking.useBins && binId) {
     assignment.binnumber = { id: String(binId) }
-    needAssignment = true
   }
-  if (tracking.isLot) {
-    // Lowercase `inventorynumber` matches the WO issue assignment convention
-    // already established in this repo (see nsInventoryLookup.buildAssignmentItems).
-    //   - existing lot: { id: <lotId> }
-    //   - new lot:      { inventoryNumber: <lotName> } (find-or-create by name)
-    if (lot?.lotId) {
-      assignment.inventorynumber = { id: String(lot.lotId) }
-    } else if (lot?.lotName) {
-      assignment.inventorynumber = { inventoryNumber: lot.lotName }
-    }
-    needAssignment = true
+  if (tracking.isLot && lot?.lotName) {
+    assignment.receiptInventoryNumber = lot.lotName
   }
-  if (needAssignment) {
+
+  const item = {
+    item: Number(itemId),
+    adjustQtyBy: signedQty,
+    line: 1,
+    location: NS_LOCATION_ID,
+    department: { id: '7' },
+  }
+  if (tracking.useBins || tracking.isLot) {
     item.inventoryDetail = {
       inventoryAssignment: { items: [assignment] },
     }
   }
 
   return {
-    subsidiary: { id: NS_SUBSIDIARY_ID },
-    location: { id: NS_LOCATION_ID },
-    account: { id: NS_ADJ_ACCOUNT_ID },
+    account: NS_ADJ_ACCOUNT_ID,
+    adjLocation: NS_LOCATION_ID,
+    subsidiary: NS_SUBSIDIARY_ID,
+    customForm: 10,
+    department: 7,
     memo: memo || 'MES auto inventory adjustment',
     inventory: { items: [item] },
   }
