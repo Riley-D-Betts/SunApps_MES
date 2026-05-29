@@ -173,18 +173,15 @@ function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
     needAssignment = true
   }
   if (tracking.isLot) {
-    // Up- vs down-adjust uses different lot fields:
-    //   - Up-adjust (receipt direction): receiptInventoryNumber with the lot
-    //     NAME under `inventoryNumber`. NS finds-or-creates the lot by name,
-    //     so the same shape works whether the lot already exists in this bin
-    //     or we're seeding a new one with MMDDYY+WO#.
-    //   - Down-adjust (issue direction): issueInventoryNumber with the lot
-    //     id. There must be an existing lot to issue from; the
-    //     unresolved-lot branch above skips negative adjusts with no lot.
-    if (signedQty >= 0 && lot?.lotName) {
-      assignment.receiptInventoryNumber = { inventoryNumber: lot.lotName }
-    } else if (signedQty < 0 && lot?.lotId) {
+    // NS inventoryAdjustment uses issueInventoryNumber for BOTH up- and
+    // down-adjusts — receiptInventoryNumber is rejected here. Shape carries
+    // the lot reference:
+    //   - existing lot: { id: <lotId> }
+    //   - new lot:      { inventoryNumber: <lotName> } (find-or-create)
+    if (lot?.lotId) {
       assignment.issueInventoryNumber = { id: String(lot.lotId) }
+    } else if (lot?.lotName) {
+      assignment.issueInventoryNumber = { inventoryNumber: lot.lotName }
     }
     needAssignment = true
   }
