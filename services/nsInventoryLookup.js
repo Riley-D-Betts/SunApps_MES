@@ -132,14 +132,7 @@ async function findInventoryAllocations(itemId, neededQty, preferredBinId = null
     if (remaining <= 0) break
     const rowQty = parseFloat(r.qty) || 0
     if (rowQty <= 0) continue
-    // Floor the per-lot take to 2 decimals (lbs precision). NS reports
-    // quantityavailable at full DB precision (e.g. 556.74628043); echoing
-    // that back through JS float serialization can serialize to a value
-    // microscopically larger, which NS rejects with "You only have N
-    // available. Please enter a different quantity." Flooring keeps us
-    // strictly under whatever NS reported.
-    const take = Math.floor(Math.min(remaining, rowQty) * 100) / 100
-    if (take <= 0) continue
+    const take = Math.min(remaining, rowQty)
     allocations.push({
       lotId: String(r.lot_id),
       lotName: r.lot_name,
