@@ -78,8 +78,10 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
       const shortfall = quantity - allocatedQty
       const adjusted = await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall })
       if (adjusted) {
-        allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
-        allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
+        // Poll with backoff — NS inventorybalance lags the adjustment POST.
+        const result = await pollAllocations(targetItemId, quantity, preferredBinId)
+        allocations = result.allocations
+        allocatedQty = result.allocatedQty
       }
       if (allocatedQty + 1e-6 < quantity) {
         const err = new Error(`Insufficient inventory for item ${targetItemId}: need ${quantity}, found ${allocatedQty} across ${allocations.length} lot(s)`)
@@ -107,6 +109,23 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
     allocations,
     tracking,
   }
+}
+
+// Backoff-poll the allocations after an auto-adjust — NS inventorybalance
+// view lags the inventoryAdjustment POST by a few seconds. See
+// blendTankMesService.pollAllocations for the rationale.
+const SHORTFALL_POLL_DELAYS_MS = [1000, 2000, 3000]
+
+async function pollAllocations(targetItemId, quantity, preferredBinId) {
+  let allocations = []
+  let allocatedQty = 0
+  for (const delay of SHORTFALL_POLL_DELAYS_MS) {
+    await new Promise(r => setTimeout(r, delay))
+    allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
+    allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
+    if (allocatedQty + 1e-6 >= quantity) break
+  }
+  return { allocations, allocatedQty }
 }
 
 // Source-bin auto-adjust hook for the surge-WO issue path. Mirror of

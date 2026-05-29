@@ -92,8 +92,12 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
       const shortfall = quantity - allocatedQty
       const adjusted = await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall })
       if (adjusted) {
-        allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
-        allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
+        // NS inventorybalance view lags the inventoryAdjustment POST by a
+        // few seconds. Poll with backoff before declaring the issue dead;
+        // otherwise we adjust over and over while the tick stays at 0 lb.
+        const result = await pollAllocations(targetItemId, quantity, preferredBinId)
+        allocations = result.allocations
+        allocatedQty = result.allocatedQty
       }
       if (allocatedQty + 1e-6 < quantity) {
         const err = new Error(`Insufficient inventory for item ${targetItemId}: need ${quantity}, found ${allocatedQty} across ${allocations.length} lot(s)`)
@@ -116,7 +120,7 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
         ? await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall: quantity })
         : false
       if (adjusted) {
-        resolvedBinId = await nsInventory.findBinForItem(targetItemId, preferredBinId)
+        resolvedBinId = await pollBinForItem(targetItemId, preferredBinId)
       }
       if (!resolvedBinId) {
         const err = new Error(`Insufficient inventory for item ${targetItemId}: no on-hand stock found in any bin at this location`)
@@ -150,6 +154,32 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
 // source up by exactly the shortfall and signal the caller to retry the
 // allocation lookup. Returns true on a successful adjust, false otherwise —
 // the caller decides whether to retry the issue or surface INSUFFICIENT_INVENTORY.
+// After an auto-adjust POST returns 200, NS's inventorybalance view takes
+// a few seconds to reflect the new on-hand. Poll the allocation lookup with
+// backoff (1s, 2s, 3s) instead of giving up on the immediate re-query.
+const SHORTFALL_POLL_DELAYS_MS = [1000, 2000, 3000]
+
+async function pollAllocations(targetItemId, quantity, preferredBinId) {
+  let allocations = []
+  let allocatedQty = 0
+  for (const delay of SHORTFALL_POLL_DELAYS_MS) {
+    await new Promise(r => setTimeout(r, delay))
+    allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
+    allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
+    if (allocatedQty + 1e-6 >= quantity) break
+  }
+  return { allocations, allocatedQty }
+}
+
+async function pollBinForItem(targetItemId, preferredBinId) {
+  for (const delay of SHORTFALL_POLL_DELAYS_MS) {
+    await new Promise(r => setTimeout(r, delay))
+    const bin = await nsInventory.findBinForItem(targetItemId, preferredBinId)
+    if (bin) return bin
+  }
+  return null
+}
+
 async function tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall }) {
   if (!preferredBinId || !(shortfall > 0)) return false
   let lastWoNumber = null
