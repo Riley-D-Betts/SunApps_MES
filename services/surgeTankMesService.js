@@ -4,9 +4,16 @@ const productParser = require('./surgeTankProductParser')
 const lineMapper = require('./lineIngredientMapper')
 const nsInventory = require('./nsInventoryLookup')
 const inventoryAdjustment = require('./inventoryAdjustmentService')
+const statusStore = require('./statusStore')
 const config = require('../config')
 const db = require('../models')
 const clock = require('../sim/clock')
+
+function nsErrShort(err) {
+  const msg = String(err?.message || '')
+  const m = msg.match(/"detail":"([^"]+)"/)
+  return m ? m[1] : msg.slice(0, 200)
+}
 
 // UHT software totalizer is gallons; NS workOrder lines run in lbs. Use a
 // single density constant — UHT throughput is mixed during product changes,
@@ -746,10 +753,20 @@ async function tickIssueForBatch(batch, historian) {
   const component = await resolveSurgeTankComponent(batch, historian)
   if (!component?.itemId) {
     console.warn(`[SurgeTankMesService] tick: cannot resolve component for ${batch.tankId} (from ${batch.feedingFromEntName}) — deferring`)
+    statusStore.pushEvent(
+      'surgeTick.skipped',
+      `${batch.tankId}: cannot resolve component (from ${batch.feedingFromEntName}) — ${deltaLbs.toFixed(0)} lb deferred`,
+      { tankId: batch.tankId, reason: 'no-component', from: batch.feedingFromEntName, deltaLbs }
+    )
     return false
   }
   if (!component.binId) {
     console.warn(`[SurgeTankMesService] tick: no bin for component source on ${batch.tankId} — deferring (${deltaLbs.toFixed(1)} lb)`)
+    statusStore.pushEvent(
+      'surgeTick.skipped',
+      `${batch.tankId}: no bin for component source — ${deltaLbs.toFixed(0)} lb deferred`,
+      { tankId: batch.tankId, reason: 'no-bin', component, deltaLbs }
+    )
     return false
   }
 
@@ -766,6 +783,20 @@ async function tickIssueForBatch(batch, historian) {
     allocations = built.allocations
   } catch (err) {
     console.error(`[SurgeTankMesService] tick issue ${batch.tankId} → WO ${batch.nsWorkOrderId}: buildWoIssueBody failed — ${err.message}`)
+    statusStore.pushEvent(
+      'surgeTick.issueFailed',
+      `${batch.tankId}: buildWoIssueBody failed (${deltaLbs.toFixed(0)} lb, item ${component.itemId}) — ${nsErrShort(err)}`,
+      {
+        tankId: batch.tankId,
+        nsWorkOrderId: batch.nsWorkOrderId,
+        phase: 'buildWoIssueBody',
+        code: err.code || null,
+        itemId: component.itemId,
+        binId: component.binId,
+        deltaLbs,
+        error: err.message.slice(0, 500),
+      }
+    )
     await db.MesProcessingLog.create({
       eventType: 'surge_tank_tick_issue',
       sourceId: batch.nsWorkOrderId,
@@ -806,6 +837,17 @@ async function tickIssueForBatch(batch, historian) {
     return true
   } catch (err) {
     console.error(`[SurgeTankMesService] tick issue failed for ${batch.tankId} (WO ${batch.nsWorkOrderId}):`, err.message)
+    statusStore.pushEvent(
+      'surgeTick.issueFailed',
+      `${batch.tankId}: NS workOrderIssue POST failed (${deltaLbs.toFixed(0)} lb) — ${nsErrShort(err)}`,
+      {
+        tankId: batch.tankId,
+        nsWorkOrderId: batch.nsWorkOrderId,
+        phase: 'netsuitePost',
+        deltaLbs,
+        error: err.message.slice(0, 500),
+      }
+    )
     await db.MesProcessingLog.create({
       eventType: 'surge_tank_tick_issue',
       sourceId: batch.nsWorkOrderId,
@@ -880,6 +922,18 @@ async function tickCompletionForBatch(batch) {
     return true
   } catch (err) {
     console.error(`[SurgeTankMesService] tick completion failed for WO ${batch.nsWorkOrderId}:`, err.message)
+    statusStore.pushEvent(
+      'surgeTick.completionFailed',
+      `${batch.tankId}: NS workOrderCompletion POST failed (${target.toFixed(0)} lb) — ${nsErrShort(err)}`,
+      {
+        tankId: batch.tankId,
+        nsWorkOrderId: batch.nsWorkOrderId,
+        target,
+        cumulativeIssued,
+        cumulativeCompleted,
+        error: err.message.slice(0, 500),
+      }
+    )
     await db.MesProcessingLog.create({
       eventType: 'surge_tank_tick_completion',
       sourceId: batch.nsWorkOrderId,

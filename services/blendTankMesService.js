@@ -4,9 +4,20 @@ const productParser = require('./blendTankProductParser')
 const lineMapper = require('./lineIngredientMapper')
 const nsInventory = require('./nsInventoryLookup')
 const inventoryAdjustment = require('./inventoryAdjustmentService')
+const statusStore = require('./statusStore')
 const config = require('../config')
 const db = require('../models')
 const clock = require('../sim/clock')
+
+// Compact NS error detail for the dashboard event stream — pulls the
+// "detail" string out of the wrapped HTTP-400 body so the user sees the
+// real message instead of nested escaped JSON. Falls back to the first
+// 200 chars of the raw message.
+function nsErrShort(err) {
+  const msg = String(err?.message || '')
+  const m = msg.match(/"detail":"([^"]+)"/)
+  return m ? m[1] : msg.slice(0, 200)
+}
 
 // Per-process BOM cache keyed by nsWorkOrderId. Fetched once per WO and reused
 // across ticks. Cleared when the batch closes.
@@ -563,6 +574,21 @@ async function processLineFlow(data) {
     allocations = built.allocations
   } catch (err) {
     console.error(`[BlendTankMesService] tail-catcher ${line}: buildWoIssueBody failed — ${err.message}`)
+    statusStore.pushEvent(
+      'blendTail.issueFailed',
+      `${targetBatch.tankId} ${line}: tail-catcher buildWoIssueBody failed (${delta.toFixed(0)} lb, item ${component?.id}) — ${nsErrShort(err)}`,
+      {
+        tankId: targetBatch.tankId,
+        line,
+        nsWorkOrderId: targetBatch.nsWorkOrderId,
+        phase: 'buildWoIssueBody',
+        code: err.code || null,
+        itemId: component?.id || null,
+        binId,
+        delta,
+        error: err.message.slice(0, 500),
+      }
+    )
     await inflowRecord.update({ status: 'pending_ns' })
     await db.MesProcessingLog.create({
       eventType: 'blend_tank_tail_issue', sourceId: targetBatch.nsWorkOrderId,
@@ -605,6 +631,18 @@ async function processLineFlow(data) {
     return { success: true, inflowId: inflowRecord.id, nsIssueId, status: 'completed' }
   } catch (err) {
     console.error(`[BlendTankMesService] tail-catcher ${line} → WO ${targetBatch.nsWorkOrderId} failed:`, err.message)
+    statusStore.pushEvent(
+      'blendTail.issueFailed',
+      `${targetBatch.tankId} ${line}: NS workOrderIssue POST failed (${delta.toFixed(0)} lb) — ${nsErrShort(err)}`,
+      {
+        tankId: targetBatch.tankId,
+        line,
+        nsWorkOrderId: targetBatch.nsWorkOrderId,
+        phase: 'netsuitePost',
+        delta,
+        error: err.message.slice(0, 500),
+      }
+    )
     await inflowRecord.update({ status: 'error', errorMessage: err.message })
     await db.MesProcessingLog.create({
       eventType: 'blend_tank_tail_issue', sourceId: targetBatch.nsWorkOrderId,
@@ -833,6 +871,11 @@ async function tickIssuesForBatch(batch, lineReadings) {
         .map(r => `${r.line}(tot=${Math.round(r.totalizerLbs)}lb requestedBy="${r.requestedBy}" silo="${r.siloName}")`)
         .join(', ')
       console.warn(`[BlendTankMesService] tick ${batch.tankId} (WO ${batch.nsWorkOrderId}): no matching lines despite flow — ${lineSnapshot || 'all zero'}`)
+      statusStore.pushEvent(
+        'blendTick.noMatchingLines',
+        `${batch.tankId}: no lines matched batch despite flow — ${lineSnapshot || 'all zero'}`,
+        { tankId: batch.tankId, nsWorkOrderId: batch.nsWorkOrderId, lineSnapshot }
+      )
     } else if (matchingLines.length > 0) {
       const viaSilo = matchingLines.filter(r => !r.requestedBy).map(r => r.line)
       if (viaSilo.length > 0) {
@@ -886,11 +929,21 @@ async function tickIssuesForBatch(batch, lineReadings) {
     const component = resolveLineComponent(reading)
     if (!component.id) {
       console.warn(`[BlendTankMesService] tick: no NS item for "${reading.productName}" on ${reading.line} — skipping`)
+      statusStore.pushEvent(
+        'blendTick.skipped',
+        `${batch.tankId} ${reading.line}: no NS item for "${reading.productName}" — ${delta.toFixed(0)} lb dropped`,
+        { tankId: batch.tankId, line: reading.line, reason: 'no-ns-item', productName: reading.productName, delta }
+      )
       continue
     }
     const binId = itemConfig.getBinId(reading.siloName)
     if (!binId) {
       console.warn(`[BlendTankMesService] tick: no bin for silo "${reading.siloName}" on ${reading.line} — skipping (delta ${delta.toFixed(1)})`)
+      statusStore.pushEvent(
+        'blendTick.skipped',
+        `${batch.tankId} ${reading.line}: no bin for silo "${reading.siloName}" — ${delta.toFixed(0)} lb dropped`,
+        { tankId: batch.tankId, line: reading.line, reason: 'no-bin', siloName: reading.siloName, delta }
+      )
       continue
     }
 
@@ -920,17 +973,32 @@ async function tickIssuesForBatch(batch, lineReadings) {
       if (catchUpDelta < config.MES_MIN_ISSUE_LBS) continue
       if (!ps.lastProductName || !ps.lastSiloName) {
         console.warn(`[BlendTankMesService] tick catch-up ${ps.line} → ${batch.tankId}: ${catchUpDelta.toFixed(1)} lb unissued but no stored product/silo — skipping`)
+        statusStore.pushEvent(
+          'blendTick.skipped',
+          `${batch.tankId} ${ps.line} catch-up: ${catchUpDelta.toFixed(0)} lb unissued, no stored product/silo`,
+          { tankId: batch.tankId, line: ps.line, reason: 'catchup-no-context', delta: catchUpDelta }
+        )
         continue
       }
       const syntheticReading = { line: ps.line, productName: ps.lastProductName, siloName: ps.lastSiloName, totalizerLbs: stored }
       const component = resolveLineComponent(syntheticReading)
       if (!component.id) {
         console.warn(`[BlendTankMesService] tick catch-up ${ps.line}: no NS item for "${ps.lastProductName}" — skipping`)
+        statusStore.pushEvent(
+          'blendTick.skipped',
+          `${batch.tankId} ${ps.line} catch-up: no NS item for "${ps.lastProductName}" — ${catchUpDelta.toFixed(0)} lb dropped`,
+          { tankId: batch.tankId, line: ps.line, reason: 'catchup-no-ns-item', productName: ps.lastProductName, delta: catchUpDelta }
+        )
         continue
       }
       const binId = itemConfig.getBinId(ps.lastSiloName)
       if (!binId) {
         console.warn(`[BlendTankMesService] tick catch-up ${ps.line}: no bin for "${ps.lastSiloName}" — skipping`)
+        statusStore.pushEvent(
+          'blendTick.skipped',
+          `${batch.tankId} ${ps.line} catch-up: no bin for "${ps.lastSiloName}" — ${catchUpDelta.toFixed(0)} lb dropped`,
+          { tankId: batch.tankId, line: ps.line, reason: 'catchup-no-bin', siloName: ps.lastSiloName, delta: catchUpDelta }
+        )
         continue
       }
       candidates.push({
@@ -1000,6 +1068,20 @@ async function tickIssuesForBatch(batch, lineReadings) {
       allocations = built.allocations
     } catch (err) {
       console.error(`[BlendTankMesService] tick issue ${memberLabel} → WO ${batch.nsWorkOrderId}: buildWoIssueBody failed — ${err.message}`)
+      statusStore.pushEvent(
+        'blendTick.issueFailed',
+        `${batch.tankId} ${memberLabel}: buildWoIssueBody failed (${g.totalDelta.toFixed(0)} lb, item ${g.component.id}) — ${nsErrShort(err)}`,
+        {
+          tankId: batch.tankId,
+          nsWorkOrderId: batch.nsWorkOrderId,
+          phase: 'buildWoIssueBody',
+          code: err.code || null,
+          itemId: g.component.id,
+          binId: g.binId,
+          totalDelta: g.totalDelta,
+          error: err.message.slice(0, 500),
+        }
+      )
       await db.MesProcessingLog.create({
         eventType: 'blend_tank_tick_issue',
         sourceId: batch.nsWorkOrderId,
@@ -1062,6 +1144,19 @@ async function tickIssuesForBatch(batch, lineReadings) {
       issuesFired++
     } catch (err) {
       console.error(`[BlendTankMesService] tick issue failed for ${memberLabel} → WO ${batch.nsWorkOrderId}:`, err.message)
+      statusStore.pushEvent(
+        'blendTick.issueFailed',
+        `${batch.tankId} ${memberLabel}: NS workOrderIssue POST failed (${g.totalDelta.toFixed(0)} lb) — ${nsErrShort(err)}`,
+        {
+          tankId: batch.tankId,
+          nsWorkOrderId: batch.nsWorkOrderId,
+          phase: 'netsuitePost',
+          itemId: g.component.id,
+          binId: g.binId,
+          totalDelta: g.totalDelta,
+          error: err.message.slice(0, 500),
+        }
+      )
       await db.MesProcessingLog.create({
         eventType: 'blend_tank_tick_issue',
         sourceId: batch.nsWorkOrderId,
@@ -1153,6 +1248,18 @@ async function tickCompletionForBatch(batch) {
     return true
   } catch (err) {
     console.error(`[BlendTankMesService] tick completion failed for WO ${batch.nsWorkOrderId}:`, err.message)
+    statusStore.pushEvent(
+      'blendTick.completionFailed',
+      `${batch.tankId}: NS workOrderCompletion POST failed (${target.toFixed(0)} lb) — ${nsErrShort(err)}`,
+      {
+        tankId: batch.tankId,
+        nsWorkOrderId: batch.nsWorkOrderId,
+        target,
+        cumulativeIssued,
+        cumulativeCompleted,
+        error: err.message.slice(0, 500),
+      }
+    )
     await db.MesProcessingLog.create({
       eventType: 'blend_tank_tick_completion',
       sourceId: batch.nsWorkOrderId,
