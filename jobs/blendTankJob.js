@@ -174,7 +174,14 @@ async function run(historian) {
       const hadProduct = !!prev.productName
       const hasProduct = !!validStr(productName)
       const totalizerReset = prev.prevValue > LINE_RESET_THRESHOLD_LBS && totalizerLbs < LINE_RESET_THRESHOLD_LBS
-      const memTotalizerAdvanced = (memTotalizerLbs || 0) > (prev.prevMemTotalizer || 0) + LINE_RESET_THRESHOLD_LBS
+      // MEM tag advances are a tail-catcher for missed resets — but only
+      // trust them when the LIVE totalizer is currently in the post-reset
+      // state (low). Otherwise a MEM that mirrors the live totalizer during
+      // continuous flow (observed on ML2 transferring to TSTAT1) fires a
+      // false flowComplete every tick.
+      const memTotalizerAdvanced =
+        (memTotalizerLbs || 0) > (prev.prevMemTotalizer || 0) + LINE_RESET_THRESHOLD_LBS
+        && totalizerLbs < LINE_RESET_THRESHOLD_LBS
       const productCleared = hadProduct && !hasProduct && prev.prevValue > 10
 
       if ((totalizerReset || productCleared || memTotalizerAdvanced) && (hadProduct || validStr(memProductName))) {
