@@ -160,7 +160,7 @@ async function findInventoryAllocations(itemId, neededQty, preferredBinId = null
  * has positive on-hand. Returns the resolved binId string, or null if NS
  * reports zero inventory everywhere.
  */
-async function findBinForItem(itemId, preferredBinId = null) {
+async function findBinForItem(itemId, preferredBinId = null, neededQty = 0) {
   if (!itemId) return null
 
   // Strict-preferred-bin: when the caller names a source bin, only that bin
@@ -169,17 +169,20 @@ async function findBinForItem(itemId, preferredBinId = null) {
   const binFilter = preferredBinId != null
     ? `AND bal.binnumber = ${Number(preferredBinId)}`
     : ''
+  // SUM across the bin in case NS has multiple inventorybalance rows for the
+  // same (item, bin, location) under different statuses or lot dimensions.
   const q = `
     SELECT
-      bin.id                                              AS bin_id,
-      COALESCE(bal.quantityavailable, bal.quantityonhand) AS qty
+      bin.id                                                   AS bin_id,
+      SUM(COALESCE(bal.quantityavailable, bal.quantityonhand)) AS qty
     FROM inventorybalance bal
     JOIN bin ON bin.id = bal.binnumber
     WHERE bal.item = ${Number(itemId)}
       AND bal.location = ${NS_LOCATION_ID}
       AND COALESCE(bal.quantityavailable, bal.quantityonhand) > 0
       ${binFilter}
-    ORDER BY COALESCE(bal.quantityavailable, bal.quantityonhand) DESC
+    GROUP BY bin.id
+    ORDER BY SUM(COALESCE(bal.quantityavailable, bal.quantityonhand)) DESC
   `
 
   let rows
@@ -192,7 +195,14 @@ async function findBinForItem(itemId, preferredBinId = null) {
   }
 
   if (rows.length === 0) return null
-  return String(rows[0].bin_id)
+  // Return null if the best candidate bin has less than what the caller
+  // needs — otherwise the issue posts against the bin and NS rejects with
+  // "you only have N available." Returning null instead lets the caller's
+  // shortfall hook fire and top the bin up to the required qty.
+  const best = rows[0]
+  const available = parseFloat(best.qty) || 0
+  if (neededQty > 0 && available + 1e-6 < neededQty) return null
+  return String(best.bin_id)
 }
 
 /**

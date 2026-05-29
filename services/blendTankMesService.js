@@ -121,20 +121,20 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
       }
     }
   } else if (tracking.useBins) {
-    resolvedBinId = await nsInventory.findBinForItem(targetItemId, preferredBinId)
+    // Pass the requested quantity — findBinForItem returns null if the
+    // preferred bin has SOME stock but not enough to cover the issue, so
+    // we trigger the shortfall hook instead of posting an issue that NS
+    // will reject with "you only have N available."
+    resolvedBinId = await nsInventory.findBinForItem(targetItemId, preferredBinId, quantity)
     if (!resolvedBinId) {
-      // No bin has on-hand stock anywhere. If the caller named a preferred bin
-      // (typical: source silo/tank), bump it up by exactly the shortfall so
-      // the next NS issue posts. With no preferred bin we don't know which
-      // bin to credit, so just throw — the caller decides whether to retry.
       const adjusted = preferredBinId
         ? await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall: quantity })
         : false
       if (adjusted) {
-        resolvedBinId = await pollBinForItem(targetItemId, preferredBinId)
+        resolvedBinId = await pollBinForItem(targetItemId, preferredBinId, quantity)
       }
       if (!resolvedBinId) {
-        const err = new Error(`Insufficient inventory for item ${targetItemId}: no on-hand stock found in any bin at this location`)
+        const err = new Error(`Insufficient inventory for item ${targetItemId}: preferred bin ${preferredBinId} has less than ${quantity} lb available`)
         err.code = 'INSUFFICIENT_INVENTORY'
         err.itemId = targetItemId
         err.needed = quantity
@@ -182,10 +182,10 @@ async function pollAllocations(targetItemId, quantity, preferredBinId) {
   return { allocations, allocatedQty }
 }
 
-async function pollBinForItem(targetItemId, preferredBinId) {
+async function pollBinForItem(targetItemId, preferredBinId, neededQty = 0) {
   for (const delay of SHORTFALL_POLL_DELAYS_MS) {
     await new Promise(r => setTimeout(r, delay))
-    const bin = await nsInventory.findBinForItem(targetItemId, preferredBinId)
+    const bin = await nsInventory.findBinForItem(targetItemId, preferredBinId, neededQty)
     if (bin) return bin
   }
   return null
