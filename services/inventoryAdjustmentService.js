@@ -158,19 +158,37 @@ async function resolveLotForBinAdjustment({ binId, itemId, qtyDelta, lastWoNumbe
 //     line AND assignment levels carries the direction. The PalletAdjust
 //     code explicitly notes "NetSuite REST API may not support
 //     issueInventoryNumber" — confirmed by our own trial-and-error here.
-function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
+function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, multiLotAllocations, memo }) {
   const signedQty = qtyDelta
   const tracking = lot?.tracking || { isLot: false, useBins: false }
 
-  const assignment = {
-    status: 1,
-    quantity: signedQty,
-  }
-  if (tracking.useBins && binId) {
-    assignment.binnumber = { id: String(binId) }
-  }
-  if (tracking.isLot && lot?.lotName) {
-    assignment.receiptInventoryNumber = lot.lotName
+  let assignments
+  if (multiLotAllocations && multiLotAllocations.length > 0) {
+    // Down-adjust on a lot-tracked item with multiple lots in the bin.
+    // Each allocation gets its own assignment with a NEGATIVE qty equal to
+    // the portion taken from that lot. NS sums them and matches against
+    // adjustQtyBy at the line level.
+    assignments = multiLotAllocations.map(a => {
+      const entry = { status: 1, quantity: -Math.abs(a.qty) }
+      if (tracking.useBins && a.binId) entry.binnumber = { id: String(a.binId) }
+      // PalletAdjust pattern: lot ref is `receiptInventoryNumber` as raw
+      // string for both up- and down-adjusts; signed quantity carries direction.
+      if (a.lotName) entry.receiptInventoryNumber = a.lotName
+      return entry
+    })
+  } else {
+    // Single-assignment path (up-adjusts, bin-only items, or no-tracking).
+    const assignment = {
+      status: 1,
+      quantity: signedQty,
+    }
+    if (tracking.useBins && binId) {
+      assignment.binnumber = { id: String(binId) }
+    }
+    if (tracking.isLot && lot?.lotName) {
+      assignment.receiptInventoryNumber = lot.lotName
+    }
+    assignments = [assignment]
   }
 
   const item = {
@@ -182,7 +200,7 @@ function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
   }
   if (tracking.useBins || tracking.isLot) {
     item.inventoryDetail = {
-      inventoryAssignment: { items: [assignment] },
+      inventoryAssignment: { items: assignments },
     }
   }
 
@@ -263,8 +281,43 @@ async function submitInventoryAdjustment(args) {
     return { ok: false, skipped: reason, nsAdjustmentId: null, lotId: null, lotName: null }
   }
 
+  // Down-adjust on a lot-tracked item: split across all existing lots in
+  // the bin FIFO so we don't ask any single lot to give up more than it
+  // has. NS rejects an assignment with qty larger than the lot's available
+  // with "You only have N available." For up-adjusts we still use the
+  // single-assignment receipt path that creates/finds one lot.
+  let multiLotAllocations = null
+  if (lot.tracking?.isLot && qtyDelta < 0) {
+    const allocations = await nsInventory.findInventoryAllocations(itemId, Math.abs(qtyDelta), binId)
+    const allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
+    if (allocations.length === 0) {
+      const reason = `down-adjust requested ${qtyDelta.toFixed(2)} lb but no lots with available qty in bin ${binId}`
+      console.warn(`[InventoryAdjustment] Skipping (${source}) ${tankName || ''}: ${reason}`)
+      statusStore.pushEvent(
+        'inventoryAdjustment.skipped',
+        `${tankName || `bin ${binId}`}: Δ${qtyDelta.toFixed(0)} lb skipped — no allocatable lots`,
+        { source, tankName, binId, itemId, qtyDelta, reason }
+      )
+      await safeAudit({
+        source, tankName, binId, itemId, qtyDelta, observedLbs, nsQtyBefore,
+        lotId: null, lotName: null, nsAdjustmentId: null, memo,
+        status: 'skipped', errorMessage: reason,
+      })
+      return { ok: false, skipped: reason, nsAdjustmentId: null, lotId: null, lotName: null }
+    }
+    if (allocatedQty + 1e-6 < Math.abs(qtyDelta)) {
+      // NS doesn't have enough total to satisfy the down-adjust. Clamp the
+      // qtyDelta to what's actually allocatable so we make progress instead
+      // of erroring; subsequent sweeps would catch any further drift.
+      const originalDelta = qtyDelta
+      qtyDelta = -allocatedQty
+      console.warn(`[InventoryAdjustment] (${source}) ${tankName || ''}: clamping down-adjust from ${originalDelta.toFixed(2)} to ${qtyDelta.toFixed(2)} (sum of available lots)`)
+    }
+    multiLotAllocations = allocations
+  }
+
   const body = buildInventoryAdjustmentBody({
-    binId, itemId, qtyDelta, lot,
+    binId, itemId, qtyDelta, lot, multiLotAllocations,
     memo: memo || `MES ${source} adjustment${tankName ? ` (${tankName})` : ''}`,
   })
 
