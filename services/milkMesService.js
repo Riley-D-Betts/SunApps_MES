@@ -80,7 +80,17 @@ async function processSeparationBatch(data) {
   const skimDest = resolvedDests.find(d => d.kind === 'skim' && d.silo && d.silo !== sourceSilo) || null
 
   const wasteVolume = inputVolume - (creamVolume || 0) - (skimVolume || 0)
-  const wastePercent = inputVolume > 0 ? (wasteVolume / inputVolume) * 100 : 0
+  // wastePercent is meaningless when inputVolume is essentially zero — a
+  // tiny denominator produces millions-of-percent garbage that overflows
+  // the DB column. Observed in production on a cip_started close where
+  // input=0.07 lb but cream+skim=18,268 lb of residual totalizer carried
+  // over from the previous batch. Require real flow before computing the
+  // ratio; clamp the result as a safety net for any other edge case.
+  const MIN_INPUT_FOR_PERCENT_LBS = 10
+  const WASTE_PCT_CLAMP = 999999.99
+  const wastePercent = inputVolume >= MIN_INPUT_FOR_PERCENT_LBS
+    ? Math.max(-WASTE_PCT_CLAMP, Math.min(WASTE_PCT_CLAMP, (wasteVolume / inputVolume) * 100))
+    : null
 
   // Compact dashboard-facing view of this batch. Returned alongside every exit
   // path so the job can push it into statusStore.recentBatches regardless of
@@ -118,19 +128,20 @@ async function processSeparationBatch(data) {
     creamVolume: creamVolume || 0,
     skimVolume: skimVolume || 0,
     wasteVolume: parseFloat(wasteVolume.toFixed(2)),
-    wastePercent: parseFloat(wastePercent.toFixed(2)),
+    wastePercent: wastePercent != null ? parseFloat(wastePercent.toFixed(2)) : null,
   }
 
   const fmtItem = (label, item, silo, idx, name, bin) =>
     `  ${label}: ${silo || '-'} idx=${idx || '-'} "${name || '-'}" → NS ${item?.id || 'MISSING'} (${item?.name || '-'}) bin=${bin ?? 'MISSING'}`
 
+  const wastePctText = wastePercent != null ? `${wastePercent.toFixed(1)}%` : 'n/a (input below threshold)'
   console.log(`[MilkMesService] Processing batch ${batchId} (${sourceSilo} → ${resolvedDests.map(d => d.silo || d.raw).join(', ') || '?'})`)
   console.log(fmtItem('Source', sourceItem, sourceSilo, sourceIndex, sourceName, sourceBinId))
   console.log(fmtItem('Cream ', creamDest?.item, creamDest?.silo || creamDest?.raw, creamDest?.productIndex, creamDest?.productName, creamDest?.binId))
   console.log(fmtItem('Skim  ', skimDest?.item, skimDest?.silo || skimDest?.raw, skimDest?.productIndex, skimDest?.productName, skimDest?.binId))
-  console.log(`  Volumes: input=${Number(inputVolume).toFixed(1)} LBS, cream=${Number(creamVolume || 0).toFixed(1)}, skim=${Number(skimVolume || 0).toFixed(1)}, waste=${wasteVolume.toFixed(1)} (${wastePercent.toFixed(1)}%)`)
+  console.log(`  Volumes: input=${Number(inputVolume).toFixed(1)} LBS, cream=${Number(creamVolume || 0).toFixed(1)}, skim=${Number(skimVolume || 0).toFixed(1)}, waste=${wasteVolume.toFixed(1)} (${wastePctText})`)
 
-  if (wastePercent > itemConfig.WASTE_ALERT_THRESHOLD) {
+  if (wastePercent != null && wastePercent > itemConfig.WASTE_ALERT_THRESHOLD) {
     console.warn(`[MilkMesService] High waste alert: ${wastePercent.toFixed(1)}% (threshold: ${itemConfig.WASTE_ALERT_THRESHOLD}%)`)
     await core.sendStagingNotification(
       'MES Separation: High Waste Alert',
@@ -151,7 +162,7 @@ async function processSeparationBatch(data) {
     creamVolume: creamVolume || 0,
     skimVolume: skimVolume || 0,
     wasteVolume: parseFloat(wasteVolume.toFixed(2)),
-    wastePercent: parseFloat(wastePercent.toFixed(2)),
+    wastePercent: wastePercent != null ? parseFloat(wastePercent.toFixed(2)) : null,
     targetVolume: targetVolume ?? null,
   }
 
@@ -298,7 +309,7 @@ async function processSeparationBatch(data) {
         nsTransactionType: 'assemblyUnbuild', nsTransactionId: null,
         payload: JSON.stringify(data), result: JSON.stringify({ dryRun: true, body }), success: true,
       })
-      return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'dry_run', wastePercent: parseFloat(wastePercent.toFixed(2)), summary: { ...summary, status: 'dry_run' } }
+      return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'dry_run', wastePercent: wastePercent != null ? parseFloat(wastePercent.toFixed(2)) : null, summary: { ...summary, status: 'dry_run' } }
     }
 
     // Pre-check source bin on-hand. NS will 400 the unbuild outright if the
