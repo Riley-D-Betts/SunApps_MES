@@ -20,6 +20,11 @@ const db = require('../models')
 
 const AT_REST_WINDOW_MS = 5 * 60 * 1000
 const MIN_DELTA_LBS = 500
+// Peak-to-peak level swing (max - min across the 5-min sample window) above
+// which we treat the tank as in motion and skip the sweep. ±~800 lb of
+// sensor noise on a truly idle tank is documented elsewhere, so 2000 lb
+// peak-to-peak comfortably exceeds noise while catching real fill/drain.
+const AT_REST_RANGE_LBS = 2000
 
 // Tag suffix mapping. M/C silos write live lbs to the underscore-suffix tag
 // (e.g. MSilo1_LBS.Value); blend tanks write to <tank>.100LT.SCL_LBS.
@@ -77,16 +82,25 @@ async function readAvgLbs(historian, fqn, windowStart, windowEnd, liveLbs) {
       .map(s => Number(s?.Value))
       .filter(v => Number.isFinite(v) && v >= 0)
     if (values.length >= 2) {
-      return { avgLbs: avg(values), sampleCount: values.length, source: 'historian-window' }
+      const minLbs = Math.min(...values)
+      const maxLbs = Math.max(...values)
+      return {
+        avgLbs: avg(values),
+        minLbs,
+        maxLbs,
+        rangeLbs: maxLbs - minLbs,
+        sampleCount: values.length,
+        source: 'historian-window',
+      }
     }
     if (values.length === 1) {
-      return { avgLbs: values[0], sampleCount: 1, source: 'historian-single' }
+      return { avgLbs: values[0], minLbs: values[0], maxLbs: values[0], rangeLbs: 0, sampleCount: 1, source: 'historian-single' }
     }
   } catch (err) {
     console.warn(`[TankAtRestSweep] _queryProcessValues failed for ${fqn}: ${err.message.slice(0, 200)}`)
   }
   if (Number.isFinite(liveLbs) && liveLbs >= 0) {
-    return { avgLbs: liveLbs, sampleCount: 0, source: 'live-fallback' }
+    return { avgLbs: liveLbs, minLbs: liveLbs, maxLbs: liveLbs, rangeLbs: 0, sampleCount: 0, source: 'live-fallback' }
   }
   return null
 }
@@ -105,6 +119,9 @@ async function sweepSilo({ silo, activeRoutes, historian, windowStart, windowEnd
 
   const reading = await readAvgLbs(historian, siloLbsFqn(tankName), windowStart, windowEnd, silo.lbs)
   if (!reading) return { tankName, skipped: 'no-level-samples' }
+  if (reading.rangeLbs > AT_REST_RANGE_LBS) {
+    return { tankName, skipped: 'in-motion', rangeLbs: reading.rangeLbs }
+  }
 
   const nsQty = await inventoryAdjustment.getBinQtyOnHand(item.id, binId)
   const delta = reading.avgLbs - nsQty
@@ -158,6 +175,9 @@ async function sweepBlendTank({ tank, activeRoutes, historian, windowStart, wind
 
   const reading = await readAvgLbs(historian, blendTankLbsFqn(tankName), windowStart, windowEnd, tank.weightLbs)
   if (!reading) return { tankName, skipped: 'no-level-samples' }
+  if (reading.rangeLbs > AT_REST_RANGE_LBS) {
+    return { tankName, skipped: 'in-motion', rangeLbs: reading.rangeLbs }
+  }
 
   const nsQty = await inventoryAdjustment.getBinQtyOnHand(itemId, binId)
   const delta = reading.avgLbs - nsQty
@@ -194,11 +214,13 @@ async function tick(historian) {
   let siloStatus = []
   let blendTankStatus = []
   let milkLines = []
+  let uhtStatus = []
   try {
-    ;[siloStatus, blendTankStatus, milkLines] = await Promise.all([
+    ;[siloStatus, blendTankStatus, milkLines, uhtStatus] = await Promise.all([
       historian.getSiloStatus().catch(err => { console.warn(`[TankAtRestSweep] getSiloStatus failed: ${err.message}`); return [] }),
       historian.getBlendTankStatus().catch(err => { console.warn(`[TankAtRestSweep] getBlendTankStatus failed: ${err.message}`); return [] }),
       historian.getMilkLineStatus().catch(err => { console.warn(`[TankAtRestSweep] getMilkLineStatus failed: ${err.message}`); return [] }),
+      historian.getUhtStatus().catch(err => { console.warn(`[TankAtRestSweep] getUhtStatus failed: ${err.message}`); return [] }),
     ])
   } catch (err) {
     console.error('[TankAtRestSweep] Snapshot fetch threw:', err.message)
@@ -206,6 +228,17 @@ async function tick(historian) {
   }
 
   const activeRoutes = collectActiveRoutes(milkLines)
+  // UHTs in PROCESS mode are pulling product from their fromEntName (a blend
+  // tank or silo). Even though no MILK LINE carries that flow, the source
+  // tank is in motion and must not be swept while the UHT is consuming.
+  for (const u of uhtStatus || []) {
+    if (u?.mode === 'PROCESS' && u.fromEntName) {
+      const n = normName(u.fromEntName)
+      if (n) activeRoutes.add(n)
+      const canonical = itemConfig.normalizeSiloName(n)
+      if (canonical) activeRoutes.add(canonical)
+    }
+  }
 
   const siloResults = []
   for (const silo of siloStatus) {
