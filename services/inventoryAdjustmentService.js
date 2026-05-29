@@ -170,9 +170,11 @@ function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, multiLotAl
     // adjustQtyBy at the line level.
     assignments = multiLotAllocations.map(a => {
       const entry = { status: 1, quantity: -Math.abs(a.qty) }
-      if (tracking.useBins && a.binId) entry.binnumber = { id: String(a.binId) }
-      // PalletAdjust pattern: lot ref is `receiptInventoryNumber` as raw
-      // string for both up- and down-adjusts; signed quantity carries direction.
+      // Raw-string binnumber matches the lot field's convention on this
+      // endpoint — the object form { id } NS accepted on single-assignment
+      // up-adjusts gets rejected here as "Invalid Field Value <id> for
+      // binnumber" once a lot reference is in the same assignment.
+      if (tracking.useBins && a.binId) entry.binnumber = String(a.binId)
       if (a.lotName) entry.receiptInventoryNumber = a.lotName
       return entry
     })
