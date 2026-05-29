@@ -123,6 +123,15 @@ db.ensureRuntimeSchema = async function () {
     IF EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'prevIndexCodesJson' AND Object_ID = Object_ID(N'MesSeparationBatches') AND max_length <> -1)
       ALTER TABLE MesSeparationBatches ALTER COLUMN prevIndexCodesJson NVARCHAR(MAX) NULL;
   `)
+  // wastePercent originally created as DECIMAL(5, 2) (max 999.99); sensor
+  // glitches that produce tiny inputVolume with non-trivial wasteVolume push
+  // the computed percent past the ceiling, breaking the whole batch row with
+  // "Arithmetic overflow error converting numeric to data type numeric."
+  // Widen to DECIMAL(8, 2). sys.columns reports precision/scale directly.
+  await sequelize.query(`
+    IF EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'wastePercent' AND Object_ID = Object_ID(N'MesSeparationBatches') AND (precision <> 8 OR scale <> 2))
+      ALTER TABLE MesSeparationBatches ALTER COLUMN wastePercent DECIMAL(8, 2) NULL;
+  `)
 
   // Seed MesFgInputPairings from the canonical RAW_FG_TO_FG_MAP. Idempotent —
   // findOrCreate on the unique (fgItemId, rawInputItemId) index skips existing

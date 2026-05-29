@@ -31,8 +31,13 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DECIMAL(12, 2),
         allowNull: true,
       },
+      // DECIMAL(8, 2) lets us absorb sensor glitches where a tiny inputVolume
+      // pairs with a non-trivial wasteVolume and (wasteVolume / inputVolume)
+      // * 100 blows past 999.99 — DECIMAL(5, 2)'s ceiling crashed every row.
+      // sequelize.sync never alters existing tables; the idempotent ALTER in
+      // ensureRuntimeSchema widens already-deployed databases.
       wastePercent: {
-        type: DataTypes.DECIMAL(5, 2),
+        type: DataTypes.DECIMAL(8, 2),
         allowNull: true,
       },
       batchStart: {
