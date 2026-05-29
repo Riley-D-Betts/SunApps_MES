@@ -174,15 +174,15 @@ function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, memo }) {
   }
   if (tracking.isLot) {
     if (lot?.isNewLot && lot.lotName) {
-      // New lot: NS rejects a bare string here with INVALID_VALUE. Object
-      // form with `inventoryNumber` carries the new lot name.
+      // Creating a new lot: receiptInventoryNumber only accepts a brand-new
+      // lot name (string in object form). NS rejects an existing lot id
+      // passed here with INVALID_VALUE.
       assignment.receiptInventoryNumber = { inventoryNumber: lot.lotName }
     } else if (lot?.lotId) {
-      if (signedQty >= 0) {
-        assignment.receiptInventoryNumber = { id: String(lot.lotId) }
-      } else {
-        assignment.issueInventoryNumber = { id: String(lot.lotId) }
-      }
+      // Referencing an EXISTING lot — issueInventoryNumber works for both
+      // up- and down-adjusts; signed quantity tells NS the direction. Using
+      // receiptInventoryNumber with an existing id is INVALID_VALUE per NS.
+      assignment.issueInventoryNumber = { id: String(lot.lotId) }
     }
     needAssignment = true
   }
