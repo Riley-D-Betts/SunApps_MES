@@ -1,6 +1,7 @@
 const core = require('../clients/coreClient')
 const itemConfig = require('./mesItemConfig')
 const productParser = require('./surgeTankProductParser')
+const blendProductParser = require('./blendTankProductParser')
 const lineMapper = require('./lineIngredientMapper')
 const nsInventory = require('./nsInventoryLookup')
 const inventoryAdjustment = require('./inventoryAdjustmentService')
@@ -444,7 +445,32 @@ async function resolveSurgeTankComponent(batch, historian) {
       })
     }
     if (!blendBatch?.mesItem) {
-      console.warn(`[SurgeTankMesService] No blend-tank batch (active or recent with completions) on ${feedingFromEntName} — cannot resolve component`)
+      // No MES blend batch on the feeding tank — it was filled before this
+      // replay window, named without a fill to open a batch, or a reset wiped
+      // it (BlendTank1B post-reset, 2026-06-01). Fall back to the tank's LIVE
+      // SCADA product name and parse it to the same raw blend item a batch
+      // would carry — exactly what the dashboard shows (e.g. "Marcels 1%" →
+      // NS 8340). Lets the surge WO resolve its component without depending on
+      // a blend batch existing.
+      if (historian) {
+        try {
+          const tankStatuses = await historian.getBlendTankStatus()
+          const tank = (tankStatuses || []).find(t => t.tankId === feedingFromEntName)
+          const parsed = tank?.productName ? blendProductParser.parseProductName(tank.productName) : null
+          if (parsed?.nsId) {
+            console.log(`[SurgeTankMesService] resolveSurgeTankComponent: no batch on ${feedingFromEntName}; resolved component from live product "${tank.productName}" → NS ${parsed.nsId}`)
+            return {
+              itemId: String(parsed.nsId),
+              itemName: parsed.name,
+              binId: itemConfig.getBinId(feedingFromEntName),
+              resolvedFrom: 'blend-tank-live-product',
+            }
+          }
+        } catch (err) {
+          console.warn(`[SurgeTankMesService] resolveSurgeTankComponent: live blend product lookup for ${feedingFromEntName} failed — ${err.message}`)
+        }
+      }
+      console.warn(`[SurgeTankMesService] No blend-tank batch (active or recent) and no parseable live product on ${feedingFromEntName} — cannot resolve component`)
       return null
     }
     const resolvedFrom = blendBatch.status === 'active' ? 'blend-tank-batch' : 'blend-tank-batch-recent'
