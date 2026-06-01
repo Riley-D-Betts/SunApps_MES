@@ -15,6 +15,36 @@ function nsErrShort(err) {
   return m ? m[1] : msg.slice(0, 200)
 }
 
+// NS rejects a workOrderCompletion with this when its receiptInventoryNumber
+// lot is being created twice at once — two completion transforms raced. The
+// deterministic MMDDYY+WO lot is a natural idempotency key, so this means
+// "another completion for this WO already landed", not a real failure.
+function isAlreadyExistsError(err) {
+  return /this record already exists/i.test(String(err?.message || ''))
+}
+
+// Read NS's actual built quantity on a WO to reconcile local accounting and
+// guard against double-building after a lost response or a race.
+async function fetchWoBuiltQuantity(nsWorkOrderId) {
+  const wrap = await core.netsuiteGet(`/record/v1/workOrder/${nsWorkOrderId}?fields=builtQuantity`)
+  const wo = wrap?.body || wrap
+  const built = parseFloat(wo?.builtQuantity)
+  return Number.isFinite(built) ? built : null
+}
+
+// Per-WO in-process completion lock — the tick and the end-of-batch flush both
+// call tickCompletionForBatch on the same active batch and can overlap.
+// Serializing prevents the same-lot race that dies with "This record already
+// exists" (mirrors the blend-tank fix).
+const _completionLocks = new Map()
+function withCompletionLock(woId, fn) {
+  const key = String(woId)
+  const prev = _completionLocks.get(key) || Promise.resolve()
+  const next = prev.then(fn, fn)
+  _completionLocks.set(key, next.then(() => {}, () => {}))
+  return next
+}
+
 // UHT software totalizer is gallons; NS workOrder lines run in lbs. Use a
 // single density constant — UHT throughput is mixed during product changes,
 // and the FG mass-balance accounting doesn't need per-product precision.
@@ -883,88 +913,130 @@ async function tickIssueForBatch(batch, historian) {
 }
 
 async function tickCompletionForBatch(batch) {
-  const cumulativeIssued = parseFloat(batch.cumulativeIssuedLbs) || 0
-  const cumulativeCompleted = parseFloat(batch.cumulativeCompletedLbs) || 0
-  const target = cumulativeIssued - cumulativeCompleted
-
-  if (target < config.MES_MIN_COMPLETION_LBS) return false
   if (config.MES_DRY_RUN) {
-    await batch.update({ cumulativeCompletedLbs: cumulativeIssued, lastCompletionAt: new Date(clock.now()) })
+    const target = (parseFloat(batch.cumulativeIssuedLbs) || 0) - (parseFloat(batch.cumulativeCompletedLbs) || 0)
+    if (target < config.MES_MIN_COMPLETION_LBS) return false
+    await batch.update({ cumulativeCompletedLbs: parseFloat(batch.cumulativeIssuedLbs) || 0, lastCompletionAt: new Date(clock.now()) })
     console.log(`[SurgeTankMesService] DRY RUN tick completion ${batch.tankId}: ${target.toFixed(1)} lb`)
     return true
   }
   if (!batch.nsWorkOrderId) return false
 
-  const completionBinId = itemConfig.getBinId(batch.tankId)
-  const now = new Date(clock.now())
-  const mm = String(now.getMonth() + 1).padStart(2, '0')
-  const dd = String(now.getDate()).padStart(2, '0')
-  const yy = String(now.getFullYear()).slice(-2)
-  const woNum = String(batch.nsWorkOrderNumber || '').replace(/\D/g, '')
-  const lotNumber = `${mm}${dd}${yy}${woNum}`
-  const roundedTarget = Math.round(target * 1000) / 1000
-  const assignmentEntry = { quantity: roundedTarget, receiptInventoryNumber: lotNumber }
-  if (completionBinId) assignmentEntry.binnumber = String(completionBinId)
-
-  const body = {
-    quantity: roundedTarget,
-    inventorydetail: {
-      inventoryassignment: { items: [assignmentEntry] },
-    },
-  }
-
-  try {
-    console.log(`[SurgeTankMesService] tick completion WO ${batch.nsWorkOrderId} (${batch.tankId}): ${target.toFixed(1)} lb → bin ${completionBinId || 'none'} (cumulative ${cumulativeCompleted.toFixed(1)} → ${cumulativeIssued.toFixed(1)})`)
-    const nsResult = await core.netsuitePost(
-      `/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderCompletion`,
-      body
-    )
-
-    let nsCompletionId = nsResult?.id || null
-    if (!nsCompletionId && nsResult?.headers?.location) {
-      const m = nsResult.headers.location.match(/\/(\d+)$/)
-      if (m) nsCompletionId = m[1]
-    }
-
-    await batch.update({
-      cumulativeCompletedLbs: cumulativeIssued,
-      lastCompletionAt: new Date(clock.now()),
-    })
-
-    await db.MesProcessingLog.create({
-      eventType: 'surge_tank_tick_completion',
-      sourceId: batch.nsWorkOrderId,
-      nsTransactionType: 'workOrderCompletion',
-      nsTransactionId: nsCompletionId,
-      payload: JSON.stringify({ batchId: batch.id, target, cumulativeIssued, cumulativeCompleted }),
-      result: JSON.stringify({ nsCompletionId }),
-      success: true,
-    })
-    return true
-  } catch (err) {
-    console.error(`[SurgeTankMesService] tick completion failed for WO ${batch.nsWorkOrderId}:`, err.message)
-    statusStore.pushEvent(
-      'surgeTick.completionFailed',
-      `${batch.tankId}: NS workOrderCompletion POST failed (${target.toFixed(0)} lb) — ${nsErrShort(err)}`,
-      {
-        tankId: batch.tankId,
-        nsWorkOrderId: batch.nsWorkOrderId,
-        target,
-        cumulativeIssued,
-        cumulativeCompleted,
-        error: err.message.slice(0, 500),
-      }
-    )
-    await db.MesProcessingLog.create({
-      eventType: 'surge_tank_tick_completion',
-      sourceId: batch.nsWorkOrderId,
-      nsTransactionType: 'workOrderCompletion',
-      payload: JSON.stringify({ batchId: batch.id, target, cumulativeIssued, cumulativeCompleted }),
-      success: false,
-      errorMessage: err.message,
-    })
+  // Cheap pre-check before taking the lock so idle batches don't serialize.
+  if ((parseFloat(batch.cumulativeIssuedLbs) || 0) - (parseFloat(batch.cumulativeCompletedLbs) || 0) < config.MES_MIN_COMPLETION_LBS) {
     return false
   }
+
+  // Serialize completions per WO so the tick and the end-of-batch flush can't
+  // race to create the same lot ("This record already exists").
+  return withCompletionLock(batch.nsWorkOrderId, async () => {
+    await batch.reload()
+    const cumulativeIssued = parseFloat(batch.cumulativeIssuedLbs) || 0
+    const cumulativeCompleted = parseFloat(batch.cumulativeCompletedLbs) || 0
+    const target = cumulativeIssued - cumulativeCompleted
+
+    if (target < config.MES_MIN_COMPLETION_LBS) {
+      console.log(`[SurgeTankMesService] completion ${batch.tankId}: already satisfied (issued ${cumulativeIssued.toFixed(1)}, completed ${cumulativeCompleted.toFixed(1)}) — skipping`)
+      return false
+    }
+
+    const completionBinId = itemConfig.getBinId(batch.tankId)
+    const now = new Date(clock.now())
+    const mm = String(now.getMonth() + 1).padStart(2, '0')
+    const dd = String(now.getDate()).padStart(2, '0')
+    const yy = String(now.getFullYear()).slice(-2)
+    const woNum = String(batch.nsWorkOrderNumber || '').replace(/\D/g, '')
+    const lotNumber = `${mm}${dd}${yy}${woNum}`
+    const roundedTarget = Math.round(target * 1000) / 1000
+    const assignmentEntry = { quantity: roundedTarget, receiptInventoryNumber: lotNumber }
+    if (completionBinId) assignmentEntry.binnumber = String(completionBinId)
+
+    const body = {
+      quantity: roundedTarget,
+      inventorydetail: {
+        inventoryassignment: { items: [assignmentEntry] },
+      },
+    }
+
+    try {
+      console.log(`[SurgeTankMesService] tick completion WO ${batch.nsWorkOrderId} (${batch.tankId}): ${target.toFixed(1)} lb → bin ${completionBinId || 'none'} (cumulative ${cumulativeCompleted.toFixed(1)} → ${cumulativeIssued.toFixed(1)})`)
+      const nsResult = await core.netsuitePost(
+        `/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderCompletion`,
+        body
+      )
+
+      let nsCompletionId = nsResult?.id || null
+      if (!nsCompletionId && nsResult?.headers?.location) {
+        const m = nsResult.headers.location.match(/\/(\d+)$/)
+        if (m) nsCompletionId = m[1]
+      }
+
+      await batch.update({
+        cumulativeCompletedLbs: cumulativeIssued,
+        lastCompletionAt: new Date(clock.now()),
+      })
+
+      await db.MesProcessingLog.create({
+        eventType: 'surge_tank_tick_completion',
+        sourceId: batch.nsWorkOrderId,
+        nsTransactionType: 'workOrderCompletion',
+        nsTransactionId: nsCompletionId,
+        payload: JSON.stringify({ batchId: batch.id, target, cumulativeIssued, cumulativeCompleted }),
+        result: JSON.stringify({ nsCompletionId, lotNumber }),
+        success: true,
+      })
+      return true
+    } catch (err) {
+      if (isAlreadyExistsError(err)) {
+        const built = await fetchWoBuiltQuantity(batch.nsWorkOrderId).catch(e => {
+          console.warn(`[SurgeTankMesService] builtQuantity lookup failed for WO ${batch.nsWorkOrderId}: ${e.message}`)
+          return null
+        })
+        console.warn(`[SurgeTankMesService] completion lot "${lotNumber}" already exists on WO ${batch.nsWorkOrderId} (NS built=${built ?? '?'}, issued=${cumulativeIssued.toFixed(1)}) — reconciling, not re-firing`)
+        const reconciledCompleted = built != null
+          ? Math.max(cumulativeCompleted, Math.min(built, cumulativeIssued))
+          : cumulativeIssued
+        await batch.update({ cumulativeCompletedLbs: reconciledCompleted, lastCompletionAt: new Date(clock.now()) })
+        await db.MesProcessingLog.create({
+          eventType: 'surge_tank_tick_completion',
+          sourceId: batch.nsWorkOrderId,
+          nsTransactionType: 'workOrderCompletion',
+          payload: JSON.stringify({ batchId: batch.id, target, cumulativeIssued, cumulativeCompleted }),
+          result: JSON.stringify({ reconciled: true, nsBuiltQuantity: built, reconciledCompleted }),
+          success: true,
+        })
+        statusStore.pushEvent(
+          'surgeTick.completionReconciled',
+          `${batch.tankId}: completion already present in NS (built ${built != null ? built.toFixed(0) : '?'} lb of ${cumulativeIssued.toFixed(0)}) — reconciled, no double build`,
+          { tankId: batch.tankId, nsWorkOrderId: batch.nsWorkOrderId, nsBuiltQuantity: built, cumulativeIssued, reconciledCompleted }
+        )
+        return cumulativeIssued - reconciledCompleted < config.MES_MIN_COMPLETION_LBS
+      }
+
+      console.error(`[SurgeTankMesService] tick completion failed for WO ${batch.nsWorkOrderId}:`, err.message)
+      statusStore.pushEvent(
+        'surgeTick.completionFailed',
+        `${batch.tankId}: NS workOrderCompletion POST failed (${target.toFixed(0)} lb) — ${nsErrShort(err)}`,
+        {
+          tankId: batch.tankId,
+          nsWorkOrderId: batch.nsWorkOrderId,
+          target,
+          cumulativeIssued,
+          cumulativeCompleted,
+          error: err.message.slice(0, 500),
+        }
+      )
+      await db.MesProcessingLog.create({
+        eventType: 'surge_tank_tick_completion',
+        sourceId: batch.nsWorkOrderId,
+        nsTransactionType: 'workOrderCompletion',
+        payload: JSON.stringify({ batchId: batch.id, target, cumulativeIssued, cumulativeCompleted }),
+        success: false,
+        errorMessage: err.message,
+      })
+      return false
+    }
+  })
 }
 
 async function tickAllActiveBatches(historian) {
