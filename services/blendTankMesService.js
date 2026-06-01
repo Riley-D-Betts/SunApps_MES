@@ -1121,19 +1121,25 @@ async function tickIssuesForBatch(batch, lineReadings) {
   // Diagnostic: log REQUESTEDBY state for each line so we can tell whether
   // AVEVA is populating it (helps diagnose the silo-fallback path being taken).
   if (batch.nsWorkOrderId) {
-    // Gate "hasAnyFlow" on MES_MIN_ISSUE_LBS so 1-lb residual sensor noise on
-    // idle lines doesn't fire a false noMatchingLines alarm right after a
-    // line.flowComplete reset.
-    const hasAnyFlow = lineReadings.some(r => r.totalizerLbs >= config.MES_MIN_ISSUE_LBS)
-    if (hasAnyFlow && matchingLines.length === 0) {
-      const lineSnapshot = lineReadings
-        .filter(r => r.totalizerLbs >= config.MES_MIN_ISSUE_LBS || r.active)
+    // Only alarm when flow is ADDRESSED TO THIS TANK but didn't match — that's a
+    // real routing/normalization bug. Flow on a line bound for another tank
+    // (e.g. ML1 requestedBy="BT1B" while this batch is BlendTank2A) is none of
+    // this batch's business and previously tripped a false noMatchingLines
+    // alarm on every concurrently-active tank. Gate on MES_MIN_ISSUE_LBS too so
+    // 1-lb residual sensor noise right after a line.flowComplete reset is ignored.
+    const tankCanonical = normalizeTankRef(batch.tankId)
+    const flowDestinedHere = lineReadings.filter(r =>
+      r.totalizerLbs >= config.MES_MIN_ISSUE_LBS &&
+      normalizeTankRef(r.requestedBy) === tankCanonical
+    )
+    if (flowDestinedHere.length > 0 && matchingLines.length === 0) {
+      const lineSnapshot = flowDestinedHere
         .map(r => `${r.line}(tot=${Math.round(r.totalizerLbs)}lb requestedBy="${r.requestedBy}" silo="${r.siloName}")`)
         .join(', ')
-      console.warn(`[BlendTankMesService] tick ${batch.tankId} (WO ${batch.nsWorkOrderId}): no matching lines despite flow — ${lineSnapshot || 'all zero'}`)
+      console.warn(`[BlendTankMesService] tick ${batch.tankId} (WO ${batch.nsWorkOrderId}): no matching lines despite flow addressed here — ${lineSnapshot}`)
       statusStore.pushEvent(
         'blendTick.noMatchingLines',
-        `${batch.tankId}: no lines matched batch despite flow — ${lineSnapshot || 'all zero'}`,
+        `${batch.tankId}: no lines matched batch despite flow — ${lineSnapshot}`,
         { tankId: batch.tankId, nsWorkOrderId: batch.nsWorkOrderId, lineSnapshot }
       )
     } else if (matchingLines.length > 0) {
