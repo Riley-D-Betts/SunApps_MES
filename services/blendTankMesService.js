@@ -377,7 +377,23 @@ async function processWOStart(data) {
     })
 
     console.log(`[BlendTankMesService] "${productName}" → NS WO ${nsWorkOrderNumber} (${nsWorkOrderId})`)
-    return { success: true, duplicate: false, tankId, productName, nsWorkOrderId, nsWorkOrderNumber, status: 'active', parsed }
+
+    // Late-naming recovery: if this tank was filled BEFORE it was named, the
+    // line flows landed as status='unmatched'. Attach + issue + complete them
+    // now against the WO we just created. Guarded so a backfill hiccup never
+    // marks the (successful) WO-create as failed.
+    let backfill = null
+    try {
+      await record.reload()
+      backfill = await backfillUnmatchedInflows(record)
+      if (backfill.attached > 0) {
+        console.log(`[BlendTankMesService] "${productName}" on ${tankId}: backfilled ${backfill.attached} pre-batch inflow(s), ${backfill.issued} issue(s) fired`)
+      }
+    } catch (err) {
+      console.error(`[BlendTankMesService] backfill of unmatched inflows for ${tankId} failed:`, err.message)
+    }
+
+    return { success: true, duplicate: false, tankId, productName, nsWorkOrderId, nsWorkOrderNumber, status: 'active', parsed, backfill }
 
   } catch (err) {
     console.error(`[BlendTankMesService] Failed to create NS WO for "${productName}":`, err.message)
@@ -461,6 +477,174 @@ async function processWOEnd(data) {
     cumulativeIssuedLbs: parseFloat(record.cumulativeIssuedLbs) || 0,
     cumulativeCompletedLbs: parseFloat(record.cumulativeCompletedLbs) || 0,
   }
+}
+
+/**
+ * Late-naming backfill — fired from processWOStart the moment a batch opens
+ * with an NS WO. Operators sometimes fill a tank and only name it hours later;
+ * every line.flowComplete that fired before the name existed was saved as
+ * status='unmatched' (blendTankBatchId=null) because no active batch matched
+ * the destination at the time. Without this sweep the new WO is created empty
+ * and never issued or completed.
+ *
+ * Sweeps recent unmatched inflows (within MES_INFLOW_BACKFILL_LOOKBACK_HOURS),
+ * matches them to this batch by canonical destination (BT2A ↔ BlendTank2A),
+ * falling back to siloName ↔ fromEntName only when the inflow had no
+ * destination. Re-resolves the NS item from the stored product name and the
+ * bin from the stored silo (unmatched rows were saved with nsItemId=null),
+ * groups by (bin, item), fires one workOrderIssue per group, then flushes a
+ * completion so the WO closes out the full filled amount.
+ *
+ * Every matched row leaves the 'unmatched' pool (attached to this batch with a
+ * terminal status) so a second batch opening later can't double-grab it.
+ */
+async function backfillUnmatchedInflows(batch) {
+  if (!batch.nsWorkOrderId) return { attached: 0, issued: 0 }
+
+  const lookbackMs = config.MES_INFLOW_BACKFILL_LOOKBACK_HOURS * 60 * 60 * 1000
+  const since = new Date(clock.now() - lookbackMs)
+  const orphans = await db.MesBlendTankInflow.findAll({
+    where: {
+      status: 'unmatched',
+      blendTankBatchId: null,
+      createdAt: { [db.Sequelize.Op.gte]: since },
+    },
+    order: [['createdAt', 'ASC']],
+  })
+  if (orphans.length === 0) return { attached: 0, issued: 0 }
+
+  const tankCanonical = normalizeTankRef(batch.tankId)
+  const batchSilo = itemConfig.normalizeSiloName(batch.fromEntName)
+  const matched = orphans.filter(o => {
+    const destCanon = normalizeTankRef(o.destination)
+    if (destCanon) return destCanon === tankCanonical
+    // Inflow had no destination (REQUESTEDBY was empty) — fall back to the
+    // line's source silo vs this batch's fromEntName.
+    if (o.siloName && batchSilo) return itemConfig.normalizeSiloName(o.siloName) === batchSilo
+    return false
+  })
+  if (matched.length === 0) return { attached: 0, issued: 0 }
+
+  console.log(`[BlendTankMesService] backfill: ${matched.length} unmatched inflow(s) match ${batch.tankId} (WO ${batch.nsWorkOrderId})`)
+  statusStore.pushEvent(
+    'blendTank.backfill',
+    `${batch.tankId}: attaching ${matched.length} pre-batch line flow(s) to WO ${batch.nsWorkOrderNumber || batch.nsWorkOrderId}`,
+    { tankId: batch.tankId, nsWorkOrderId: batch.nsWorkOrderId, count: matched.length }
+  )
+
+  // Resolve NS item (from stored product name) + bin (from stored silo) for
+  // each. Rows we can't route are still attached to the batch so they leave
+  // the unmatched pool, but parked at pending_ns instead of being issued.
+  const routed = []
+  for (const o of matched) {
+    const component = resolveLineComponent({ line: o.line, productName: o.ingredientType })
+    const binId = itemConfig.getBinId(o.siloName)
+    const lbs = parseFloat(o.totalLbs) || 0
+    if (!component?.id || !binId || lbs < config.MES_MIN_ISSUE_LBS) {
+      const reason = !component?.id
+        ? `no NS item for "${o.ingredientType}"`
+        : !binId ? `no bin for silo "${o.siloName}"` : `below min issue (${lbs.toFixed(1)} lb)`
+      console.warn(`[BlendTankMesService] backfill skip inflow ${o.id} (${o.line}, ${lbs.toFixed(1)} lb): ${reason}`)
+      await o.update({ blendTankBatchId: batch.id, status: 'pending_ns', errorMessage: `backfill: ${reason}` })
+      continue
+    }
+    routed.push({ inflow: o, component, binId, lbs })
+  }
+  if (routed.length === 0) return { attached: matched.length, issued: 0 }
+
+  if (config.MES_DRY_RUN) {
+    let total = 0
+    for (const r of routed) {
+      await r.inflow.update({ blendTankBatchId: batch.id, nsItemId: String(r.component.id), status: 'dry_run' })
+      total += r.lbs
+    }
+    await batch.increment({ cumulativeIssuedLbs: total })
+    console.log(`[BlendTankMesService] DRY RUN backfill ${batch.tankId}: ${total.toFixed(1)} lb across ${routed.length} inflow(s)`)
+    return { attached: matched.length, issued: 0 }
+  }
+
+  // Group by (source bin, item) — one workOrderIssue per tuple, same rule the
+  // tick uses (memory [[bt-wo-issue-grouping]]).
+  const groups = new Map()
+  for (const r of routed) {
+    const key = `${r.binId}:${r.component.id}`
+    if (!groups.has(key)) groups.set(key, { binId: r.binId, component: r.component, totalLbs: 0, members: [] })
+    const g = groups.get(key)
+    g.totalLbs += r.lbs
+    g.members.push(r)
+  }
+
+  const bomLines = await fetchWoBomLines(batch.nsWorkOrderId)
+  let issued = 0
+  for (const g of groups.values()) {
+    const memberLabel = g.members.map(m => m.inflow.line).join('+')
+
+    let body
+    try {
+      ;({ body } = await buildWoIssueBody(batch.nsWorkOrderId, g.component.id, g.totalLbs, g.binId, bomLines))
+    } catch (err) {
+      console.error(`[BlendTankMesService] backfill ${memberLabel} → WO ${batch.nsWorkOrderId}: buildWoIssueBody failed — ${err.message}`)
+      statusStore.pushEvent(
+        'blendTank.backfillFailed',
+        `${batch.tankId} ${memberLabel}: backfill buildWoIssueBody failed (${g.totalLbs.toFixed(0)} lb, item ${g.component.id}) — ${nsErrShort(err)}`,
+        { tankId: batch.tankId, nsWorkOrderId: batch.nsWorkOrderId, phase: 'buildWoIssueBody', itemId: g.component.id, binId: g.binId, totalLbs: g.totalLbs, error: err.message.slice(0, 500) }
+      )
+      for (const m of g.members) await m.inflow.update({ blendTankBatchId: batch.id, nsItemId: String(g.component.id), status: 'pending_ns', errorMessage: err.message })
+      await db.MesProcessingLog.create({
+        eventType: 'blend_tank_backfill_issue', sourceId: batch.nsWorkOrderId,
+        nsTransactionType: 'workOrderIssue',
+        payload: JSON.stringify({ batchId: batch.id, totalLbs: g.totalLbs, targetItem: g.component.id, preferredBinId: g.binId }),
+        success: false, errorMessage: err.message,
+      })
+      continue
+    }
+
+    try {
+      const nsResult = await core.netsuitePost(`/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderIssue`, body)
+      const nsIssueId = extractNsIssueId(nsResult)
+      for (const m of g.members) {
+        await m.inflow.update({
+          blendTankBatchId: batch.id,
+          nsItemId: String(g.component.id),
+          nsIssueId: nsIssueId ? String(nsIssueId) : null,
+          status: 'completed',
+        })
+      }
+      await batch.increment({ cumulativeIssuedLbs: g.totalLbs })
+      await batch.update({ lastIssueAt: new Date(clock.now()) })
+      await db.MesProcessingLog.create({
+        eventType: 'blend_tank_backfill_issue', sourceId: batch.nsWorkOrderId,
+        nsTransactionType: 'workOrderIssue', nsTransactionId: nsIssueId,
+        payload: JSON.stringify({ batchId: batch.id, members: g.members.map(m => ({ inflowId: m.inflow.id, line: m.inflow.line, lbs: m.lbs })), totalLbs: g.totalLbs, component: g.component, binId: g.binId }),
+        result: JSON.stringify({ nsIssueId }), success: true,
+      })
+      console.log(`[BlendTankMesService] backfill issue ${memberLabel} → WO ${batch.nsWorkOrderId} (${batch.tankId}): ${g.totalLbs.toFixed(1)} lb "${g.component.name}" (NS ${g.component.id})`)
+      issued++
+    } catch (err) {
+      console.error(`[BlendTankMesService] backfill issue failed ${memberLabel} → WO ${batch.nsWorkOrderId}: ${err.message}`)
+      statusStore.pushEvent(
+        'blendTank.backfillFailed',
+        `${batch.tankId} ${memberLabel}: backfill workOrderIssue POST failed (${g.totalLbs.toFixed(0)} lb, prefBin=${g.binId}) — ${nsErrShort(err)}`,
+        { tankId: batch.tankId, nsWorkOrderId: batch.nsWorkOrderId, phase: 'netsuitePost', itemId: g.component.id, binId: g.binId, totalLbs: g.totalLbs, error: err.message.slice(0, 500) }
+      )
+      for (const m of g.members) await m.inflow.update({ blendTankBatchId: batch.id, nsItemId: String(g.component.id), status: 'error', errorMessage: err.message })
+      await db.MesProcessingLog.create({
+        eventType: 'blend_tank_backfill_issue', sourceId: batch.nsWorkOrderId,
+        nsTransactionType: 'workOrderIssue',
+        payload: JSON.stringify({ batchId: batch.id, totalLbs: g.totalLbs, binId: g.binId }),
+        success: false, errorMessage: err.message,
+      })
+    }
+  }
+
+  // Flush a completion for the freshly-issued amount so the WO closes out the
+  // full filled quantity (reload first so the increments above are visible).
+  await batch.reload()
+  await tickCompletionForBatch(batch).catch(err => {
+    console.error(`[BlendTankMesService] backfill completion flush failed for ${batch.tankId}: ${err.message}`)
+  })
+
+  return { attached: matched.length, issued }
 }
 
 /**

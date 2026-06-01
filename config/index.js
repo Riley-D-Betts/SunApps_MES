@@ -42,6 +42,12 @@ module.exports = {
   // this we just defer to the next tick so we don't spam NS with sub-pound noise.
   MES_MIN_ISSUE_LBS: parseFloat(process.env.MES_MIN_ISSUE_LBS || '10'),
   MES_MIN_COMPLETION_LBS: parseFloat(process.env.MES_MIN_COMPLETION_LBS || '1'),
+  // How far back a freshly-opened blend-tank batch will sweep for line flows
+  // that completed BEFORE the batch existed (operators named the tank hours
+  // after the fill). Those flows were saved as status='unmatched'; on batch
+  // open we attach + issue + complete any within this window. Bounded so a new
+  // batch doesn't vacuum up day-old orphans from an unrelated run.
+  MES_INFLOW_BACKFILL_LOOKBACK_HOURS: parseFloat(process.env.MES_INFLOW_BACKFILL_LOOKBACK_HOURS || '18'),
   // Test-input override for blend tank product selection. JSON object mapping
   // tankId → raw NS item ID (e.g. '{"BlendTank1A":8344,"BlendTank2A":8347}').
   // When set for a tank, processWOStart uses that item ID directly and skips
