@@ -55,6 +55,12 @@ function withCompletionLock(woId, fn) {
   return next
 }
 
+// A genuine line totalizer reset wraps to 0 at batch end — a drop of thousands
+// of lbs. Anything smaller is sensor jitter, not a reset: treating it as one
+// (and issuing the full post-"reset" totalizer) re-counts the same fill every
+// tick. Mirrors the surge-side TOTALIZER_RESET_DROP_GAL guard.
+const TOTALIZER_RESET_DROP_LBS = 100
+
 // Per-process BOM cache keyed by nsWorkOrderId. Fetched once per WO and reused
 // across ticks. Cleared when the batch closes.
 const _bomCache = new Map()
@@ -1163,11 +1169,17 @@ async function tickIssuesForBatch(batch, lineReadings) {
     let delta
     if (reading.totalizerLbs >= lastIssued) {
       delta = reading.totalizerLbs - lastIssued
-    } else {
-      // Totalizer reset between ticks (totalizer wraps to 0 at batch end). The
-      // pre-reset growth is lost to us — only issue the post-reset value.
+    } else if (lastIssued - reading.totalizerLbs > TOTALIZER_RESET_DROP_LBS) {
+      // Genuine totalizer reset between ticks (totalizer wraps to 0 at batch
+      // end — a drop of thousands). Pre-reset growth is lost; issue only the
+      // post-reset value.
       delta = reading.totalizerLbs
       console.warn(`[BlendTankMesService] tick: ${reading.line} totalizer reset between ticks (was ${lastIssued.toFixed(1)}, now ${reading.totalizerLbs.toFixed(1)}) — issuing post-reset value only`)
+    } else {
+      // Small backward step — sensor jitter, NOT a reset and NOT new milk.
+      // Treating any dip as a reset (issuing the full totalizer) re-counts the
+      // same fill every tick — the surge-side WO1598 534k bug. Hold the baseline.
+      delta = 0
     }
 
     // Update the always-track-rate fields even when we don't fire an issue, so

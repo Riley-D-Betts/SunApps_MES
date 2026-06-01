@@ -50,6 +50,15 @@ function withCompletionLock(woId, fn) {
 // and the FG mass-balance accounting doesn't need per-product precision.
 const GAL_TO_LBS = 8.6
 
+// A genuine UHT totalizer reset (IDLE/CIP→PROCESS wipes the in-memory
+// _uhtMilkGal accumulator to 0) drops the reading by thousands of gallons.
+// Anything smaller than this is sub-gal float jitter or a concurrent-poll race
+// on the shared accumulator — NOT a reset and NOT new milk. Treating every
+// backward step as a reset (issuing the full currentGal) re-counted one ~55k-lb
+// fill into 534k lb on WO1598 (a 0.03-gal blip, 7966.10 vs 7966.13, re-issued
+// ~68k lb per tick). See [[uht-milk-totalizer-gating]].
+const TOTALIZER_RESET_DROP_GAL = 50
+
 // Per-process BOM cache, keyed by nsWorkOrderId. Mirrors blendTankMesService.
 const _bomCache = new Map()
 
@@ -777,10 +786,17 @@ async function tickIssueForBatch(batch, historian) {
   let deltaGal
   if (currentGal >= lastIssued) {
     deltaGal = currentGal - lastIssued
-  } else {
-    // UHT totalizer reset (IDLE→PROCESS). Pre-reset milk is lost; only issue post-reset.
+  } else if (lastIssued - currentGal > TOTALIZER_RESET_DROP_GAL) {
+    // Genuine totalizer reset (IDLE/CIP→PROCESS wiped the accumulator to 0).
+    // Pre-reset milk is already issued; issue only the post-reset value.
     deltaGal = currentGal
     console.warn(`[SurgeTankMesService] tick: UHT ${batch.feedingUhtId} totalizer reset (was ${lastIssued.toFixed(1)} gal, now ${currentGal.toFixed(1)} gal) — issuing post-reset value only`)
+  } else {
+    // Tiny backward step — float jitter / concurrent-poll race on the shared
+    // _uhtMilkGal accumulator, NOT a reset and NOT new milk. Hold the baseline
+    // and issue nothing this tick (prevents the WO1598 534k re-count).
+    deltaGal = 0
+    console.warn(`[SurgeTankMesService] tick: UHT ${batch.feedingUhtId} totalizer dipped ${(lastIssued - currentGal).toFixed(2)} gal (${lastIssued.toFixed(1)}→${currentGal.toFixed(1)}) — jitter, not a reset; issuing nothing`)
   }
 
   await state.update({ lastTotalizerGal: currentGal, lastObservedAt: observedAt })
