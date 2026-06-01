@@ -266,6 +266,25 @@ async function run(historian) {
       if (!prev.batchActive && hasProduct && feedingLines.length > 0) {
         const reason = `line flow (${feedingLines.map(l => l.line).join(',')})`
         await startBatch(tankId, prev, status, reason)
+      } else if (!prev.batchActive && hasProduct) {
+        // Named-late path: no line is feeding right now, but the tank may have
+        // been filled BEFORE the operator set the product name. The fill's
+        // line.flowComplete fired with no active batch to match and landed as
+        // status='unmatched'. Opening the batch here lets processWOStart create
+        // the WO and backfillUnmatchedInflows issue + complete the pending fill.
+        // Gated on the presence of recent unmatched inflows for this tank so a
+        // stale name sitting on an empty/idle tank does NOT open an empty batch
+        // (the original feedingLines>0 gate exists precisely to avoid that).
+        let pending = []
+        try {
+          pending = await blendTankMesService.findMatchableUnmatchedInflows(tankId, status.fromEntName)
+        } catch (err) {
+          console.error(`[BlendTankJob] findMatchableUnmatchedInflows failed for ${tankId}:`, err.message)
+        }
+        if (pending.length > 0) {
+          const lbs = pending.reduce((s, p) => s + (parseFloat(p.totalLbs) || 0), 0)
+          await startBatch(tankId, prev, status, `named after fill (${pending.length} pending inflow${pending.length === 1 ? '' : 's'}, ${lbs.toFixed(0)} lb)`)
+        }
       }
 
       prev.productName = productName

@@ -498,9 +498,16 @@ async function processWOEnd(data) {
  * Every matched row leaves the 'unmatched' pool (attached to this batch with a
  * terminal status) so a second batch opening later can't double-grab it.
  */
-async function backfillUnmatchedInflows(batch) {
-  if (!batch.nsWorkOrderId) return { attached: 0, issued: 0 }
-
+/**
+ * Find recent status='unmatched' inflows (within MES_INFLOW_BACKFILL_LOOKBACK_HOURS)
+ * that belong to the given tank — matched by canonical destination
+ * (BT2A ↔ BlendTank2A), falling back to siloName ↔ fromEntName only when the
+ * inflow had no destination. Returns the matching MesBlendTankInflow rows
+ * (empty array if none). Shared by backfillUnmatchedInflows (to issue them)
+ * and blendTankJob's named-late START trigger (to decide whether to open a
+ * batch for a tank that was filled before it was named).
+ */
+async function findMatchableUnmatchedInflows(tankId, fromEntName) {
   const lookbackMs = config.MES_INFLOW_BACKFILL_LOOKBACK_HOURS * 60 * 60 * 1000
   const since = new Date(clock.now() - lookbackMs)
   const orphans = await db.MesBlendTankInflow.findAll({
@@ -511,11 +518,11 @@ async function backfillUnmatchedInflows(batch) {
     },
     order: [['createdAt', 'ASC']],
   })
-  if (orphans.length === 0) return { attached: 0, issued: 0 }
+  if (orphans.length === 0) return []
 
-  const tankCanonical = normalizeTankRef(batch.tankId)
-  const batchSilo = itemConfig.normalizeSiloName(batch.fromEntName)
-  const matched = orphans.filter(o => {
+  const tankCanonical = normalizeTankRef(tankId)
+  const batchSilo = itemConfig.normalizeSiloName(fromEntName)
+  return orphans.filter(o => {
     const destCanon = normalizeTankRef(o.destination)
     if (destCanon) return destCanon === tankCanonical
     // Inflow had no destination (REQUESTEDBY was empty) — fall back to the
@@ -523,6 +530,12 @@ async function backfillUnmatchedInflows(batch) {
     if (o.siloName && batchSilo) return itemConfig.normalizeSiloName(o.siloName) === batchSilo
     return false
   })
+}
+
+async function backfillUnmatchedInflows(batch) {
+  if (!batch.nsWorkOrderId) return { attached: 0, issued: 0 }
+
+  const matched = await findMatchableUnmatchedInflows(batch.tankId, batch.fromEntName)
   if (matched.length === 0) return { attached: 0, issued: 0 }
 
   console.log(`[BlendTankMesService] backfill: ${matched.length} unmatched inflow(s) match ${batch.tankId} (WO ${batch.nsWorkOrderId})`)
@@ -1509,5 +1522,6 @@ module.exports = {
   tickAllActiveBatches,
   clearStaleBatches,
   normalizeTankRef,
+  findMatchableUnmatchedInflows,
   clearCaches,
 }
