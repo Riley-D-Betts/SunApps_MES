@@ -728,6 +728,22 @@ async function tickIssueForBatch(batch, historian) {
   }
 
   const lastIssued = parseFloat(state.lastIssuedUhtGal) || 0
+
+  // A real milk totalizer is monotonic and non-negative. A negative baseline
+  // or reading means the in-memory accumulator was corrupted — historically a
+  // concurrent-poll race in getUhtStatus drove _uhtMilkGal to ~-394k gal, and
+  // a stored-negative baseline against a fresh (post-restart) reading computes
+  // as a six-figure positive delta and dumps millions of phantom lbs onto the
+  // WO. Re-baseline to the current reading and issue nothing this tick. The
+  // restProvider integration is now floored to forward flow so the totalizer
+  // can't re-enter this state; this just neutralises rows carried over from
+  // before that fix.
+  if (lastIssued < 0 || currentGal < 0) {
+    console.warn(`[SurgeTankMesService] tick: UHT ${batch.feedingUhtId} totalizer baseline invalid (lastIssued=${lastIssued.toFixed(1)} gal, current=${currentGal.toFixed(1)} gal) — re-baselining, no issue this tick`)
+    await state.update({ lastIssuedUhtGal: Math.max(currentGal, 0), lastTotalizerGal: currentGal, lastObservedAt: observedAt })
+    return false
+  }
+
   let deltaGal
   if (currentGal >= lastIssued) {
     deltaGal = currentGal - lastIssued

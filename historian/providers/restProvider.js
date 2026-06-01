@@ -24,6 +24,14 @@ const { PROCESS_STEP_NAMES, CIP_STEP_NAMES } = require('./uhtStepNames')
 const CREAM_DENSITY_PPG = 8.3
 const SKIM_DENSITY_PPG = 8.63
 
+// PROCESS step 24 — the only step where the UHT is actually pushing sterile
+// product downstream into a surge tank. FT1102 still reads ~100 GPM during the
+// "Sterile on Water" / phase-change steps, but that flow is recirculating water
+// bound for drain, not milk reaching the tank. Milk integration is gated on
+// this step so the totalizer (and the surge WO issues built off it) only counts
+// real product. Matches the batch-start gate in surgeTankJob.
+const STERILE_ON_PRODUCT_STEP = 'Sterile on Product'
+
 // Tag name constants
 const TAGS = {
   // XFR transfer tags (per-batch, reset between batches)
@@ -886,27 +894,44 @@ class RestProvider extends BaseProvider {
       // shows a stale CIP step while running production (and vice versa).
       const stepNum = mode === 'CIP' ? val(6) : (mode === 'PROCESS' ? val(5) : val(4))
 
-      // Software-integrate milk flow (FT1102_Output, slot 13) while in PROCESS.
-      // Reset accumulator on each IDLE/CIP→PROCESS transition so galActual
+      const stepName = mode === 'CIP'
+        ? (CIP_STEP_NAMES[stepNum] ?? `CIP Step ${stepNum}`)
+        : (PROCESS_STEP_NAMES[stepNum] ?? `Step ${stepNum}`)
+
+      // Software-integrate milk flow (FT1102_Output, slot 13) ONLY while the
+      // UHT is on "Sterile on Product" — the step where milk actually reaches
+      // the surge tank. Accumulating across every PROCESS step counted the
+      // ~100 GPM water recirculation during "Sterile on Water" / phase-change
+      // and divert as milk, inflating the totalizer indefinitely (WO 1573 hit
+      // >1M lb on a 10k-gal tank). We still advance lastPollMs every poll, so
+      // when product flow resumes only one poll-interval is added — never the
+      // whole gap. Reset on each IDLE/CIP→PROCESS transition so galActual
       // reflects only the current run's milk volume.
+      //
+      // Floor each contribution at a strictly-positive (gpm, elapsed): a
+      // milk-consumed totalizer must be monotonic. getUhtStatus() is called
+      // concurrently by several jobs (equipment/surge/tank-at-rest) that share
+      // this instance, so a racing call can stamp _uhtPollMs newer than this
+      // call's nowMs and make elapsedMin negative — left unguarded that drove
+      // the totalizer to large NEGATIVE values (observed -394k gal), which the
+      // surge issue baseline then read as a huge positive delta.
       const nowMs = this._now()
       const prevMode   = this._uhtPrevMode[uhtId]
       const lastPollMs = this._uhtPollMs[uhtId]
+      const sterileOnProduct = mode === 'PROCESS' && stepName === STERILE_ON_PRODUCT_STEP
       if (mode === 'PROCESS') {
         if (prevMode !== 'PROCESS') {
           this._uhtMilkGal[uhtId] = 0
-        } else if (lastPollMs != null) {
+        } else if (sterileOnProduct && lastPollMs != null) {
           const elapsedMin = (nowMs - lastPollMs) / 60000
-          this._uhtMilkGal[uhtId] += val(13) * elapsedMin
+          const gpm = val(13)
+          if (gpm > 0 && elapsedMin > 0) this._uhtMilkGal[uhtId] += gpm * elapsedMin
         }
       }
       this._uhtPollMs[uhtId]   = nowMs
       this._uhtPrevMode[uhtId] = mode
 
       const galActual = mode === 'CIP' ? val(12) : this._uhtMilkGal[uhtId]
-      const stepName = mode === 'CIP'
-        ? (CIP_STEP_NAMES[stepNum] ?? `CIP Step ${stepNum}`)
-        : (PROCESS_STEP_NAMES[stepNum] ?? `Step ${stepNum}`)
 
       // UHT{N}.FromEntName tag is often unpopulated (PLC writes null).
       // Fall back to reading which blend-tank→TSTAT outlet valve is open.
