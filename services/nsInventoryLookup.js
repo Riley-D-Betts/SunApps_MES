@@ -231,10 +231,17 @@ function buildAssignmentItems({ isLot, useBins }, totalQty, allocations, preferr
   return null // no tracking detail needed
 }
 
+// Drop the per-process item-tracking cache so a replay reset re-reads tracking
+// config fresh rather than serving values cached during a prior run.
+function clearCaches() {
+  _trackingCache.clear()
+}
+
 module.exports = {
   getItemTracking,
   findInventoryAllocations,
   findBinForItem,
   buildAssignmentItems,
+  clearCaches,
   NS_LOCATION_ID,
 }

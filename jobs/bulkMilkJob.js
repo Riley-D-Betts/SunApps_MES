@@ -55,4 +55,10 @@ function getLastPollTime() {
   return lastPollTime
 }
 
-module.exports = { run, getLastPollTime }
+// Re-anchor the poll window so a replay relive doesn't query against a wall
+// time from a previous run.
+function reset() {
+  lastPollTime = new Date()
+}
+
+module.exports = { run, getLastPollTime, reset }
