@@ -198,20 +198,21 @@ async function findBinForItem(itemId, preferredBinId = null, neededQty = 0) {
   return String(best.bin_id)
 }
 
-// Round each allocation qty to 2-decimal lbs and snap the LAST item so the
-// assignment quantities sum to exactly `totalQty`. findInventoryAllocations
-// builds `take` via `remaining -= take`, which accumulates float dust — once
-// JSON-serialized the per-lot quantities sum to e.g. 31962.3199999 while the
-// component line is exactly 31962.32, and NS's exact-decimal check rejects the
-// issue ("total inventory detail quantity must be N"). Snapping the final lot
-// by the residual keeps the total exact; the adjustment is sub-cent so it
-// never pushes a lot above its available balance.
+// Distribute the SAME `totalQty` that the caller puts on the component line
+// across the per-lot assignment items, so the inventory-detail total is the
+// component-line quantity by construction — never an independently-summed
+// value that can drift. findInventoryAllocations builds `take` via
+// `remaining -= take`, which accumulates float dust; left alone the
+// JSON-serialized per-lot quantities sum to e.g. 31962.3199999 while the line
+// is exactly 31962.32, and NS's exact-decimal check rejects the issue ("total
+// inventory detail quantity must be N"). We round every lot but the last to
+// 2dp, then give the LAST lot the remaining `totalQty - others` — the residual
+// is sub-cent so it never pushes a lot above its available balance.
 function snapQuantities(allocations, totalQty) {
-  const target = Math.round(totalQty * 100) / 100
   const rounded = allocations.map(a => Math.round(a.qty * 100) / 100)
-  const head = rounded.slice(0, -1).reduce((s, q) => s + q, 0)
   if (rounded.length > 0) {
-    rounded[rounded.length - 1] = Math.round((target - head) * 100) / 100
+    const others = rounded.slice(0, -1).reduce((s, q) => s + q, 0)
+    rounded[rounded.length - 1] = Math.round((totalQty - others) * 100) / 100
   }
   return rounded
 }
