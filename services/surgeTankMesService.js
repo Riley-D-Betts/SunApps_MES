@@ -178,7 +178,13 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
     }
   }
 
-  const detail = nsInventory.buildComponentDetail(tracking, quantity, allocations, resolvedBinId)
+  // The bin-only inventory-detail wrapper differs by WO: lowercase
+  // componentinventorydetail when the WO has any lot line, camelCase
+  // inventoryDetail when it's pure bin-only. Surge WOs are pure bin-only today,
+  // so this resolves to false, but compute it from the BOM so a future
+  // lot-bearing surge WO stays correct.
+  const woHasLotLines = await nsInventory.anyLotTracked(bomLines)
+  const detail = nsInventory.buildComponentDetail(tracking, quantity, allocations, resolvedBinId, woHasLotLines)
 
   const componentEntry = { lineNumber: targetLine.line, quantity }
   if (detail) Object.assign(componentEntry, detail)

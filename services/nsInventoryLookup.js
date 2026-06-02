@@ -263,22 +263,29 @@ function buildAssignmentItems({ isLot, useBins }, totalQty, allocations, preferr
 }
 
 // Build the full inventory-detail object to merge onto a component line,
-// keyed and shaped per tracking class. EMPIRICALLY VALIDATED against sandbox
-// NS (scripts/probeBlendDetailShape.js, WO 4813196 item 5415, 2026-06-02):
-//   - ALL tracking classes use the lowercase `componentinventorydetail.
-//     inventoryassignment` wrapper with status:1. NS SILENTLY IGNORES the
-//     camelCase `inventoryDetail` wrapper on a multi-line / duplicated-line
-//     component list (it credits the line 0 detail and rejects the issue with
-//     "Please configure the inventory detail in line N of the component list").
-//   - lot / lot+bin: status:1 + issueinventorynumber (+ raw binnumber for lot+bin).
-//   - bin-only:      status:1 + binnumber:{id: Number}. The bin id MUST be the
-//     {id} OBJECT form — a raw string binnumber credits 0 and triggers "total
-//     inventory detail quantity must be N" (the symptom commit 4951626 chased,
-//     which it fixed by also — wrongly — switching the wrapper to camelCase;
-//     camelCase only happened to work on the old single-component WOs). See SD-597.
+// keyed and shaped per tracking class. The wrapper key for a BIN-ONLY line
+// depends on whether the WHOLE WO has any lot-tracked component line
+// (woHasLotLines) — NS switches its inventory-detail sublist mode per order:
+//   - WO with ANY lot line (e.g. blend WOs carry vitamin 530 / citrate 7235):
+//     the lowercase manufacturing `componentinventorydetail.inventoryassignment`
+//     sublist is used for EVERY line. A camelCase `inventoryDetail` on a
+//     bin-only line is then SILENTLY IGNORED → "Please configure the inventory
+//     detail in line N".
+//   - WO with ONLY bin-only lines (e.g. surge WOs — one raw-milk item): the
+//     generic camelCase `inventoryDetail.inventoryAssignment` sublist is used.
+//     A lowercase wrapper there is IGNORED → "total inventory detail quantity
+//     must be N" (credits 0).
+// EMPIRICALLY VALIDATED 2026-06-02 (scripts/probeBlendDetailShape.js): blend
+// WO 4813196 (has lot lines) → lowercase works / camelCase ignored; surge WO
+// 4813527 (pure bin-only) → camelCase works / lowercase ignored. This is why
+// commit 4951626 (camelCase-everywhere) fixed surge but broke blend, and the
+// lowercase-everywhere attempt did the reverse. Lot / lot+bin lines ALWAYS use
+// the lowercase componentinventorydetail shape (they only exist on lot WOs).
+// Bin id MUST be the {id: Number} object form regardless of wrapper — a raw
+// string binnumber credits 0. See [[ns-wo-issue-shape]], SD-597.
 // Returns the object to Object.assign onto the component entry, or null when
 // the item needs no inventory detail.
-function buildComponentDetail(tracking, totalQty, allocations, preferredBinId) {
+function buildComponentDetail(tracking, totalQty, allocations, preferredBinId, woHasLotLines = false) {
   const { isLot, useBins } = tracking
   if (isLot) {
     const items = buildAssignmentItems(tracking, totalQty, allocations, preferredBinId)
@@ -287,19 +294,37 @@ function buildComponentDetail(tracking, totalQty, allocations, preferredBinId) {
   }
   if (useBins) {
     if (preferredBinId == null) return null
+    if (woHasLotLines) {
+      return {
+        componentinventorydetail: {
+          inventoryassignment: {
+            items: [{ status: 1, quantity: totalQty, binnumber: { id: Number(preferredBinId) } }],
+          },
+        },
+      }
+    }
     return {
-      componentinventorydetail: {
-        inventoryassignment: {
-          items: [{
-            status: 1,
-            quantity: totalQty,
-            binnumber: { id: Number(preferredBinId) },
-          }],
+      inventoryDetail: {
+        inventoryAssignment: {
+          items: [{ quantity: totalQty, binnumber: { id: Number(preferredBinId) }, inventoryStatus: { id: 1 } }],
         },
       },
     }
   }
   return null
+}
+
+// True if any component line on the WO BOM is lot-tracked. Drives the bin-only
+// inventory-detail wrapper choice in buildComponentDetail (see its comment).
+// bomLines: [{ line, itemId }]. Tracking reads are cached, so this is one NS
+// round-trip per distinct item the first time a WO is seen, then free.
+async function anyLotTracked(bomLines) {
+  if (!Array.isArray(bomLines) || bomLines.length === 0) return false
+  for (const l of bomLines) {
+    const t = await getItemTracking(l.itemId)
+    if (t.isLot) return true
+  }
+  return false
 }
 
 // Drop the per-process item-tracking cache so a replay reset re-reads tracking
@@ -315,6 +340,7 @@ module.exports = {
   findBinForItem,
   buildAssignmentItems,
   buildComponentDetail,
+  anyLotTracked,
   clearCaches,
   NS_LOCATION_ID,
 }

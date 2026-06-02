@@ -204,7 +204,12 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
     }
   }
 
-  const detail = nsInventory.buildComponentDetail(tracking, quantity, allocations, resolvedBinId)
+  // Bin-only inventory-detail wrapper depends on the WO's tracking mix: blend
+  // WOs carry lot-tracked vitamin/citrate lines, so this is true and bin-only
+  // lines use the lowercase componentinventorydetail shape (camelCase is
+  // silently ignored on a lot-bearing WO). See nsInventory.buildComponentDetail.
+  const woHasLotLines = await nsInventory.anyLotTracked(bomLines)
+  const detail = nsInventory.buildComponentDetail(tracking, quantity, allocations, resolvedBinId, woHasLotLines)
 
   const componentEntry = { lineNumber: targetLine.line, quantity }
   if (detail) Object.assign(componentEntry, detail)
