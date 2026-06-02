@@ -178,14 +178,10 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
     }
   }
 
-  const assignmentItems = nsInventory.buildAssignmentItems(tracking, quantity, allocations, resolvedBinId)
+  const detail = nsInventory.buildComponentDetail(tracking, quantity, allocations, resolvedBinId)
 
   const componentEntry = { lineNumber: targetLine.line, quantity }
-  if (assignmentItems && assignmentItems.length > 0) {
-    componentEntry.componentinventorydetail = {
-      inventoryassignment: { items: assignmentItems },
-    }
-  }
+  if (detail) Object.assign(componentEntry, detail)
 
   return {
     body: { component: { items: [componentEntry] } },

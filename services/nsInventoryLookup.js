@@ -252,6 +252,42 @@ function buildAssignmentItems({ isLot, useBins }, totalQty, allocations, preferr
   return null // no tracking detail needed
 }
 
+// Build the full inventory-detail object to merge onto a component line,
+// keyed and shaped per tracking class. EMPIRICALLY VALIDATED against sandbox
+// NS (scripts/probeBinIssueShape.js, WO 4812435 item 5403):
+//   - lot / lot+bin: lowercase `componentinventorydetail.inventoryassignment`
+//     with status:1 + issueinventorynumber (+ binnumber string for lot+bin).
+//   - bin-only:      camelCase `inventoryDetail.inventoryAssignment` with
+//     binnumber:{id} + inventoryStatus:{id}. The lowercase shape is SILENTLY
+//     IGNORED by NS for bin-only items — it credits 0 and rejects with "total
+//     inventory detail quantity must be N" even when the named bin has ample
+//     stock. See SD-597.
+// Returns the object to Object.assign onto the component entry, or null when
+// the item needs no inventory detail.
+function buildComponentDetail(tracking, totalQty, allocations, preferredBinId) {
+  const { isLot, useBins } = tracking
+  if (isLot) {
+    const items = buildAssignmentItems(tracking, totalQty, allocations, preferredBinId)
+    if (!items || items.length === 0) return null
+    return { componentinventorydetail: { inventoryassignment: { items } } }
+  }
+  if (useBins) {
+    if (preferredBinId == null) return null
+    return {
+      inventoryDetail: {
+        inventoryAssignment: {
+          items: [{
+            quantity: totalQty,
+            binnumber: { id: Number(preferredBinId) },
+            inventoryStatus: { id: 1 },
+          }],
+        },
+      },
+    }
+  }
+  return null
+}
+
 // Drop the per-process item-tracking cache so a replay reset re-reads tracking
 // config fresh rather than serving values cached during a prior run.
 function clearCaches() {
@@ -263,6 +299,7 @@ module.exports = {
   findInventoryAllocations,
   findBinForItem,
   buildAssignmentItems,
+  buildComponentDetail,
   clearCaches,
   NS_LOCATION_ID,
 }
