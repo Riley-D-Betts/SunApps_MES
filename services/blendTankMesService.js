@@ -1329,11 +1329,12 @@ async function tickIssuesForBatch(batch, lineReadings) {
       .map(m => m.kind === 'catchup' ? `${m.line}(catch-up)` : m.line)
       .join('+')
 
-    let body, allocations
+    let body, allocations, tracking
     try {
       const built = await buildWoIssueBody(batch.nsWorkOrderId, g.component.id, g.totalDelta, g.binId, bomLines)
       body = built.body
       allocations = built.allocations
+      tracking = built.tracking
     } catch (err) {
       console.error(`[BlendTankMesService] tick issue ${memberLabel} → WO ${batch.nsWorkOrderId}: buildWoIssueBody failed — ${err.message}`)
       statusStore.pushEvent(
@@ -1412,6 +1413,12 @@ async function tickIssuesForBatch(batch, lineReadings) {
       issuesFired++
     } catch (err) {
       console.error(`[BlendTankMesService] tick issue failed for ${memberLabel} → WO ${batch.nsWorkOrderId}:`, err.message)
+      // Log the exact body NS rejected so a "configure inventory detail in
+      // line N" / "must be N" mismatch can be diagnosed without guessing at the
+      // shape (mirrors the surge-tick diagnostic). The component entry's
+      // lineNumber + inventoryDetail are the usual suspects.
+      console.error(`[BlendTankMesService] rejected body: ${JSON.stringify(body)}`)
+      console.error(`[BlendTankMesService] failed issue context — item ${g.component.id}, tracking=${JSON.stringify(tracking)}, prefBin=${g.binId}`)
       const allocSummary = (allocations || [])
         .map(a => `lot ${a.lotName}(id=${a.lotId})@bin ${a.binName}(id=${a.binId}) take=${a.qty.toFixed(2)}`)
         .join('; ') || '(no lots)'
@@ -1426,6 +1433,8 @@ async function tickIssuesForBatch(batch, lineReadings) {
           binId: g.binId,
           totalDelta: g.totalDelta,
           allocations: allocations || [],
+          requestBody: body,
+          tracking: tracking || null,
           error: err.message.slice(0, 500),
         }
       )
