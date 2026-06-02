@@ -123,6 +123,7 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
   quantity = Math.floor(quantity * 100) / 100
 
   let allocations = null
+  let resolvedBinId = preferredBinId
   if (tracking.isLot) {
     allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
     let allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
@@ -145,9 +146,39 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
         throw err
       }
     }
+  } else if (tracking.useBins) {
+    // Bin-tracked component (raw silo milk like NS 5403 Raw Organic A2 Milk).
+    // Mirror the blend-tank path: if the preferred bin can't cover the issue,
+    // auto-adjust the source bin up by the real shortfall before issuing —
+    // otherwise NS rejects with "you only have N available." Surge was missing
+    // this branch entirely, so bin-tracked components never got the auto-adjust
+    // and every short issue failed at the NS POST (ST81 WO4812137).
+    resolvedBinId = await nsInventory.findBinForItem(targetItemId, preferredBinId, quantity)
+    if (!resolvedBinId) {
+      // Current on-hand can be NEGATIVE after prior over-draws, so the real
+      // shortfall is quantity - currentOnHand, not just quantity.
+      const currentOnHand = preferredBinId
+        ? await inventoryAdjustment.getBinQtyOnHand(targetItemId, preferredBinId)
+        : 0
+      const realShortfall = quantity - currentOnHand
+      const adjusted = preferredBinId && realShortfall > 0
+        ? await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall: realShortfall })
+        : false
+      if (adjusted) {
+        resolvedBinId = await pollBinForItem(targetItemId, preferredBinId, quantity)
+      }
+      if (!resolvedBinId) {
+        const err = new Error(`Insufficient inventory for item ${targetItemId}: preferred bin ${preferredBinId} has less than ${quantity} lb available (on-hand ${currentOnHand.toFixed(2)})`)
+        err.code = 'INSUFFICIENT_INVENTORY'
+        err.itemId = targetItemId
+        err.needed = quantity
+        err.available = currentOnHand
+        throw err
+      }
+    }
   }
 
-  const assignmentItems = nsInventory.buildAssignmentItems(tracking, quantity, allocations, preferredBinId)
+  const assignmentItems = nsInventory.buildAssignmentItems(tracking, quantity, allocations, resolvedBinId)
 
   const componentEntry = { lineNumber: targetLine.line, quantity }
   if (assignmentItems && assignmentItems.length > 0) {
@@ -178,6 +209,17 @@ async function pollAllocations(targetItemId, quantity, preferredBinId) {
     if (allocatedQty + 1e-6 >= quantity) break
   }
   return { allocations, allocatedQty }
+}
+
+// Bin-path equivalent of pollAllocations — re-check the preferred bin after an
+// auto-adjust until it can cover the issue (NS inventorybalance lags the POST).
+async function pollBinForItem(targetItemId, preferredBinId, neededQty = 0) {
+  for (const delay of SHORTFALL_POLL_DELAYS_MS) {
+    await new Promise(r => setTimeout(r, delay))
+    const bin = await nsInventory.findBinForItem(targetItemId, preferredBinId, neededQty)
+    if (bin) return bin
+  }
+  return null
 }
 
 // Source-bin auto-adjust hook for the surge-WO issue path. Mirror of
