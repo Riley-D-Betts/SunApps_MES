@@ -335,7 +335,14 @@ async function resolveLayer3Component(data, historian, fgItem) {
 async function _resolveLayer3Source(data, historian) {
   const feedingFromEntName = data.feedingFromEntName
   const feedingUhtId = data.feedingUhtId
-  if (!feedingFromEntName) return null
+  if (!feedingFromEntName) {
+    // Silo→TSTAT→UHT bypass (A2 Whole): the job has no blend-tank/silo source
+    // because no blend valve is open. Resolve straight from the line feeding
+    // this UHT's TSTAT and carry sourceSilo so the batch can display the real
+    // silo instead of "?".
+    const fromLine = await resolveComponentFromUhtFeedLine(feedingUhtId, historian)
+    return fromLine ? { ...fromLine, layerSkipReason: 'layer-1-and-2-skip' } : null
+  }
 
   if (isBlendTankRef(feedingFromEntName)) {
     let blendBatch = await db.MesBlendTankBatch.findOne({
@@ -465,6 +472,7 @@ async function resolveComponentFromUhtFeedLine(feedingUhtId, historian) {
       itemName: lineItem.name,
       binId: itemConfig.getBinId(feedingLine.siloName),
       resolvedFrom: 'uht-feed-line',
+      sourceSilo: feedingLine.siloName || null,
     }
   } catch (err) {
     console.warn(`[SurgeTankMesService] resolveComponentFromUhtFeedLine ${feedingUhtId} failed — ${err.message}`)
@@ -504,6 +512,16 @@ async function resolveSurgeTankComponent(batch, historian) {
       // Resolve the component straight from the line feeding this UHT's TSTAT.
       const fromLine = await resolveComponentFromUhtFeedLine(feedingUhtId, historian)
       if (fromLine) {
+        // Backfill the source silo onto the batch so the UI stops showing
+        // "Source ?" — and so future ticks take the stable isSiloRef path.
+        if (fromLine.sourceSilo && batch.feedingFromEntName !== fromLine.sourceSilo) {
+          try {
+            await batch.update({ feedingFromEntName: fromLine.sourceSilo })
+            console.log(`[SurgeTankMesService] Backfilled feedingFromEntName="${fromLine.sourceSilo}" on batch ${batch.id} (${batch.tankId}) from UHT feed line`)
+          } catch (err) {
+            console.warn(`[SurgeTankMesService] Failed to backfill feedingFromEntName on batch ${batch.id}: ${err.message}`)
+          }
+        }
         console.log(`[SurgeTankMesService] resolveSurgeTankComponent: ${batch.tankId} fed via UHT ${feedingUhtId} bypass — component "${fromLine.itemName}" (NS ${fromLine.itemId}) from feed line`)
         return fromLine
       }
@@ -680,12 +698,17 @@ async function processWOStart(data, historian) {
     console.log(`  Layer-3 component: NS ${resolvedComponent.itemId} (${resolvedComponent.itemName}) from ${resolvedComponent.resolvedFrom}${resolvedComponent.layerSkipReason ? ` [${resolvedComponent.layerSkipReason}]` : ''} (pairing: ${resolvedComponent.pairingStatus || 'n/a'})`)
   }
 
+  // Bypass batches arrive with no feedingFromEntName; the Layer-3 resolver
+  // recovers the real source silo from the UHT feed line. Use it as the
+  // display/source-entity so the batch shows e.g. "MSilo3 via UHT1", not "?".
+  const sourceEntity = feedingFromEntName || resolvedComponent?.sourceSilo || null
+
   const record = await db.MesSurgeTankBatch.create({
     tankId,
     productName,
     mesItem: parsed?.nsId ? String(parsed.nsId) : null,
     feedingUhtId: feedingUhtId || null,
-    feedingFromEntName: feedingFromEntName || null,
+    feedingFromEntName: sourceEntity,
     componentItemId: resolvedComponent?.itemId || null,
     componentBinId: resolvedComponent?.binId || null,
     componentResolvedFrom: resolvedComponent?.resolvedFrom || null,
@@ -732,7 +755,7 @@ async function processWOStart(data, historian) {
       isWip: true,
       custbody_mes_tank_id: tankId,
       custbody_mes_product_name: productName,
-      custbody_mes_source_entity: feedingFromEntName || null,
+      custbody_mes_source_entity: sourceEntity,
       custbody_mes_dest_entity: tankId,
     }
     // Custom one-line component list pins the WO's BOM to the resolved Layer-3
