@@ -264,14 +264,18 @@ function buildAssignmentItems({ isLot, useBins }, totalQty, allocations, preferr
 
 // Build the full inventory-detail object to merge onto a component line,
 // keyed and shaped per tracking class. EMPIRICALLY VALIDATED against sandbox
-// NS (scripts/probeBinIssueShape.js, WO 4812435 item 5403):
-//   - lot / lot+bin: lowercase `componentinventorydetail.inventoryassignment`
-//     with status:1 + issueinventorynumber (+ binnumber string for lot+bin).
-//   - bin-only:      camelCase `inventoryDetail.inventoryAssignment` with
-//     binnumber:{id} + inventoryStatus:{id}. The lowercase shape is SILENTLY
-//     IGNORED by NS for bin-only items — it credits 0 and rejects with "total
-//     inventory detail quantity must be N" even when the named bin has ample
-//     stock. See SD-597.
+// NS (scripts/probeBlendDetailShape.js, WO 4813196 item 5415, 2026-06-02):
+//   - ALL tracking classes use the lowercase `componentinventorydetail.
+//     inventoryassignment` wrapper with status:1. NS SILENTLY IGNORES the
+//     camelCase `inventoryDetail` wrapper on a multi-line / duplicated-line
+//     component list (it credits the line 0 detail and rejects the issue with
+//     "Please configure the inventory detail in line N of the component list").
+//   - lot / lot+bin: status:1 + issueinventorynumber (+ raw binnumber for lot+bin).
+//   - bin-only:      status:1 + binnumber:{id: Number}. The bin id MUST be the
+//     {id} OBJECT form — a raw string binnumber credits 0 and triggers "total
+//     inventory detail quantity must be N" (the symptom commit 4951626 chased,
+//     which it fixed by also — wrongly — switching the wrapper to camelCase;
+//     camelCase only happened to work on the old single-component WOs). See SD-597.
 // Returns the object to Object.assign onto the component entry, or null when
 // the item needs no inventory detail.
 function buildComponentDetail(tracking, totalQty, allocations, preferredBinId) {
@@ -284,12 +288,12 @@ function buildComponentDetail(tracking, totalQty, allocations, preferredBinId) {
   if (useBins) {
     if (preferredBinId == null) return null
     return {
-      inventoryDetail: {
-        inventoryAssignment: {
+      componentinventorydetail: {
+        inventoryassignment: {
           items: [{
+            status: 1,
             quantity: totalQty,
             binnumber: { id: Number(preferredBinId) },
-            inventoryStatus: { id: 1 },
           }],
         },
       },
