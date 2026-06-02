@@ -46,9 +46,12 @@ async function getItemTracking(itemId) {
   let resolved = null
   for (const sub of subtypes) {
     try {
-      const wrap = await core.netsuiteGet(`/record/v1/${sub}/${itemId}?fields=islotitem,usebins`)
+      const wrap = await core.netsuiteGet(`/record/v1/${sub}/${itemId}?fields=islotitem,usebins,cost`)
       const body = wrap?.body || wrap
-      resolved = { isLot: !!body.isLotItem, useBins: !!body.useBins }
+      // `cost` = the item's standard cost; carried so inventoryAdjustment can
+      // stamp a non-negative line unitcost (NS otherwise derives a negative
+      // one and rejects with "Lines cannot have a negative unit cost").
+      resolved = { isLot: !!body.isLotItem, useBins: !!body.useBins, cost: Number(body.cost) || 0 }
       break
     } catch (err) {
       const m = (err.data?.error || '').match(/different type: (\w+)/)
@@ -62,10 +65,17 @@ async function getItemTracking(itemId) {
   }
   if (!resolved) {
     console.warn(`[NsInventoryLookup] Could not resolve tracking for item ${itemId} — defaulting to no tracking`)
-    resolved = { isLot: false, useBins: false }
+    resolved = { isLot: false, useBins: false, cost: 0 }
   }
   _trackingCache.set(key, resolved)
   return resolved
+}
+
+// Item standard cost (lbs → $). Reuses getItemTracking's cached item read.
+// Used by inventoryAdjustment to set a non-negative line unitcost.
+async function getItemStandardCost(itemId) {
+  const t = await getItemTracking(itemId)
+  return t.cost || 0
 }
 
 /**
@@ -296,6 +306,7 @@ function clearCaches() {
 
 module.exports = {
   getItemTracking,
+  getItemStandardCost,
   findInventoryAllocations,
   findBinForItem,
   buildAssignmentItems,

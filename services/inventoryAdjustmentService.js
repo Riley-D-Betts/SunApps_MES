@@ -158,7 +158,7 @@ async function resolveLotForBinAdjustment({ binId, itemId, qtyDelta, lastWoNumbe
 //     line AND assignment levels carries the direction. The PalletAdjust
 //     code explicitly notes "NetSuite REST API may not support
 //     issueInventoryNumber" — confirmed by our own trial-and-error here.
-function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, multiLotAllocations, memo }) {
+function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, multiLotAllocations, memo, unitCost }) {
   const signedQty = qtyDelta
   const tracking = lot?.tracking || { isLot: false, useBins: false }
 
@@ -200,6 +200,11 @@ function buildInventoryAdjustmentBody({ binId, itemId, qtyDelta, lot, multiLotAl
     location: NS_LOCATION_ID,
     department: { id: '7' },
   }
+  // Stamp the item's standard cost as the line unitcost. Without it NS derives
+  // a unit cost from the (often zero/negative-valued) cost layer and rejects
+  // up-adjusts with "Lines cannot have a negative unit cost". Verified via
+  // scripts/probeAdjustUnitCost.js (item 5403 @ 0.58). See SD-597.
+  if (unitCost > 0) item.unitcost = unitCost
   if (tracking.useBins || tracking.isLot) {
     item.inventoryDetail = {
       inventoryAssignment: { items: assignments },
@@ -318,8 +323,11 @@ async function submitInventoryAdjustment(args) {
     multiLotAllocations = allocations
   }
 
+  // Item standard cost → line unitcost, so NS doesn't derive a negative one.
+  const unitCost = await nsInventory.getItemStandardCost(itemId)
+
   const body = buildInventoryAdjustmentBody({
-    binId, itemId, qtyDelta, lot, multiLotAllocations,
+    binId, itemId, qtyDelta, lot, multiLotAllocations, unitCost,
     memo: memo || `MES ${source} adjustment${tankName ? ` (${tankName})` : ''}`,
   })
 
