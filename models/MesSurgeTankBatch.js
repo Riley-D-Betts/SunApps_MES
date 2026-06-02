@@ -102,6 +102,28 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: 0,
       },
+      // Measured mass that REACHED this tank (surge level rise ×8.6, summed).
+      // Drives workOrderCompletion; cumulativeIssued − cumulativeOutput = waste
+      // (the UHT-leg loss between FT1102 inlet and the surge tank).
+      cumulativeOutputLbs: {
+        type: DataTypes.DECIMAL(14, 2),
+        allowNull: false,
+        defaultValue: 0,
+      },
+      // Last destination-level reading (lbs) used as the arrival baseline.
+      lastDestLevelLbs: {
+        type: DataTypes.DECIMAL(14, 2),
+        allowNull: true,
+      },
+      // Computed at batch close: issued − output (lbs) and as a % of issued.
+      wasteLbs: {
+        type: DataTypes.DECIMAL(14, 2),
+        allowNull: true,
+      },
+      wastePercent: {
+        type: DataTypes.DECIMAL(8, 2),
+        allowNull: true,
+      },
       lastIssueAt: {
         type: DataTypes.DATE,
         allowNull: true,

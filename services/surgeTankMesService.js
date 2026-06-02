@@ -60,6 +60,16 @@ const GAL_TO_LBS = 8.6
 // ~68k lb per tick). See [[uht-milk-totalizer-gating]].
 const TOTALIZER_RESET_DROP_GAL = 50
 
+// A level reading (lbs) is implausible when it reads ~empty but we just saw a
+// substantial level. That's the replay-overrun signature (future timestamps
+// return 0/null) — treating it as a real drain would zero out arrival and make
+// waste collapse to zero. Defer those ticks rather than trust the read.
+function plausibleLevelLbs(curLbs, prevLbs) {
+  if (!Number.isFinite(curLbs) || curLbs < 0) return false
+  if (curLbs < 1 && prevLbs != null && prevLbs > config.MES_WASTE_RESIDUAL_FLOOR_LBS) return false
+  return true
+}
+
 // Per-process BOM cache, keyed by nsWorkOrderId. Mirrors blendTankMesService.
 const _bomCache = new Map()
 
@@ -835,19 +845,50 @@ async function processWOEnd(data, historian) {
     return { success: true, message: 'No active batch found' }
   }
 
-  // Final flush — pull any last UHT-totalizer delta into NS, then close.
+  // Legacy / no-arrival fallback: completion is driven by measured arrival
+  // (cumulativeOutputLbs). Batches that predate arrival tracking — or where the
+  // surge level never reported during the batch (lastDestLevelLbs still null) —
+  // have output=0 and would strand their completion. Don't claim phantom UHT
+  // loss: complete everything issued (1:1, waste unmeasured).
+  if ((parseFloat(record.cumulativeOutputLbs) || 0) <= 0 &&
+      record.lastDestLevelLbs == null &&
+      (parseFloat(record.cumulativeIssuedLbs) || 0) > 0) {
+    console.log(`[SurgeTankMesService] ${tankId}: no arrival measured this batch — completing issued 1:1 (no waste claim)`)
+    await record.update({ cumulativeOutputLbs: parseFloat(record.cumulativeIssuedLbs) || 0 })
+    await record.reload()
+  }
+
+  // Final flush — pull any last UHT-totalizer delta into NS, capture any last
+  // surge arrival, then close.
   let flushedIssue = false
   let flushedCompletion = false
   try {
     flushedIssue = await tickIssueForBatch(record, historian)
     if (flushedIssue) await record.reload()
+    await tickArrivalForBatch(record, historian, 'issue')
+    await record.reload()
     flushedCompletion = await tickCompletionForBatch(record)
   } catch (err) {
     console.error(`[SurgeTankMesService] Final flush failed for ${tankId}:`, err.message)
   }
   await record.reload()
 
-  await record.update({ status: 'completed', completedAt: detectedAt || new Date(clock.now()) })
+  // Waste = issued (UHT FT1102 inlet) − output (measured surge arrival). The gap
+  // is the UHT-leg loss, left as implicit NS shrinkage (issued > completed).
+  // It is a conservative UPPER bound: concurrent fill+drain under-counts arrival.
+  const issuedLbs = parseFloat(record.cumulativeIssuedLbs) || 0
+  const outputLbs = parseFloat(record.cumulativeOutputLbs) || 0
+  const wasteLbs = Math.max(0, issuedLbs - outputLbs)
+  const wastePercent = issuedLbs >= 10
+    ? Math.max(0, Math.min(999999.99, (wasteLbs / issuedLbs) * 100))
+    : null
+
+  await record.update({
+    status: 'completed',
+    completedAt: detectedAt || new Date(clock.now()),
+    wasteLbs,
+    wastePercent,
+  })
   if (record.nsWorkOrderId) clearBomCache(record.nsWorkOrderId)
   await db.MesProcessingLog.create({
     eventType: 'surge_tank_wo_complete',
@@ -857,22 +898,37 @@ async function processWOEnd(data, historian) {
     payload: JSON.stringify(data),
     result: JSON.stringify({
       completed: true,
-      cumulativeIssuedLbs: parseFloat(record.cumulativeIssuedLbs) || 0,
+      cumulativeIssuedLbs: issuedLbs,
+      cumulativeOutputLbs: outputLbs,
       cumulativeCompletedLbs: parseFloat(record.cumulativeCompletedLbs) || 0,
+      wasteLbs,
+      wastePercent,
+      note: 'waste = UHT-leg loss (issued − reached); upper bound under concurrent fill+drain',
       flushedIssue,
       flushedCompletion,
     }),
     success: true,
   })
 
-  console.log(`[SurgeTankMesService] Batch "${record.productName}" on ${tankId} closed — issued ${parseFloat(record.cumulativeIssuedLbs).toFixed(0)} lb, completed ${parseFloat(record.cumulativeCompletedLbs).toFixed(0)} lb`)
+  if (wastePercent != null && wastePercent > itemConfig.WASTE_ALERT_THRESHOLD) {
+    console.warn(`[SurgeTankMesService] High waste alert: ${wastePercent.toFixed(1)}% on ${tankId}`)
+    await core.sendStagingNotification(
+      'MES Surge Tank: High Waste Alert',
+      `Batch "${record.productName}" on ${tankId}\nWaste: ${wasteLbs.toFixed(1)} LBS (${wastePercent.toFixed(1)}%) — UHT-leg loss\nIssued ${issuedLbs.toFixed(0)} | Reached surge ${outputLbs.toFixed(0)}\nThreshold: ${itemConfig.WASTE_ALERT_THRESHOLD}%`
+    ).catch(e => console.warn(`[SurgeTankMesService] waste alert send failed: ${e.message}`))
+  }
+
+  console.log(`[SurgeTankMesService] Batch "${record.productName}" on ${tankId} closed — issued ${issuedLbs.toFixed(0)} lb, reached ${outputLbs.toFixed(0)} lb, completed ${parseFloat(record.cumulativeCompletedLbs).toFixed(0)} lb, waste ${wasteLbs.toFixed(0)} lb (${wastePercent != null ? wastePercent.toFixed(1) + '%' : 'n/a'})`)
   return {
     success: true,
     tankId,
     productName: record.productName,
     status: 'completed',
-    cumulativeIssuedLbs: parseFloat(record.cumulativeIssuedLbs) || 0,
+    cumulativeIssuedLbs: issuedLbs,
+    cumulativeOutputLbs: outputLbs,
     cumulativeCompletedLbs: parseFloat(record.cumulativeCompletedLbs) || 0,
+    wasteLbs,
+    wastePercent,
   }
 }
 
@@ -1121,17 +1177,20 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
 }
 
 async function tickCompletionForBatch(batch) {
+  // Completion is driven by measured ARRIVAL (cumulativeOutputLbs), not issued —
+  // issued − output is left as implicit NS shrinkage (the waste). See
+  // tickArrivalForBatch / [[ns-wo-completion-pattern]].
   if (config.MES_DRY_RUN) {
-    const target = (parseFloat(batch.cumulativeIssuedLbs) || 0) - (parseFloat(batch.cumulativeCompletedLbs) || 0)
+    const target = (parseFloat(batch.cumulativeOutputLbs) || 0) - (parseFloat(batch.cumulativeCompletedLbs) || 0)
     if (target < config.MES_MIN_COMPLETION_LBS) return false
-    await batch.update({ cumulativeCompletedLbs: parseFloat(batch.cumulativeIssuedLbs) || 0, lastCompletionAt: new Date(clock.now()) })
-    console.log(`[SurgeTankMesService] DRY RUN tick completion ${batch.tankId}: ${target.toFixed(1)} lb`)
+    await batch.update({ cumulativeCompletedLbs: parseFloat(batch.cumulativeOutputLbs) || 0, lastCompletionAt: new Date(clock.now()) })
+    console.log(`[SurgeTankMesService] DRY RUN tick completion ${batch.tankId}: ${target.toFixed(1)} lb (arrival-driven)`)
     return true
   }
   if (!batch.nsWorkOrderId) return false
 
   // Cheap pre-check before taking the lock so idle batches don't serialize.
-  if ((parseFloat(batch.cumulativeIssuedLbs) || 0) - (parseFloat(batch.cumulativeCompletedLbs) || 0) < config.MES_MIN_COMPLETION_LBS) {
+  if ((parseFloat(batch.cumulativeOutputLbs) || 0) - (parseFloat(batch.cumulativeCompletedLbs) || 0) < config.MES_MIN_COMPLETION_LBS) {
     return false
   }
 
@@ -1140,11 +1199,12 @@ async function tickCompletionForBatch(batch) {
   return withCompletionLock(batch.nsWorkOrderId, async () => {
     await batch.reload()
     const cumulativeIssued = parseFloat(batch.cumulativeIssuedLbs) || 0
+    const cumulativeOutput = parseFloat(batch.cumulativeOutputLbs) || 0
     const cumulativeCompleted = parseFloat(batch.cumulativeCompletedLbs) || 0
-    const target = cumulativeIssued - cumulativeCompleted
+    const target = cumulativeOutput - cumulativeCompleted
 
     if (target < config.MES_MIN_COMPLETION_LBS) {
-      console.log(`[SurgeTankMesService] completion ${batch.tankId}: already satisfied (issued ${cumulativeIssued.toFixed(1)}, completed ${cumulativeCompleted.toFixed(1)}) — skipping`)
+      console.log(`[SurgeTankMesService] completion ${batch.tankId}: already satisfied (reached ${cumulativeOutput.toFixed(1)}, completed ${cumulativeCompleted.toFixed(1)}, issued ${cumulativeIssued.toFixed(1)}) — skipping`)
       return false
     }
 
@@ -1167,7 +1227,7 @@ async function tickCompletionForBatch(batch) {
     }
 
     try {
-      console.log(`[SurgeTankMesService] tick completion WO ${batch.nsWorkOrderId} (${batch.tankId}): ${target.toFixed(1)} lb → bin ${completionBinId || 'none'} (cumulative ${cumulativeCompleted.toFixed(1)} → ${cumulativeIssued.toFixed(1)})`)
+      console.log(`[SurgeTankMesService] tick completion WO ${batch.nsWorkOrderId} (${batch.tankId}): ${target.toFixed(1)} lb → bin ${completionBinId || 'none'} (completed ${cumulativeCompleted.toFixed(1)} → ${cumulativeOutput.toFixed(1)} reached, issued ${cumulativeIssued.toFixed(1)})`)
       const nsResult = await core.netsuitePost(
         `/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderCompletion`,
         body
@@ -1180,7 +1240,7 @@ async function tickCompletionForBatch(batch) {
       }
 
       await batch.update({
-        cumulativeCompletedLbs: cumulativeIssued,
+        cumulativeCompletedLbs: cumulativeOutput,
         lastCompletionAt: new Date(clock.now()),
       })
 
@@ -1189,7 +1249,7 @@ async function tickCompletionForBatch(batch) {
         sourceId: batch.nsWorkOrderId,
         nsTransactionType: 'workOrderCompletion',
         nsTransactionId: nsCompletionId,
-        payload: JSON.stringify({ batchId: batch.id, target, cumulativeIssued, cumulativeCompleted }),
+        payload: JSON.stringify({ batchId: batch.id, target, cumulativeIssued, cumulativeOutput, cumulativeCompleted }),
         result: JSON.stringify({ nsCompletionId, lotNumber }),
         success: true,
       })
@@ -1200,25 +1260,25 @@ async function tickCompletionForBatch(batch) {
           console.warn(`[SurgeTankMesService] builtQuantity lookup failed for WO ${batch.nsWorkOrderId}: ${e.message}`)
           return null
         })
-        console.warn(`[SurgeTankMesService] completion lot "${lotNumber}" already exists on WO ${batch.nsWorkOrderId} (NS built=${built ?? '?'}, issued=${cumulativeIssued.toFixed(1)}) — reconciling, not re-firing`)
+        console.warn(`[SurgeTankMesService] completion lot "${lotNumber}" already exists on WO ${batch.nsWorkOrderId} (NS built=${built ?? '?'}, reached=${cumulativeOutput.toFixed(1)}) — reconciling, not re-firing`)
         const reconciledCompleted = built != null
-          ? Math.max(cumulativeCompleted, Math.min(built, cumulativeIssued))
-          : cumulativeIssued
+          ? Math.max(cumulativeCompleted, Math.min(built, cumulativeOutput))
+          : cumulativeOutput
         await batch.update({ cumulativeCompletedLbs: reconciledCompleted, lastCompletionAt: new Date(clock.now()) })
         await db.MesProcessingLog.create({
           eventType: 'surge_tank_tick_completion',
           sourceId: batch.nsWorkOrderId,
           nsTransactionType: 'workOrderCompletion',
-          payload: JSON.stringify({ batchId: batch.id, target, cumulativeIssued, cumulativeCompleted }),
+          payload: JSON.stringify({ batchId: batch.id, target, cumulativeIssued, cumulativeOutput, cumulativeCompleted }),
           result: JSON.stringify({ reconciled: true, nsBuiltQuantity: built, reconciledCompleted }),
           success: true,
         })
         statusStore.pushEvent(
           'surgeTick.completionReconciled',
-          `${batch.tankId}: completion already present in NS (built ${built != null ? built.toFixed(0) : '?'} lb of ${cumulativeIssued.toFixed(0)}) — reconciled, no double build`,
-          { tankId: batch.tankId, nsWorkOrderId: batch.nsWorkOrderId, nsBuiltQuantity: built, cumulativeIssued, reconciledCompleted }
+          `${batch.tankId}: completion already present in NS (built ${built != null ? built.toFixed(0) : '?'} lb of ${cumulativeOutput.toFixed(0)} reached) — reconciled, no double build`,
+          { tankId: batch.tankId, nsWorkOrderId: batch.nsWorkOrderId, nsBuiltQuantity: built, cumulativeIssued, cumulativeOutput, reconciledCompleted }
         )
-        return cumulativeIssued - reconciledCompleted < config.MES_MIN_COMPLETION_LBS
+        return cumulativeOutput - reconciledCompleted < config.MES_MIN_COMPLETION_LBS
       }
 
       console.error(`[SurgeTankMesService] tick completion failed for WO ${batch.nsWorkOrderId}:`, err.message)
@@ -1289,6 +1349,53 @@ function resolveIssueModes(activeBatches) {
   return modes
 }
 
+/**
+ * Measure how much milk REACHED this surge tank and accumulate it into
+ * cumulativeOutputLbs — the value that drives workOrderCompletion. Arrival =
+ * positive surge-level rise (mainGallons × 8.6), summed across ticks. Because
+ * the issue side is the UHT FT1102 inlet, `cumulativeIssued − cumulativeOutput`
+ * is the UHT-leg loss (the user's "blend had 90, 50 reached surge → 40 lost in
+ * the UHT"). Independent sensors straddle the leg, so this does NOT collapse to
+ * zero the way a single-vessel level balance would.
+ *
+ * Gated to the active-fill tank (issueMode === 'issue'): a tank that's draining
+ * while a sibling fills isn't receiving milk, so an upward blip there isn't
+ * arrival. Caveat: when a tank fills and drains at once, the net rise
+ * under-counts arrival, so waste is a conservative UPPER bound on UHT loss.
+ */
+async function tickArrivalForBatch(batch, historian, issueMode) {
+  let statuses
+  try {
+    statuses = await historian.getSurgeTankStatus()
+  } catch (err) {
+    console.warn(`[SurgeTankMesService] arrival: getSurgeTankStatus failed — ${err.message}`)
+    return
+  }
+  const st = (statuses || []).find(s => s.tankId === batch.tankId)
+  if (!st) return
+
+  const curLbs = (parseFloat(st.mainGallons) || 0) * GAL_TO_LBS
+  const prevLbs = batch.lastDestLevelLbs != null ? parseFloat(batch.lastDestLevelLbs) : null
+  if (!plausibleLevelLbs(curLbs, prevLbs)) return
+
+  const updates = { lastDestLevelLbs: curLbs }
+  if (issueMode === 'issue' && prevLbs != null) {
+    const rise = curLbs - prevLbs
+    if (rise > config.MES_WASTE_RISE_FLOOR_LBS) {
+      const issued = parseFloat(batch.cumulativeIssuedLbs) || 0
+      const output = parseFloat(batch.cumulativeOutputLbs) || 0
+      // Clamp so output never exceeds issued (arrival over-read / sensor noise):
+      // completed ≤ output ≤ issued at all times.
+      const next = Math.min(issued, output + rise)
+      if (next > output) {
+        updates.cumulativeOutputLbs = next
+        console.log(`[SurgeTankMesService] arrival ${batch.tankId}: +${(next - output).toFixed(1)} lb reached (level ${prevLbs.toFixed(0)}→${curLbs.toFixed(0)}); output ${output.toFixed(0)}→${next.toFixed(0)} of issued ${issued.toFixed(0)}`)
+      }
+    }
+  }
+  await batch.update(updates)
+}
+
 async function tickAllActiveBatches(historian) {
   const activeBatches = await db.MesSurgeTankBatch.findAll({ where: { status: 'active' } })
   const summary = { batchesProcessed: 0, issuesFired: 0, completionsFired: 0, errors: [] }
@@ -1298,14 +1405,18 @@ async function tickAllActiveBatches(historian) {
 
   for (const batch of activeBatches) {
     summary.batchesProcessed++
+    const issueMode = issueModeByBatch[batch.id] || 'issue'
     try {
-      const issued = await tickIssueForBatch(batch, historian, issueModeByBatch[batch.id] || 'issue')
+      const issued = await tickIssueForBatch(batch, historian, issueMode)
       if (issued) summary.issuesFired++
     } catch (err) {
       console.error(`[SurgeTankMesService] tick issue failed for batch ${batch.id} (${batch.tankId}):`, err.message)
       summary.errors.push({ phase: 'issues', batchId: batch.id, error: err.message })
     }
     try {
+      await batch.reload()
+      // Measure arrival (surge level rise) → cumulativeOutputLbs before completing.
+      await tickArrivalForBatch(batch, historian, issueMode)
       await batch.reload()
       const completed = await tickCompletionForBatch(batch)
       if (completed) summary.completionsFired++

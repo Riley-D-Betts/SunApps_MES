@@ -42,6 +42,16 @@ module.exports = {
   // this we just defer to the next tick so we don't spam NS with sub-pound noise.
   MES_MIN_ISSUE_LBS: parseFloat(process.env.MES_MIN_ISSUE_LBS || '10'),
   MES_MIN_COMPLETION_LBS: parseFloat(process.env.MES_MIN_COMPLETION_LBS || '1'),
+  // Waste-tracking noise floors (lbs). Completion is driven by measured arrival
+  // into the destination vessel; issued − arrival = waste (NS shrinkage). These
+  // floors keep load-cell / level sensor jitter from fabricating phantom
+  // arrivals, drains, or residuals (analogous to FILL_NOISE_GAL on the surge job).
+  //   RESIDUAL_FLOOR: a tank reading below this at batch close counts as empty.
+  //   RISE_FLOOR:     a per-tick destination level RISE below this is ignored.
+  //   DROP_FLOOR:     a per-tick source silo level DROP below this is ignored (Phase 2).
+  MES_WASTE_RESIDUAL_FLOOR_LBS: parseFloat(process.env.MES_WASTE_RESIDUAL_FLOOR_LBS || '200'),
+  MES_WASTE_RISE_FLOOR_LBS: parseFloat(process.env.MES_WASTE_RISE_FLOOR_LBS || '20'),
+  MES_WASTE_DROP_FLOOR_LBS: parseFloat(process.env.MES_WASTE_DROP_FLOOR_LBS || '20'),
   // How far back a freshly-opened blend-tank batch will sweep for line flows
   // that completed BEFORE the batch existed (operators named the tank hours
   // after the fill). Those flows were saved as status='unmatched'; on batch

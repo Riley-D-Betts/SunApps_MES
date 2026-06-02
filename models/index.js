@@ -43,6 +43,23 @@ db.ensureRuntimeSchema = async function () {
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lastCompletionAt' AND Object_ID = Object_ID(N'MesBlendTankBatches'))
       ALTER TABLE MesBlendTankBatches ADD lastCompletionAt DATETIME2 NULL;
   `)
+  // Waste tracking: measured arrival (drives completion) + per-batch waste.
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'cumulativeOutputLbs' AND Object_ID = Object_ID(N'MesBlendTankBatches'))
+      ALTER TABLE MesBlendTankBatches ADD cumulativeOutputLbs DECIMAL(14,2) NOT NULL CONSTRAINT DF_MesBlendTankBatches_cumulativeOutputLbs DEFAULT 0;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lastDestLevelLbs' AND Object_ID = Object_ID(N'MesBlendTankBatches'))
+      ALTER TABLE MesBlendTankBatches ADD lastDestLevelLbs DECIMAL(14,2) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'wasteLbs' AND Object_ID = Object_ID(N'MesBlendTankBatches'))
+      ALTER TABLE MesBlendTankBatches ADD wasteLbs DECIMAL(14,2) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'wastePercent' AND Object_ID = Object_ID(N'MesBlendTankBatches'))
+      ALTER TABLE MesBlendTankBatches ADD wastePercent DECIMAL(8,2) NULL;
+  `)
   // MesBlendTankInflows: preserve routing strings on unmatched flows so we can
   // diagnose what SCADA was writing as REQUESTEDBY when no batch matched.
   await sequelize.query(`
@@ -84,6 +101,23 @@ db.ensureRuntimeSchema = async function () {
   await sequelize.query(`
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'pairingStatus' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
       ALTER TABLE MesSurgeTankBatches ADD pairingStatus NVARCHAR(20) NULL;
+  `)
+  // Waste tracking: measured arrival (drives completion) + per-batch waste.
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'cumulativeOutputLbs' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
+      ALTER TABLE MesSurgeTankBatches ADD cumulativeOutputLbs DECIMAL(14,2) NOT NULL CONSTRAINT DF_MesSurgeTankBatches_cumulativeOutputLbs DEFAULT 0;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lastDestLevelLbs' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
+      ALTER TABLE MesSurgeTankBatches ADD lastDestLevelLbs DECIMAL(14,2) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'wasteLbs' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
+      ALTER TABLE MesSurgeTankBatches ADD wasteLbs DECIMAL(14,2) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'wastePercent' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
+      ALTER TABLE MesSurgeTankBatches ADD wastePercent DECIMAL(8,2) NULL;
   `)
 
   // MesSeparationBatches: state machine extensions (endReason + per-tick snapshots)
