@@ -876,7 +876,7 @@ async function processWOEnd(data, historian) {
  * because the UHT may swap from one blend tank to another mid-batch (uncommon,
  * but the architecture supports it).
  */
-async function tickIssueForBatch(batch, historian) {
+async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
   if (!batch.feedingUhtId) {
     console.warn(`[SurgeTankMesService] batch ${batch.id} (${batch.tankId}) has no feedingUhtId — skip`)
     return false
@@ -919,6 +919,37 @@ async function tickIssueForBatch(batch, historian) {
   if (lastIssued < 0 || currentGal < 0) {
     console.warn(`[SurgeTankMesService] tick: UHT ${batch.feedingUhtId} totalizer baseline invalid (lastIssued=${lastIssued.toFixed(1)} gal, current=${currentGal.toFixed(1)} gal) — re-baselining, no issue this tick`)
     await state.update({ lastIssuedUhtGal: Math.max(currentGal, 0), lastTotalizerGal: currentGal, lastObservedAt: observedAt })
+    return false
+  }
+
+  // --- Single-claimant gate -------------------------------------------------
+  // A UHT sterilizes milk for exactly ONE surge tank at a time, but two batches
+  // on the same UHT are 'active' simultaneously whenever one tank drains to the
+  // filler while the next fills (e.g. ST81+ST82 both on UHT1). They share this
+  // one software totalizer, so without a gate BOTH batches issue the same
+  // gallons and the draining tank's WO double-counts flow that physically went
+  // to the filling tank (observed on WO1635/WO1636). The caller passes issueMode
+  // after consulting equipmentJob's hysteresis fill-target designation:
+  //   'issue'   — sole/active claimant on this UHT: issue normally.
+  //   'forfeit' — a sibling tank is the active fill tank: advance the baseline so
+  //               this batch never (re)claims gallons that went elsewhere.
+  //   'hold'    — fill target ambiguous (no tank designated): issue nothing and
+  //               DON'T advance, so the accumulated delta lands on whichever tank
+  //               becomes the clear fill target on a later tick.
+  if (issueMode === 'forfeit') {
+    const skippedLbs = Math.max(0, currentGal - lastIssued) * GAL_TO_LBS
+    await state.update({ lastIssuedUhtGal: currentGal, lastTotalizerGal: currentGal, lastObservedAt: observedAt })
+    if (skippedLbs >= config.MES_MIN_ISSUE_LBS) {
+      console.log(`[SurgeTankMesService] tick: ${batch.tankId} is not the active fill tank on ${batch.feedingUhtId} — forfeiting ${skippedLbs.toFixed(0)} lb to the filling tank (no double-count)`)
+    }
+    return false
+  }
+  if (issueMode === 'hold') {
+    const heldLbs = Math.max(0, currentGal - lastIssued) * GAL_TO_LBS
+    await state.update({ lastTotalizerGal: currentGal, lastObservedAt: observedAt })
+    if (heldLbs >= config.MES_MIN_ISSUE_LBS) {
+      console.log(`[SurgeTankMesService] tick: ${batch.feedingUhtId} fill target ambiguous — holding ${heldLbs.toFixed(0)} lb on ${batch.tankId} until a clear fill tank emerges`)
+    }
     return false
   }
 
@@ -1210,15 +1241,59 @@ async function tickCompletionForBatch(batch) {
   })
 }
 
+/**
+ * Decide, per active batch, whether it may claim its feeding UHT's totalizer
+ * delta this tick. A UHT feeds one tank at a time but can have two open batches
+ * (one draining, one filling) — only the tank actually being filled may issue,
+ * or the shared totalizer is counted twice. Uses equipmentJob's hysteresis
+ * `activeFill` designation (from statusStore) as the authoritative fill target.
+ *
+ * Returns { [batchId]: 'issue' | 'forfeit' | 'hold' } — see tickIssueForBatch.
+ * Fail-safe: if the equipment poll hasn't populated activeFill (e.g. fresh
+ * restart), a UHT collision resolves to 'hold' for all — defers issuing rather
+ * than risking a double-count.
+ */
+function resolveIssueModes(activeBatches) {
+  const modes = {}
+  const tanks = statusStore.snapshot()?.surgeTanks?.tanks || []
+  const activeFillByTank = {}
+  for (const t of tanks) activeFillByTank[t.tankId] = !!t.activeFill
+
+  const byUht = {}
+  for (const b of activeBatches) {
+    // Batches without a feeding UHT can't collide — give each its own group.
+    const key = b.feedingUhtId || `__none_${b.id}`
+    ;(byUht[key] ||= []).push(b)
+  }
+
+  for (const group of Object.values(byUht)) {
+    if (group.length === 1) {
+      modes[group[0].id] = 'issue'
+      continue
+    }
+    const claimant = group.find(b => activeFillByTank[b.tankId])
+    if (claimant) {
+      for (const b of group) modes[b.id] = b.id === claimant.id ? 'issue' : 'forfeit'
+      console.log(`[SurgeTankMesService] tick: ${group[0].feedingUhtId} has ${group.length} open batches — ${claimant.tankId} is the active fill tank; others forfeit this tick`)
+    } else {
+      for (const b of group) modes[b.id] = 'hold'
+      console.log(`[SurgeTankMesService] tick: ${group[0].feedingUhtId} has ${group.length} open batches but no active fill tank designated — holding all (no double-count)`)
+    }
+  }
+  return modes
+}
+
 async function tickAllActiveBatches(historian) {
   const activeBatches = await db.MesSurgeTankBatch.findAll({ where: { status: 'active' } })
   const summary = { batchesProcessed: 0, issuesFired: 0, completionsFired: 0, errors: [] }
   if (activeBatches.length === 0) return summary
 
+  const issueModeByBatch = resolveIssueModes(activeBatches)
+
   for (const batch of activeBatches) {
     summary.batchesProcessed++
     try {
-      const issued = await tickIssueForBatch(batch, historian)
+      const issued = await tickIssueForBatch(batch, historian, issueModeByBatch[batch.id] || 'issue')
       if (issued) summary.issuesFired++
     } catch (err) {
       console.error(`[SurgeTankMesService] tick issue failed for batch ${batch.id} (${batch.tankId}):`, err.message)
