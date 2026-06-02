@@ -230,22 +230,29 @@ function snapQuantities(allocations) {
  * Returns an array suitable for componentinventorydetail.inventoryassignment.items.
  */
 function buildAssignmentItems({ isLot, useBins }, totalQty, allocations, preferredBinId) {
+  // Drop any lot whose FLOORED qty is 0 — an old lot with a sub-cent residual
+  // (FIFO picks it first) floors to 0.00, and NS rejects a zero-qty assignment
+  // line with "Invalid number (must be positive)". Its <0.01 lb is negligible.
   if (isLot && useBins) {
     const qtys = snapQuantities(allocations)
-    return allocations.map((a, i) => ({
-      status: 1,
-      quantity: qtys[i],
-      issueinventorynumber: a.lotId,
-      binnumber: a.binId,
-    }))
+    return allocations
+      .map((a, i) => ({
+        status: 1,
+        quantity: qtys[i],
+        issueinventorynumber: a.lotId,
+        binnumber: a.binId,
+      }))
+      .filter(it => it.quantity > 0)
   }
   if (isLot) {
     const qtys = snapQuantities(allocations)
-    return allocations.map((a, i) => ({
-      status: 1,
-      quantity: qtys[i],
-      issueinventorynumber: a.lotId,
-    }))
+    return allocations
+      .map((a, i) => ({
+        status: 1,
+        quantity: qtys[i],
+        issueinventorynumber: a.lotId,
+      }))
+      .filter(it => it.quantity > 0)
   }
   if (useBins) {
     return [{
