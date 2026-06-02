@@ -1151,12 +1151,26 @@ async function tickArrivalForBatch(batch, curWeightLbs) {
   const prevLbs = batch.lastDestLevelLbs != null ? parseFloat(batch.lastDestLevelLbs) : null
   if (!plausibleLevelLbs(curLbs, prevLbs)) return
 
+  const issued = parseFloat(batch.cumulativeIssuedLbs) || 0
+  const output = parseFloat(batch.cumulativeOutputLbs) || 0
   const updates = { lastDestLevelLbs: curLbs }
-  if (prevLbs != null) {
+
+  if (prevLbs == null) {
+    // FIRST arrival observation. The blend issue baselines at 0 and the first
+    // tick issues the ENTIRE line totalizer — the whole fill, including milk
+    // that entered before the batch was opened. The batch often opens only once
+    // the tank is already part-full (operators name it late, and under the
+    // replay speedup the fast fill outruns start detection). So the standing
+    // tank content was already counted as ISSUED; credit it as REACHED too, or
+    // it shows up as phantom waste. Clamp to issued (completed ≤ output ≤ issued).
+    const credit = Math.min(issued, Math.max(output, curLbs))
+    if (credit > output) {
+      updates.cumulativeOutputLbs = credit
+      console.log(`[BlendTankMesService] arrival ${batch.tankId}: initial level credited ${credit.toFixed(0)} lb reached (tank ${curLbs.toFixed(0)} lb at batch open) of issued ${issued.toFixed(0)}`)
+    }
+  } else {
     const rise = curLbs - prevLbs
     if (rise > config.MES_WASTE_RISE_FLOOR_LBS) {
-      const issued = parseFloat(batch.cumulativeIssuedLbs) || 0
-      const output = parseFloat(batch.cumulativeOutputLbs) || 0
       // Clamp so output never exceeds issued: completed ≤ output ≤ issued.
       const next = Math.min(issued, output + rise)
       if (next > output) {
