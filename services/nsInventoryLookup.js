@@ -198,6 +198,24 @@ async function findBinForItem(itemId, preferredBinId = null, neededQty = 0) {
   return String(best.bin_id)
 }
 
+// Round each allocation qty to 2-decimal lbs and snap the LAST item so the
+// assignment quantities sum to exactly `totalQty`. findInventoryAllocations
+// builds `take` via `remaining -= take`, which accumulates float dust — once
+// JSON-serialized the per-lot quantities sum to e.g. 31962.3199999 while the
+// component line is exactly 31962.32, and NS's exact-decimal check rejects the
+// issue ("total inventory detail quantity must be N"). Snapping the final lot
+// by the residual keeps the total exact; the adjustment is sub-cent so it
+// never pushes a lot above its available balance.
+function snapQuantities(allocations, totalQty) {
+  const target = Math.round(totalQty * 100) / 100
+  const rounded = allocations.map(a => Math.round(a.qty * 100) / 100)
+  const head = rounded.slice(0, -1).reduce((s, q) => s + q, 0)
+  if (rounded.length > 0) {
+    rounded[rounded.length - 1] = Math.round((target - head) * 100) / 100
+  }
+  return rounded
+}
+
 /**
  * Compose the assignment-item array for one BOM line based on its tracking
  * class. allocations is the output of findInventoryAllocations (when
@@ -207,17 +225,19 @@ async function findBinForItem(itemId, preferredBinId = null, neededQty = 0) {
  */
 function buildAssignmentItems({ isLot, useBins }, totalQty, allocations, preferredBinId) {
   if (isLot && useBins) {
-    return allocations.map(a => ({
+    const qtys = snapQuantities(allocations, totalQty)
+    return allocations.map((a, i) => ({
       status: 1,
-      quantity: a.qty,
+      quantity: qtys[i],
       issueinventorynumber: a.lotId,
       binnumber: a.binId,
     }))
   }
   if (isLot) {
-    return allocations.map(a => ({
+    const qtys = snapQuantities(allocations, totalQty)
+    return allocations.map((a, i) => ({
       status: 1,
-      quantity: a.qty,
+      quantity: qtys[i],
       issueinventorynumber: a.lotId,
     }))
   }
