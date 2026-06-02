@@ -208,23 +208,18 @@ async function findBinForItem(itemId, preferredBinId = null, neededQty = 0) {
   return String(best.bin_id)
 }
 
-// Distribute the SAME `totalQty` that the caller puts on the component line
-// across the per-lot assignment items, so the inventory-detail total is the
-// component-line quantity by construction — never an independently-summed
-// value that can drift. findInventoryAllocations builds `take` via
-// `remaining -= take`, which accumulates float dust; left alone the
-// JSON-serialized per-lot quantities sum to e.g. 31962.3199999 while the line
-// is exactly 31962.32, and NS's exact-decimal check rejects the issue ("total
-// inventory detail quantity must be N"). We round every lot but the last to
-// 2dp, then give the LAST lot the remaining `totalQty - others` — the residual
-// is sub-cent so it never pushes a lot above its available balance.
-function snapQuantities(allocations, totalQty) {
-  const rounded = allocations.map(a => Math.round(a.qty * 100) / 100)
-  if (rounded.length > 0) {
-    const others = rounded.slice(0, -1).reduce((s, q) => s + q, 0)
-    rounded[rounded.length - 1] = Math.round((totalQty - others) * 100) / 100
-  }
-  return rounded
+// FLOOR each lot's assignment qty to 2dp. `a.qty` is the FIFO take, which is
+// `min(remaining, availableInThisLot)` — i.e. always ≤ that lot's NS available.
+// Flooring therefore guarantees the assignment qty never exceeds available;
+// ROUNDING could push it up (e.g. available 9475.70589687 → 9475.71) and NS
+// rejects the whole issue with "you only have N available". The component LINE
+// quantity is set to the SUM of these floored values (see buildComponentDetail),
+// so the inventory-detail total still equals the line exactly — no "total
+// inventory detail quantity must be N" mismatch. Integer-cent math keeps the
+// per-lot values and their sum free of float dust. The sub-cent-per-lot we drop
+// stays in the un-issued delta and rolls into the next tick.
+function snapQuantities(allocations) {
+  return allocations.map(a => Math.floor((parseFloat(a.qty) || 0) * 100) / 100)
 }
 
 /**
@@ -236,7 +231,7 @@ function snapQuantities(allocations, totalQty) {
  */
 function buildAssignmentItems({ isLot, useBins }, totalQty, allocations, preferredBinId) {
   if (isLot && useBins) {
-    const qtys = snapQuantities(allocations, totalQty)
+    const qtys = snapQuantities(allocations)
     return allocations.map((a, i) => ({
       status: 1,
       quantity: qtys[i],
@@ -245,7 +240,7 @@ function buildAssignmentItems({ isLot, useBins }, totalQty, allocations, preferr
     }))
   }
   if (isLot) {
-    const qtys = snapQuantities(allocations, totalQty)
+    const qtys = snapQuantities(allocations)
     return allocations.map((a, i) => ({
       status: 1,
       quantity: qtys[i],
@@ -283,35 +278,47 @@ function buildAssignmentItems({ isLot, useBins }, totalQty, allocations, preferr
 // the lowercase componentinventorydetail shape (they only exist on lot WOs).
 // Bin id MUST be the {id: Number} object form regardless of wrapper — a raw
 // string binnumber credits 0. See [[ns-wo-issue-shape]], SD-597.
-// Returns the object to Object.assign onto the component entry, or null when
-// the item needs no inventory detail.
+// Returns { quantity, detail }: `detail` is the object to Object.assign onto the
+// component entry (or null when the item needs no inventory detail), and
+// `quantity` is the effective component-LINE quantity the caller must use. For
+// lot-tracked lines that quantity is the SUM of the floored per-lot assignment
+// qtys (≤ totalQty) so the line and the inventory-detail total match exactly;
+// for bin-only / untracked lines it's just totalQty.
 function buildComponentDetail(tracking, totalQty, allocations, preferredBinId, woHasLotLines = false) {
   const { isLot, useBins } = tracking
   if (isLot) {
     const items = buildAssignmentItems(tracking, totalQty, allocations, preferredBinId)
-    if (!items || items.length === 0) return null
-    return { componentinventorydetail: { inventoryassignment: { items } } }
+    if (!items || items.length === 0) return { quantity: 0, detail: null }
+    // Line qty = sum of the floored per-lot qtys (integer-cent to avoid drift).
+    const cents = items.reduce((s, it) => s + Math.round(it.quantity * 100), 0)
+    return { quantity: cents / 100, detail: { componentinventorydetail: { inventoryassignment: { items } } } }
   }
   if (useBins) {
-    if (preferredBinId == null) return null
+    if (preferredBinId == null) return { quantity: totalQty, detail: null }
     if (woHasLotLines) {
       return {
-        componentinventorydetail: {
-          inventoryassignment: {
-            items: [{ status: 1, quantity: totalQty, binnumber: { id: Number(preferredBinId) } }],
+        quantity: totalQty,
+        detail: {
+          componentinventorydetail: {
+            inventoryassignment: {
+              items: [{ status: 1, quantity: totalQty, binnumber: { id: Number(preferredBinId) } }],
+            },
           },
         },
       }
     }
     return {
-      inventoryDetail: {
-        inventoryAssignment: {
-          items: [{ quantity: totalQty, binnumber: { id: Number(preferredBinId) }, inventoryStatus: { id: 1 } }],
+      quantity: totalQty,
+      detail: {
+        inventoryDetail: {
+          inventoryAssignment: {
+            items: [{ quantity: totalQty, binnumber: { id: Number(preferredBinId) }, inventoryStatus: { id: 1 } }],
+          },
         },
       },
     }
   }
-  return null
+  return { quantity: totalQty, detail: null }
 }
 
 // True if any component line on the WO BOM is lot-tracked. Drives the bin-only

@@ -194,9 +194,11 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
   // so this resolves to false, but compute it from the BOM so a future
   // lot-bearing surge WO stays correct.
   const woHasLotLines = await nsInventory.anyLotTracked(bomLines)
-  const detail = nsInventory.buildComponentDetail(tracking, quantity, allocations, resolvedBinId, woHasLotLines)
+  const { quantity: issueQty, detail } = nsInventory.buildComponentDetail(tracking, quantity, allocations, resolvedBinId, woHasLotLines)
 
-  const componentEntry = { lineNumber: targetLine.line, quantity }
+  // issueQty == quantity for bin-only lines; for lot lines it's the sum of the
+  // floored per-lot qtys (≤ quantity) so the line matches the assignment total.
+  const componentEntry = { lineNumber: targetLine.line, quantity: issueQty }
   if (detail) Object.assign(componentEntry, detail)
 
   return {
