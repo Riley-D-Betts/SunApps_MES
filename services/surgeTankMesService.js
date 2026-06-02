@@ -191,6 +191,7 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
     body: { component: { items: [componentEntry] } },
     allocations,
     tracking,
+    resolvedBinId,
   }
 }
 
@@ -962,11 +963,13 @@ async function tickIssueForBatch(batch, historian) {
   // by construction the BOM contains exactly this item. Legacy batches without
   // a pinned component fall through to today's re-resolver path above.
 
-  let body, allocations
+  let body, allocations, tracking, resolvedBin
   try {
     const built = await buildWoIssueBody(batch.nsWorkOrderId, component.itemId, deltaLbs, component.binId, bomLines)
     body = built.body
     allocations = built.allocations
+    tracking = built.tracking
+    resolvedBin = built.resolvedBinId
   } catch (err) {
     console.error(`[SurgeTankMesService] tick issue ${batch.tankId} → WO ${batch.nsWorkOrderId}: buildWoIssueBody failed — ${err.message}`)
     statusStore.pushEvent(
@@ -1022,8 +1025,17 @@ async function tickIssueForBatch(batch, historian) {
     })
     return true
   } catch (err) {
+    // Read the resolved bin's actual on-hand so the failure shows whether NS
+    // rejected because the bin can't cover the assignment (detail clamped below
+    // the line) vs. because the item is really lot-tracked and the bin-only
+    // detail carries no lot. tracking tells which assignment shape we sent.
+    let binOnHand = null
+    try {
+      if (resolvedBin) binOnHand = await inventoryAdjustment.getBinQtyOnHand(component.itemId, resolvedBin)
+    } catch (_) { /* diagnostic only */ }
     console.error(`[SurgeTankMesService] tick issue failed for ${batch.tankId} (WO ${batch.nsWorkOrderId}):`, err.message)
     console.error(`[SurgeTankMesService] failed workOrderIssue request body (WO ${batch.nsWorkOrderId}):`, JSON.stringify(body))
+    console.error(`[SurgeTankMesService] failed issue context: item=${component.itemId} tracking=${JSON.stringify(tracking)} resolvedBin=${resolvedBin} binOnHand=${binOnHand} deltaLbs=${deltaLbs}`)
     statusStore.pushEvent(
       'surgeTick.issueFailed',
       `${batch.tankId}: NS workOrderIssue POST failed (${deltaLbs.toFixed(0)} lb) — ${nsErrShort(err)}`,
@@ -1034,6 +1046,9 @@ async function tickIssueForBatch(batch, historian) {
         deltaLbs,
         error: err.message.slice(0, 500),
         requestBody: body,
+        tracking,
+        resolvedBin,
+        binOnHand,
       }
     )
     await db.MesProcessingLog.create({
