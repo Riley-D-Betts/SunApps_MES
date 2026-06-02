@@ -1023,6 +1023,7 @@ async function tickIssueForBatch(batch, historian) {
     return true
   } catch (err) {
     console.error(`[SurgeTankMesService] tick issue failed for ${batch.tankId} (WO ${batch.nsWorkOrderId}):`, err.message)
+    console.error(`[SurgeTankMesService] failed workOrderIssue request body (WO ${batch.nsWorkOrderId}):`, JSON.stringify(body))
     statusStore.pushEvent(
       'surgeTick.issueFailed',
       `${batch.tankId}: NS workOrderIssue POST failed (${deltaLbs.toFixed(0)} lb) — ${nsErrShort(err)}`,
@@ -1032,13 +1033,14 @@ async function tickIssueForBatch(batch, historian) {
         phase: 'netsuitePost',
         deltaLbs,
         error: err.message.slice(0, 500),
+        requestBody: body,
       }
     )
     await db.MesProcessingLog.create({
       eventType: 'surge_tank_tick_issue',
       sourceId: batch.nsWorkOrderId,
       nsTransactionType: 'workOrderIssue',
-      payload: JSON.stringify({ batchId: batch.id, uhtId: batch.feedingUhtId, deltaGal, deltaLbs, currentGal }),
+      payload: JSON.stringify({ batchId: batch.id, uhtId: batch.feedingUhtId, deltaGal, deltaLbs, currentGal, requestBody: body }),
       success: false,
       errorMessage: err.message,
     })
