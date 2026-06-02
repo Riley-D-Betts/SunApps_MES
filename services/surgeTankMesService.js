@@ -339,10 +339,11 @@ async function _resolveLayer3Source(data, historian) {
     const silo = itemConfig.normalizeSiloName(feedingFromEntName) || feedingFromEntName
     if (feedingUhtId) {
       try {
+        const tokens = uhtFeedTokens(feedingUhtId)
         const lineReadings = await historian.getMilkLineStatus()
         const feedingLine = lineReadings.find(r => {
           const dest = String(r.requestedBy || '').toUpperCase()
-          return dest.includes(feedingUhtId.toUpperCase())
+          return tokens.some(t => dest.includes(t))
         })
         if (feedingLine?.productName) {
           const lineItem = lineMapper.resolveLineProduct(feedingLine.productName)
@@ -393,6 +394,45 @@ async function _resolveLayer3Source(data, historian) {
  * Returns { itemId, itemName, binId, resolvedFrom } or null when nothing
  * resolves (caller will defer the tick and try again next time).
  */
+// UHT1 is fed by TSTAT-1, UHT2 by TSTAT-2 (the blend→TSTAT valve map in
+// restProvider). When a product bypasses the blend tanks (A2 Whole: silo →
+// TSTAT → UHT → surge), no blend-tank valve is open, so the UHT reports no
+// fromEntName and the feeding milk line addresses the TSTAT — not the UHT — in
+// requestedBy. Match both so the bypass route still resolves.
+function uhtFeedTokens(uhtId) {
+  const tokens = [String(uhtId || '').toUpperCase()].filter(Boolean)
+  const m = String(uhtId || '').match(/(\d+)/)
+  if (m) tokens.push(`TSTAT${m[1]}`, `TSTAT-${m[1]}`)
+  return tokens
+}
+
+// Resolve the surge component from the milk line currently feeding this UHT
+// (directly, or via its TSTAT balance tank). Covers the silo→TSTAT→UHT bypass
+// where feedingFromEntName never resolves to a blend tank or silo.
+async function resolveComponentFromUhtFeedLine(feedingUhtId, historian) {
+  if (!feedingUhtId || !historian) return null
+  try {
+    const tokens = uhtFeedTokens(feedingUhtId)
+    const lineReadings = await historian.getMilkLineStatus()
+    const feedingLine = lineReadings.find(r => {
+      const dest = String(r.requestedBy || '').toUpperCase()
+      return r.productName && tokens.some(t => dest.includes(t))
+    })
+    if (!feedingLine?.productName) return null
+    const lineItem = lineMapper.resolveLineProduct(feedingLine.productName)
+    if (!lineItem?.id) return null
+    return {
+      itemId: String(lineItem.id),
+      itemName: lineItem.name,
+      binId: itemConfig.getBinId(feedingLine.siloName),
+      resolvedFrom: 'uht-feed-line',
+    }
+  } catch (err) {
+    console.warn(`[SurgeTankMesService] resolveComponentFromUhtFeedLine ${feedingUhtId} failed — ${err.message}`)
+    return null
+  }
+}
+
 async function resolveSurgeTankComponent(batch, historian) {
   // New path: tick uses the component pinned at WO-create. Skip every
   // historian/blend-batch lookup the legacy resolver did — the answer is on
@@ -419,7 +459,17 @@ async function resolveSurgeTankComponent(batch, historian) {
     } catch (err) {
       console.warn(`[SurgeTankMesService] resolveSurgeTankComponent: live UHT lookup failed — ${err.message}`)
     }
-    if (!feedingFromEntName) return null
+    if (!feedingFromEntName) {
+      // Silo→TSTAT→UHT bypass (A2 Whole: MSilo3 → TSTAT1 → UHT1 → ST81). No
+      // blend-tank valve is open, so the UHT has no fromEntName to recover.
+      // Resolve the component straight from the line feeding this UHT's TSTAT.
+      const fromLine = await resolveComponentFromUhtFeedLine(feedingUhtId, historian)
+      if (fromLine) {
+        console.log(`[SurgeTankMesService] resolveSurgeTankComponent: ${batch.tankId} fed via UHT ${feedingUhtId} bypass — component "${fromLine.itemName}" (NS ${fromLine.itemId}) from feed line`)
+        return fromLine
+      }
+      return null
+    }
     // Pin it so future ticks skip this lookup.
     await batch.update({ feedingFromEntName })
     console.log(`[SurgeTankMesService] Retroactively pinned feedingFromEntName="${feedingFromEntName}" on batch ${batch.id} (${batch.tankId})`)
@@ -487,10 +537,11 @@ async function resolveSurgeTankComponent(batch, historian) {
     let resolved = null
     if (feedingUhtId) {
       try {
+        const tokens = uhtFeedTokens(feedingUhtId)
         const lineReadings = await historian.getMilkLineStatus()
         const feedingLine = lineReadings.find(r => {
           const dest = String(r.requestedBy || '').toUpperCase()
-          return dest.includes(feedingUhtId.toUpperCase())
+          return tokens.some(t => dest.includes(t))
         })
         if (feedingLine?.productName) {
           const lineItem = lineMapper.resolveLineProduct(feedingLine.productName)
