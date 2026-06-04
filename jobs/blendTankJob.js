@@ -120,7 +120,7 @@ function linesFeedingTank(lineReadings, tankId) {
   })
 }
 
-async function startBatch(tankId, prev, status, reason) {
+async function startBatch(tankId, prev, status, reason, historian) {
   const { productName, batchSize, fromEntName, toEntName } = status
   console.log(`[BlendTankJob] BATCH START on ${tankId}: "${productName}" (${reason})`)
   statusStore.pushEvent('blendTank.batchStart', `${tankId}: "${productName}" started`, { tankId, productName, batchSize, fromEntName, toEntName, reason })
@@ -129,7 +129,7 @@ async function startBatch(tankId, prev, status, reason) {
   prev.lastFlowAt = null
   prev.hasSeenFlow = false
   try {
-    await blendTankMesService.processWOStart({ tankId, productName, batchSize, fromEntName, toEntName, detectedAt: new Date(clock.now()).toISOString() })
+    await blendTankMesService.processWOStart({ tankId, productName, batchSize, fromEntName, toEntName, detectedAt: new Date(clock.now()).toISOString() }, historian)
   } catch (err) {
     console.error(`[BlendTankJob] processWOStart failed for ${tankId}:`, err.message)
   }
@@ -265,7 +265,7 @@ async function run(historian) {
       // continuous flap-open after every idle close.
       if (!prev.batchActive && hasProduct && feedingLines.length > 0) {
         const reason = `line flow (${feedingLines.map(l => l.line).join(',')})`
-        await startBatch(tankId, prev, status, reason)
+        await startBatch(tankId, prev, status, reason, historian)
       } else if (!prev.batchActive && hasProduct) {
         // Named-late path: no line is feeding right now, but the tank may have
         // been filled BEFORE the operator set the product name. The fill's
@@ -283,7 +283,7 @@ async function run(historian) {
         }
         if (pending.length > 0) {
           const lbs = pending.reduce((s, p) => s + (parseFloat(p.totalLbs) || 0), 0)
-          await startBatch(tankId, prev, status, `named after fill (${pending.length} pending inflow${pending.length === 1 ? '' : 's'}, ${lbs.toFixed(0)} lb)`)
+          await startBatch(tankId, prev, status, `named after fill (${pending.length} pending inflow${pending.length === 1 ? '' : 's'}, ${lbs.toFixed(0)} lb)`, historian)
         }
       }
 

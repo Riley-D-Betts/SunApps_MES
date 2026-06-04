@@ -119,6 +119,16 @@ db.ensureRuntimeSchema = async function () {
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'wastePercent' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
       ALTER TABLE MesSurgeTankBatches ADD wastePercent DECIMAL(8,2) NULL;
   `)
+  // Actual-start backfill: historian-derived timestamp of when milk actually
+  // started flowing, as opposed to when MES detected the batch (detectedAt).
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'actualStartAt' AND Object_ID = Object_ID(N'MesBlendTankBatches'))
+      ALTER TABLE MesBlendTankBatches ADD actualStartAt DATETIME NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'actualStartAt' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
+      ALTER TABLE MesSurgeTankBatches ADD actualStartAt DATETIME NULL;
+  `)
 
   // MesSeparationBatches: state machine extensions (endReason + per-tick snapshots)
   await sequelize.query(`

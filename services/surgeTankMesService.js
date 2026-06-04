@@ -5,6 +5,7 @@ const blendProductParser = require('./blendTankProductParser')
 const lineMapper = require('./lineIngredientMapper')
 const nsInventory = require('./nsInventoryLookup')
 const inventoryAdjustment = require('./inventoryAdjustmentService')
+const batchStartFinder = require('./batchStartFinder')
 const statusStore = require('./statusStore')
 const config = require('../config')
 const db = require('../models')
@@ -817,6 +818,12 @@ async function processWOStart(data, historian) {
     })
 
     console.log(`[SurgeTankMesService] "${productName}" → NS WO ${nsWorkOrderNumber} (${nsWorkOrderId})`)
+
+    // Fire-and-forget: back-project the actual start time from historian data.
+    batchStartFinder.findSurgeTankActualStart(tankId, new Date(detectedAt || clock.now()), historian)
+      .then(result => { if (result) return record.update({ actualStartAt: result.estimatedStartAt }) })
+      .catch(err => console.warn(`[SurgeTankMesService] actualStart finder failed for ${tankId}: ${err.message}`))
+
     return { success: true, duplicate: false, tankId, productName, nsWorkOrderId, nsWorkOrderNumber, status: 'active', parsed }
 
   } catch (err) {

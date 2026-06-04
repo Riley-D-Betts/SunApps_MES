@@ -88,6 +88,10 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATE,
         allowNull: true,
       },
+      actualStartAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
       completedAt: {
         type: DataTypes.DATE,
         allowNull: true,
