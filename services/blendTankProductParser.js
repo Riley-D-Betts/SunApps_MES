@@ -59,6 +59,7 @@ const PRODUCT_CATALOG = [
   // DFI Marcels milk
   { nsId: 8354, name: 'Raw DFI Marcels 0% Milk', brand: 'marcels', fatPct: 0, modifiers: [] },
   { nsId: 8340, name: 'Raw DFI Marcels 1% Milk', brand: 'marcels', fatPct: 1, modifiers: [] },
+  { nsId: 8918, name: 'Raw DFI Marcels Chocolate 1% Milk', brand: 'marcels', fatPct: 1, modifiers: ['chocolate'] },
   { nsId: 8339, name: 'Raw DFI Marcels 2% Milk', brand: 'marcels', fatPct: 2, modifiers: [] },
   { nsId: 8353, name: 'Raw DFI Marcels 3.25% Milk', brand: 'marcels', fatPct: 3.25, modifiers: ['whole'] },
 
@@ -69,6 +70,7 @@ const PRODUCT_CATALOG = [
   // Horizon Organic
   { nsId: 8335, name: 'Raw Horizon Organic 2% Milk', brand: 'horizon', fatPct: 2, modifiers: ['organic'] },
   { nsId: 8348, name: 'Raw Horizon Organic 3.25% Whole Milk', brand: 'horizon', fatPct: 3.25, modifiers: ['organic', 'whole'] },
+  { nsId: 8812, name: 'Raw Horizon Organic Half & Half', brand: 'horizon', fatPct: null, modifiers: ['organic', 'halfhalf'] },
 
   // Kirkland (Costco)
   { nsId: 8347, name: 'Raw Kirkland 1% Organic Milk', brand: 'kirkland', fatPct: 1, modifiers: ['organic'] },
@@ -76,6 +78,11 @@ const PRODUCT_CATALOG = [
   { nsId: 8344, name: 'Raw Kirkland 2% Organic Milk', brand: 'kirkland', fatPct: 2, modifiers: ['organic'] },
   { nsId: 8343, name: 'Raw Kirkland Chocolate 2% Organic Milk - Aseptic', brand: 'kirkland', fatPct: 2, modifiers: ['organic', 'chocolate'] },
   { nsId: 8342, name: 'Raw Kirkland Organic Whole Milk', brand: 'kirkland', fatPct: null, modifiers: ['organic', 'whole'] },
+
+  // ALDI
+  { nsId: 8815, name: 'Raw Aldi 2% Organic Milk', brand: 'aldi', fatPct: 2, modifiers: ['organic'] },
+  { nsId: 8816, name: 'Raw Aldi 3.25% Organic Whole Milk', brand: 'aldi', fatPct: 3.25, modifiers: ['organic', 'whole'] },
+  { nsId: 8817, name: 'Raw Aldi 3.25% Organic Whole Milk w/ DHA', brand: 'aldi', fatPct: 3.25, modifiers: ['organic', 'whole', 'dha'] },
 
   // American Farmer
   { nsId: 8364, name: 'Raw American Farmer Whole Milk', brand: 'americanfarmer', fatPct: 3.5, modifiers: ['whole'] },
@@ -124,9 +131,9 @@ const PRODUCT_CATALOG = [
 
 const BRAND_ALIASES = {
   // Marcels
-  marcel: 'marcels', marcels: 'marcels', "marcel's": 'marcels', mp: 'marcels',
+  marcel: 'marcels', marcels: 'marcels', "marcel's": 'marcels', mp: 'marcels', 'modern pantry': 'marcels',
   // Kirkland
-  kirkland: 'kirkland', ks: 'kirkland', costco: 'kirkland',
+  kirkland: 'kirkland', ks: 'kirkland', k: 'kirkland', costco: 'kirkland',
   // Conventional (type-2 + type-3 raw FG share this brand)
   conventional: 'conventional', conv: 'conventional',
   // Organic generic (covers both type-2 separator outputs and 'raw organic Nx%')
@@ -135,8 +142,8 @@ const BRAND_ALIASES = {
   a2: 'a2', 'a2/a2': 'a2',
   // DFI
   dfi: 'dfi', diversified: 'dfi',
-  // DG (also called DairyGold)
-  dg: 'dg', dairygold: 'dg', 'dairy gold': 'dg',
+  // DG (also called DairyGold / Darigold)
+  dg: 'dg', dairygold: 'dg', darigold: 'dg', 'dairy gold': 'dg',
   // ESL
   esl: 'esl',
   // Horizon
@@ -148,6 +155,8 @@ const BRAND_ALIASES = {
   // Barista / Kinera
   barista: 'barista',
   kinera: 'kinera',
+  // ALDI
+  aldi: 'aldi',
 }
 
 // ── Modifier patterns ───────────────────────────────────────────────────
@@ -159,6 +168,7 @@ const MODIFIER_PATTERNS = [
   { key: 'chocolate', patterns: ['chocolate', 'choc'] },
   { key: 'a2', patterns: ['a2', 'a2/a2'] },
   { key: 'whole', patterns: ['whole'] },
+  { key: 'dha', patterns: ['dha', 'omega', 'omega 3', 'omega-3'] },
   { key: 'skim', patterns: ['skim', 'fat free', 'fatfree', '0%'] },
   { key: 'cream', patterns: ['cream'] },
   { key: 'uf', patterns: ['uf milk', 'uf'] },

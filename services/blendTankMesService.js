@@ -533,6 +533,7 @@ async function processWOEnd(data) {
     wasteLbs,
     wastePercent,
   })
+  statusStore.recordClosedBlendBatch(record)
   if (record.nsWorkOrderId) clearBomCache(record.nsWorkOrderId)
   await db.MesProcessingLog.create({
     eventType: 'blend_tank_wo_complete',

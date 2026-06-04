@@ -57,6 +57,7 @@ const PRODUCT_CATALOG = [
   // DFI Marcels milk
   { nsId: 3222, name: 'DFI Marcels 0% Milk',                                     brand: 'marcels',        fatPct: 0,    modifiers: [] },
   { nsId: 3228, name: 'DFI Marcels 1% Milk',                                     brand: 'marcels',        fatPct: 1,    modifiers: [] },
+  { nsId: 8271, name: 'DFI Marcels Chocolate 1% Milk',                           brand: 'marcels',        fatPct: 1,    modifiers: ['chocolate'] },
   { nsId: 4012, name: 'DFI Marcels 2% Milk',                                     brand: 'marcels',        fatPct: 2,    modifiers: [] },
   { nsId: 3236, name: 'DFI Marcels 3.25% Milk',                                  brand: 'marcels',        fatPct: 3.25, modifiers: ['whole'] },
 
@@ -71,6 +72,7 @@ const PRODUCT_CATALOG = [
   // Horizon Organic
   { nsId: 5911, name: 'Horizon Organic 2% Milk',                                 brand: 'horizon',        fatPct: 2,    modifiers: ['organic'] },
   { nsId: 5907, name: 'Horizon Organic 3.25% Whole Milk',                        brand: 'horizon',        fatPct: 3.25, modifiers: ['organic', 'whole'] },
+  { nsId: 7477, name: 'Horizon Organic Half & Half',                             brand: 'horizon',        fatPct: null, modifiers: ['organic', 'halfhalf'] },
 
   // Kinera
   { nsId: 5317, name: 'Kinera Chocolate',                                        brand: 'kinera',         fatPct: null, modifiers: ['chocolate'] },
@@ -84,6 +86,11 @@ const PRODUCT_CATALOG = [
   { nsId: 4498, name: 'Kirkland 2% Organic Milk',                                brand: 'kirkland',       fatPct: 2,    modifiers: ['organic'] },
   { nsId: 4548, name: 'Kirkland Chocolate 2% Organic Milk - Aseptic',            brand: 'kirkland',       fatPct: 2,    modifiers: ['organic', 'chocolate'] },
   { nsId: 6420, name: 'Kirkland Organic Whole Milk',                             brand: 'kirkland',       fatPct: null, modifiers: ['organic', 'whole'] },
+
+  // ALDI
+  { nsId: 8403, name: 'Aldi 2% Organic Milk',                                    brand: 'aldi',           fatPct: 2,    modifiers: ['organic'] },
+  { nsId: 8406, name: 'Aldi 3.25% Organic Whole Milk',                           brand: 'aldi',           fatPct: 3.25, modifiers: ['organic', 'whole'] },
+  { nsId: 8409, name: 'Aldi 3.25% Organic Whole Milk w/ DHA',                    brand: 'aldi',           fatPct: 3.25, modifiers: ['organic', 'whole', 'dha'] },
 
   // Organic misc
   { nsId: 3926, name: 'Organic Milk 0% Lac Free',                                brand: 'organic',        fatPct: 0,    modifiers: ['organic', 'lacfree'] },
@@ -102,9 +109,9 @@ const BRAND_ALIASES = {
   // DFI (Holiday Nog only — Marcel's is its own brand below)
   dfi: 'dfi',
   // DFI Marcel's
-  marcel: 'marcels', marcels: 'marcels', "marcel's": 'marcels', mp: 'marcels',
-  // DG (also called DairyGold)
-  dg: 'dg', dairygold: 'dg', 'dairy gold': 'dg',
+  marcel: 'marcels', marcels: 'marcels', "marcel's": 'marcels', mp: 'marcels', 'modern pantry': 'marcels',
+  // DG (also called DairyGold / Darigold)
+  dg: 'dg', dairygold: 'dg', darigold: 'dg', 'dairy gold': 'dg',
   // ESL
   esl: 'esl',
   // Horizon
@@ -112,7 +119,9 @@ const BRAND_ALIASES = {
   // Kinera
   kinera: 'kinera',
   // Kirkland (Costco)
-  kirkland: 'kirkland', ks: 'kirkland', costco: 'kirkland',
+  kirkland: 'kirkland', ks: 'kirkland', k: 'kirkland', costco: 'kirkland',
+  // ALDI
+  aldi: 'aldi',
   // Organic (catch-all for "Organic Milk 0% Lac Free")
   organic: 'organic',
 }
@@ -123,6 +132,7 @@ const MODIFIER_PATTERNS = [
   { key: 'chocolate', patterns: ['chocolate', 'choc'] },
   { key: 'a2', patterns: ['a2', 'a2/a2'] },
   { key: 'whole', patterns: ['whole'] },
+  { key: 'dha', patterns: ['dha', 'omega', 'omega 3', 'omega-3'] },
   { key: 'halfhalf', patterns: ['half & half', 'half and half', 'halfhalf', 'half half', 'h&h', 'h/h', 'hh'] },
   { key: 'heavycream', patterns: ['heavy cream', 'heavycream', 'heavy whip', 'hwc'] },
   { key: 'nog', patterns: ['nog', 'eggnog'] },

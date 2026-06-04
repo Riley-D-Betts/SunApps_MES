@@ -891,6 +891,7 @@ async function processWOEnd(data, historian) {
     wasteLbs,
     wastePercent,
   })
+  statusStore.recordClosedSurgeBatch(record)
   if (record.nsWorkOrderId) clearBomCache(record.nsWorkOrderId)
   await db.MesProcessingLog.create({
     eventType: 'surge_tank_wo_complete',

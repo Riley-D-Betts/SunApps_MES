@@ -312,6 +312,32 @@ function surgeBatchSummary(b) {
   }
 }
 
+function recordClosedBlendBatch(record) {
+  const summary = blendBatchSummary(record)
+  const idx = state.recentBlendBatches.findIndex(b => b.id === summary.id)
+  if (idx >= 0) {
+    state.recentBlendBatches[idx] = summary
+  } else {
+    state.recentBlendBatches.unshift(summary)
+    if (state.recentBlendBatches.length > MAX_RECENT_TANK_BATCHES) {
+      state.recentBlendBatches.length = MAX_RECENT_TANK_BATCHES
+    }
+  }
+}
+
+function recordClosedSurgeBatch(record) {
+  const summary = surgeBatchSummary(record)
+  const idx = state.recentSurgeBatches.findIndex(b => b.id === summary.id)
+  if (idx >= 0) {
+    state.recentSurgeBatches[idx] = summary
+  } else {
+    state.recentSurgeBatches.unshift(summary)
+    if (state.recentSurgeBatches.length > MAX_RECENT_TANK_BATCHES) {
+      state.recentSurgeBatches.length = MAX_RECENT_TANK_BATCHES
+    }
+  }
+}
+
 function pushSeparationBatch(batch) {
   const entry = { t: now(), ...batch }
   // Upsert by batchId so per-tick refreshes for an in-flight batch replace the
@@ -539,6 +565,8 @@ module.exports = {
   hydrateTickState,
   hydrateRecentBlendBatches,
   hydrateRecentSurgeBatches,
+  recordClosedBlendBatch,
+  recordClosedSurgeBatch,
   snapshot,
   events,
   clear,
