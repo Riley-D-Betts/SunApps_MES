@@ -88,7 +88,7 @@ const PRODUCT_CATALOG = [
   { nsId: 6420, name: 'Kirkland Organic Whole Milk',                             brand: 'kirkland',       fatPct: null, modifiers: ['organic', 'whole'] },
 
   // ALDI
-  { nsId: 8403, name: 'Aldi 2% Organic Milk',                                    brand: 'aldi',           fatPct: 2,    modifiers: ['organic'] },
+  { nsId: 8401, name: 'Aldi 2% Organic Milk',                                    brand: 'aldi',           fatPct: 2,    modifiers: ['organic'] },
   { nsId: 8406, name: 'Aldi 3.25% Organic Whole Milk',                           brand: 'aldi',           fatPct: 3.25, modifiers: ['organic', 'whole'] },
   { nsId: 8409, name: 'Aldi 3.25% Organic Whole Milk w/ DHA',                    brand: 'aldi',           fatPct: 3.25, modifiers: ['organic', 'whole', 'dha'] },
 
