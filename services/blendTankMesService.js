@@ -1167,17 +1167,24 @@ async function tickArrivalForBatch(batch, curWeightLbs) {
   const updates = { lastDestLevelLbs: curLbs }
 
   if (prevLbs == null) {
-    // FIRST arrival observation. The blend issue baselines at 0 and the first
-    // tick issues the ENTIRE line totalizer — the whole fill, including milk
-    // that entered before the batch was opened. The batch often opens only once
-    // the tank is already part-full (operators name it late, and under the
-    // replay speedup the fast fill outruns start detection). So the standing
-    // tank content was already counted as ISSUED; credit it as REACHED too, or
-    // it shows up as phantom waste. Clamp to issued (completed ≤ output ≤ issued).
-    const credit = Math.min(issued, Math.max(output, curLbs))
+    // FIRST arrival observation. Two sub-cases:
+    //
+    // A) Batch named while tank is part-full (typical late-naming): issued ≈ curLbs.
+    //    Credit curLbs so the standing milk doesn't show as phantom waste.
+    //
+    // B) Batch named after a full fill-and-drain cycle (operator names late, tank
+    //    already pumped to UHT before first tick runs): issued >> curLbs.
+    //    The pre-naming milk DID arrive — it just passed through before arrival
+    //    tracking started. Credit the full issued amount; we cannot measure
+    //    blend-leg waste retroactively for pre-naming volume.
+    //
+    // Combining: credit = max(curLbs, issued) — whichever is larger. Because
+    // issued >= 0 and output starts at 0, this simplifies to `issued`.
+    const credit = Math.min(issued, Math.max(output, issued))
     if (credit > output) {
       updates.cumulativeOutputLbs = credit
-      console.log(`[BlendTankMesService] arrival ${batch.tankId}: initial level credited ${credit.toFixed(0)} lb reached (tank ${curLbs.toFixed(0)} lb at batch open) of issued ${issued.toFixed(0)}`)
+      const why = credit > curLbs ? 'pre-naming fill already drained to UHT' : 'tank level at batch open'
+      console.log(`[BlendTankMesService] arrival ${batch.tankId}: initial credit ${credit.toFixed(0)} lb reached (${why}; tank ${curLbs.toFixed(0)} lb, issued ${issued.toFixed(0)})`)
     }
   } else {
     const rise = curLbs - prevLbs
