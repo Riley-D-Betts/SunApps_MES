@@ -24,6 +24,7 @@ const RAW_FG_ITEM_MAP = {
   'Raw conventional 3.25%':                                  5413,
   'Raw conventional 3.5%':                                   5416,
   'Raw conventional cream (40%)':                            5480,
+  'Raw Con Cream 40%':                                       5480, // pre-AVEVA free-text alias
 
   // ── Type-2: Organic ───────────────────────────────────────────────────
   'Raw organic 0% (skim)':                                   5482,

@@ -404,7 +404,22 @@ async function processWOStart(data, historian) {
     }
 
     console.log(`[BlendTankMesService] Creating NS WO for "${productName}" on ${tankId}`)
-    nsResult = await core.netsuitePost('/record/v1/workOrder', body)
+    try {
+      nsResult = await core.netsuitePost('/record/v1/workOrder', body)
+    } catch (woCreateErr) {
+      // NS rejects WO creation with HTTP 400 "at least one line item" when the
+      // assembly item has no BOM configured in NetSuite (newer items added outside
+      // the main NS item setup flow). Retry with the assembly item seeded as a
+      // 0-qty placeholder component so the WO can be created; ensureItemOnWoBom
+      // will patch in the real flowing ingredients at issue time.
+      if (woCreateErr.message?.includes('at least one line item')) {
+        console.warn(`[BlendTankMesService] NS WO for item ${assemblyItem.id} has no BOM — retrying with seed component`)
+        body.item = { items: [{ item: { id: assemblyItem.id }, quantity: 0 }] }
+        nsResult = await core.netsuitePost('/record/v1/workOrder', body)
+      } else {
+        throw woCreateErr
+      }
+    }
     console.log(`[BlendTankMesService] NS WO response: status=${nsResult?.status}`)
 
     let nsWorkOrderId = nsResult?.id || null
