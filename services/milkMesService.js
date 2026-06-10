@@ -154,7 +154,7 @@ async function processSeparationBatch(data) {
   const destinationsJson = JSON.stringify({
     raw: destsRaw,
     resolved: resolvedDests,
-    source: { silo: sourceSilo, productIndex: sourceIndex, productName: sourceName, nsItemId: sourceItem.id },
+    source: { silo: sourceSilo, productIndex: sourceIndex, productName: sourceName, nsItemId: sourceItem.id, binId: sourceBinId },
   })
 
   const numericPayload = {
