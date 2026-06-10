@@ -14,10 +14,61 @@
 const config = require('../config')
 
 // ── Exact-match table (AVEVA standardized values) ───────────────────────
-// Add entries as the standardized list lands. Keys are case-sensitive and
-// exactly as the historian writes them; values are raw FG NS item IDs.
+// Keys are exactly as the AVEVA dropdown emits them (case-sensitive).
+// Values are raw FG NS item IDs.
 const RAW_FG_ITEM_MAP = {
-  // (Populate as the standardized list arrives.)
+  // ── Type-2: Conventional ──────────────────────────────────────────────
+  'Raw conventional 0% (skim)':                              8163,
+  'Raw conventional 1%':                                     5415,
+  'Raw conventional 2%':                                     5412,
+  'Raw conventional 3.25%':                                  5413,
+  'Raw conventional 3.5%':                                   5416,
+  'Raw conventional cream (40%)':                            5480,
+
+  // ── Type-2: Organic ───────────────────────────────────────────────────
+  'Raw organic 0% (skim)':                                   5482,
+  'Raw organic 1%':                                          5409,
+  'Raw organic 2%':                                          5410,
+  'Raw organic 3.25%':                                       5411,
+  'Raw organic 3.5%':                                        5401,
+  'Raw organic cream (40%)':                                 5483,
+
+  // ── Type-2: Organic A2 ───────────────────────────────────────────────
+  'Raw organic A2 0% (skim)':                                5484,
+  'Raw organic A2 1%':                                       8366,
+  'Raw organic A2 2%':                                       8367,
+  'Raw organic A2 3.25%':                                    8368,
+  'Raw organic A2 3.5%':                                     8369,
+  'Raw organic A2 4%':                                       8370,
+  'Raw organic A2 cream (40%)':                              8365,
+
+  // ── Type-3: Brand-specific ────────────────────────────────────────────
+  'Raw Alexandre Eco Dairy A2/A2 Organic 4% Whole Milk':     8333,
+  'Raw Alexandre Eco Dairy A2/A2 Organic Chocolate 4% Milk': 8371,
+  'Raw American Farmer Whole Milk':                          8364,
+  'Raw Barista Frappe Mix':                                  8363,
+  'Raw DFI Holiday Nog':                                     8357,
+  'Raw DFI Marcels Modern Pantry Heavy Cream':               8356,
+  'Raw DFI Marcels Modern Pantry UHT Half & Half':           8355,
+  'Raw DFI Marcels 0% Milk':                                 8354,
+  'Raw DFI Marcels 1% Milk':                                 8340,
+  'Raw DFI Marcels 2% Milk':                                 8339,
+  'Raw DFI Marcels 3.25% Milk':                              8353,
+  'Raw DG Half & Half':                                      8352,
+  'Raw DG Heavy Cream':                                      8351,
+  'Raw ESL Half & Half':                                     8350,
+  'Raw ESL Heavy Whip Cream':                                8349,
+  'Raw Horizon Organic 2% Milk':                             8335,
+  'Raw Horizon Organic 3.25% Whole Milk':                    8348,
+  'Raw Kirkland 1% Organic Milk':                            8347,
+  'Raw Kirkland 2% Organic Lac Free Milk':                   8346,
+  'Raw Kirkland 2% Organic Lactose Free':                    8346, // alternate label, same item
+  'Raw Kirkland 2% Organic Milk':                            8344,
+  'Raw Kirkland Chocolate 2% Organic Milk - Aseptic':        8343,
+  'Raw Kirkland Organic Whole Milk':                         8342,
+  'Raw Organic Milk 0% Lac Free':                            8341,
+  'Raw Kinera Chocolate':                                    8336,
+  'Raw Kinera Strawberry':                                   8334,
 }
 
 // ── Product catalog ─────────────────────────────────────────────────────
@@ -307,8 +358,8 @@ function scoreProduct(product, brand, fatPct, modifiers) {
 function parseProductName(input) {
   if (!input || typeof input !== 'string') return null
 
-  if (RAW_FG_ITEM_MAP[input] != null) {
-    const nsId = RAW_FG_ITEM_MAP[input]
+  if (RAW_FG_ITEM_MAP[input.trim()] != null) {
+    const nsId = RAW_FG_ITEM_MAP[input.trim()]
     const hit = PRODUCT_CATALOG.find(p => p.nsId === nsId)
     return {
       nsId,
