@@ -54,7 +54,12 @@
       "Read(//tmp/**)",
       "Bash(python -c \"import json; d=json.load\\(open\\('/tmp/out.json'\\)\\); print\\(len\\(d.get\\('pairings',[]\\)\\), 'pairings | success=' + str\\(d.get\\('success'\\)\\)\\)\")",
       "Read(//c/Users/BryceChesley/Workspace/SunApps_Manufacturing/routes/**)",
-      "Read(//c/Users/BryceChesley/Workspace/SunApps_Manufacturing/**)"
+      "Read(//c/Users/BryceChesley/Workspace/SunApps_Manufacturing/**)",
+      "Bash(dir \"C:\\\\Users\\\\BryceChesley\\\\Workspace\\\\SunApps_MES\" -Recurse -Include \"*.ts\",\"*.js\",\"*.cs\" -Exclude \"*node_modules*\")",
+      "Bash(sed -n '283,295p' services/tankAtRestSweepService.js)",
+      "Bash(sed -n '234,250p' services/nsInventoryLookup.js)",
+      "Bash(sed 's/.*\"FQN\": \"\\\\\\([^\"]*\\\\\\)\".*/\\\\1/')",
+      "Bash(xargs ls -la)"
     ]
   }
 }
