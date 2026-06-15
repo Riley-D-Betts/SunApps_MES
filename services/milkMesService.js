@@ -250,15 +250,42 @@ async function processSeparationBatch(data) {
       console.log(`[MilkMesService] Normalized skim index ${rawSkimProductIndex} → ${skimProductIndex} (organic source ${sourceItem.id} with conventional skim index)`)
     }
     const bomId = itemConfig.getSeparationBomId(sourceItem.id, skimProductIndex)
-    if (!bomId) throw new Error(`No BOM mapped for source=${sourceItem.id} skim productIndex=${skimProductIndex}`)
+    if (!bomId) {
+      // No separation BOM for this (source, skim-index) pair. The common cause is
+      // the skim-destination silo left on a RAW index (15 Raw Conventional / 16
+      // Raw Organic / 21 Raw A2) instead of a fat level — a real separation ran
+      // (cream came out) but we can't tell which fat-level BOM to unbuild against.
+      // Land it in the ops backlog as pending_ns rather than throwing a hard
+      // error every run. See Bug D / [[silo-flexibility]].
+      const reason = `no separation BOM for source=${sourceItem.id} skim index=${skimProductIndex} (skim silo likely left on a raw/unset fat level)`
+      if (!config.MES_DRY_RUN) {
+        console.warn(`[MilkMesService] Batch ${batchId} ${reason} — saving pending_ns`)
+        await record.update({ status: 'pending_ns', processedAt: new Date(clock.now()) })
+        await db.MesProcessingLog.create({
+          eventType: 'separation_unbuild', sourceId: batchId,
+          nsTransactionType: 'assemblyUnbuild', nsTransactionId: null,
+          payload: JSON.stringify(data),
+          result: JSON.stringify({ skipped: 'no BOM mapped', reason, sourceItem, skimProductIndex, skimDest }),
+          success: true,
+        })
+        return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'pending_ns', gaps: [reason], summary: { ...summary, status: 'pending_ns', gaps: [reason] } }
+      }
+      throw new Error(`No BOM mapped for source=${sourceItem.id} skim productIndex=${skimProductIndex}`)
+    }
 
     const creamItemId = itemConfig.getCreamItemForSource(sourceItem.id).id
     const skimItem = itemConfig.getItemByProductIndex(skimProductIndex)
     if (needSkim && !skimItem.id) throw new Error(`No NS item for skim productIndex=${skimProductIndex}`)
 
+    // Round to 2-dp lbs and reuse the SAME value for both the unbuild header
+    // quantity and the source inventory-detail line. Sending the raw float to
+    // both can serialize them to microscopically different values, and NS then
+    // rejects with "The total inventory detail quantity must be N" (header ≠
+    // detail total). One rounded value guarantees they match. See Bug G.
+    const unbuildQty = Math.round(inputVolume * 100) / 100
     const body = {
       item: sourceItem.id ? { id: sourceItem.id } : undefined,
-      quantity: inputVolume,
+      quantity: unbuildQty,
       location: { id: 30 },
       subsidiary: { id: 3 },
       billOfMaterials: { id: bomId },
@@ -273,7 +300,7 @@ async function processSeparationBatch(data) {
     if (sourceBinId) {
       body.inventoryDetail = {
         inventoryAssignment: {
-          items: [{ quantity: inputVolume, binnumber: { id: sourceBinId } }],
+          items: [{ quantity: unbuildQty, binnumber: { id: sourceBinId } }],
         },
       }
     }
@@ -457,10 +484,105 @@ async function getActiveBulkMilkRuns() {
   return { success: true, runs }
 }
 
+// Statuses an operator can act on from the Separation Review screen. pending_ns
+// = couldn't resolve a BOM/item (e.g. skim silo on a raw index — Bug D); error
+// = NS emit threw. 'skipped' (phantom 0-vol reopen) and terminal 'completed'
+// are intentionally NOT retryable.
+const RETRYABLE_SEPARATION_STATUSES = ['pending_ns', 'error']
+
+/**
+ * Re-run a failed/pending separation unbuild after an operator corrects the
+ * product index(es) the resolution depends on. Patches the stored
+ * siloProductConfig with the override(s), flips the row back to 'running' (so
+ * processSeparationBatch will pick it up — it skips any non-running row), and
+ * re-emits to NetSuite. Overrides are HMI product indices (1-40), the same
+ * values the separator writes; the skim index is the usual fix (Bug D).
+ */
+async function retrySeparationBatch(id, overrides = {}) {
+  const row = await db.MesSeparationBatch.findByPk(id)
+  if (!row) throw new Error(`Separation batch ${id} not found`)
+  if (!RETRYABLE_SEPARATION_STATUSES.includes(row.status)) {
+    throw new Error(`Batch ${id} is '${row.status}' — only ${RETRYABLE_SEPARATION_STATUSES.join('/')} batches can be retried`)
+  }
+
+  const destsRaw = row.prevDestinationsJson ? JSON.parse(row.prevDestinationsJson).filter(Boolean) : []
+  const siloProductConfig = row.prevIndexCodesJson ? JSON.parse(row.prevIndexCodesJson) : {}
+
+  // Stamp a corrected product index onto a silo's config entry (keyed by the
+  // raw SCADA string processSeparationBatch will look up). Pulls the canonical
+  // name from PRODUCT_INDEX_ITEM_MAP for display.
+  const setIdx = (siloKey, idx) => {
+    if (siloKey == null || idx == null) return
+    const n = Number(idx)
+    siloProductConfig[siloKey] = {
+      ...(siloProductConfig[siloKey] || {}),
+      productIndex: n,
+      productName: itemConfig.PRODUCT_INDEX_ITEM_MAP[n]?.name || siloProductConfig[siloKey]?.productName || '',
+    }
+  }
+
+  if (overrides.sourceProductIndex != null) setIdx(row.sourceSilo, overrides.sourceProductIndex)
+  if (overrides.skimProductIndex != null) {
+    const skimRaw = destsRaw.find(r => itemConfig.classifySiloDestination(r) === 'skim')
+    if (!skimRaw) throw new Error(`Batch ${id} has no skim (M-silo) destination to apply skimProductIndex to`)
+    setIdx(skimRaw, overrides.skimProductIndex)
+  }
+  if (overrides.creamProductIndex != null) {
+    const creamRaw = destsRaw.find(r => itemConfig.classifySiloDestination(r) === 'cream')
+    if (creamRaw) setIdx(creamRaw, overrides.creamProductIndex)
+  }
+
+  // Flip to 'running' + persist the corrected config so processSeparationBatch
+  // (which skips non-running rows) re-processes this one.
+  await row.update({ status: 'running', errorMessage: null, prevIndexCodesJson: JSON.stringify(siloProductConfig) })
+
+  const payload = {
+    batchId: row.batchId,
+    sourceSilo: row.sourceSilo,
+    destinations: destsRaw,
+    siloProductConfig,
+    inputVolume: Number(row.inputVolume) || 0,
+    creamVolume: Number(row.creamVolume) || 0,
+    skimVolume: Number(row.skimVolume) || 0,
+    batchStart: row.batchStart,
+    batchEnd: row.batchEnd,
+    itemId: row.itemId,
+    transferName: row.transferName,
+    unit: row.unit,
+    targetVolume: row.targetVolume != null ? Number(row.targetVolume) : undefined,
+    endReason: row.endReason,
+  }
+
+  const result = await processSeparationBatch(payload)
+  const batch = await db.MesSeparationBatch.findByPk(id)
+  return { result, batch }
+}
+
+/**
+ * Dismiss a failed/pending separation batch the operator has decided not to
+ * post (e.g. a sensor-glitch phantom, or a transfer already reconciled by
+ * hand). Marks it 'rejected' so it leaves the review backlog.
+ */
+async function rejectSeparationBatch(id, { decidedBy, reason } = {}) {
+  const row = await db.MesSeparationBatch.findByPk(id)
+  if (!row) throw new Error(`Separation batch ${id} not found`)
+  const who = decidedBy || 'unknown'
+  await row.update({
+    status: 'rejected',
+    processedAt: new Date(clock.now()),
+    errorMessage: reason ? `Rejected by ${who}: ${reason}` : `Rejected by ${who}`,
+  })
+  console.log(`[MilkMesService] Separation batch ${id} (${row.batchId}) rejected by ${who}`)
+  return row
+}
+
 module.exports = {
   processSeparationBatch,
   processBulkMilkFlow,
   registerBulkMilkRun,
   completeBulkMilkRun,
   getActiveBulkMilkRuns,
+  retrySeparationBatch,
+  rejectSeparationBatch,
+  RETRYABLE_SEPARATION_STATUSES,
 }

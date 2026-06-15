@@ -151,6 +151,23 @@ db.ensureRuntimeSchema = async function () {
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lastTickAt' AND Object_ID = Object_ID(N'MesSeparationBatches'))
       ALTER TABLE MesSeparationBatches ADD lastTickAt DATETIME2 NULL;
   `)
+  // Totalizer baselines captured at batch open. The separator feed/cream/skim
+  // totalizers are monotonic odometers that DON'T reset between transfers, so a
+  // batch's volume is (current − baseline), not the raw totalizer. Without these
+  // a re-opened batch (idle reopen / boundary / recovery) re-reports the whole
+  // cumulative total → 2-4 duplicate unbuilds for one physical separation.
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'feedStartLbs' AND Object_ID = Object_ID(N'MesSeparationBatches'))
+      ALTER TABLE MesSeparationBatches ADD feedStartLbs DECIMAL(14,2) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'creamStartLbs' AND Object_ID = Object_ID(N'MesSeparationBatches'))
+      ALTER TABLE MesSeparationBatches ADD creamStartLbs DECIMAL(14,2) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'skimStartLbs' AND Object_ID = Object_ID(N'MesSeparationBatches'))
+      ALTER TABLE MesSeparationBatches ADD skimStartLbs DECIMAL(14,2) NULL;
+  `)
   // destinations / prev*Json originally created as NVARCHAR(500). The
   // resolved destinations payload (raw + resolved + source) blows past that,
   // breaking every openBatch with "string or binary data would be truncated".

@@ -40,6 +40,22 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DECIMAL(8, 2),
         allowNull: true,
       },
+      // Totalizer readings captured at batch open. Batch volumes are computed
+      // as (current totalizer − this baseline) because the separator totalizers
+      // are cumulative odometers that don't reset between transfers. Null on
+      // pre-baseline rows (treated as baseline 0). See ensureRuntimeSchema.
+      feedStartLbs: {
+        type: DataTypes.DECIMAL(14, 2),
+        allowNull: true,
+      },
+      creamStartLbs: {
+        type: DataTypes.DECIMAL(14, 2),
+        allowNull: true,
+      },
+      skimStartLbs: {
+        type: DataTypes.DECIMAL(14, 2),
+        allowNull: true,
+      },
       batchStart: {
         type: DataTypes.DATE,
         allowNull: true,

@@ -142,7 +142,7 @@ async function ensureItemOnWoBom(nsWorkOrderId, targetItemId, bomLines) {
 //   - status: 1 ("Good") — silently ignored, kept for parity with manufacturing
 //
 // See [[ns-wo-issue-shape]] and [[lot-tracked-bom-components]] memories.
-async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferredBinId, bomLines) {
+async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferredBinId, bomLines, opts = {}) {
   const tracking = await nsInventory.getItemTracking(targetItemId)
   const targetLine = await ensureItemOnWoBom(nsWorkOrderId, targetItemId, bomLines)
 
@@ -218,7 +218,12 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
   // WOs carry lot-tracked vitamin/citrate lines, so this is true and bin-only
   // lines use the lowercase componentinventorydetail shape (camelCase is
   // silently ignored on a lot-bearing WO). See nsInventory.buildComponentDetail.
-  const woHasLotLines = await nsInventory.anyLotTracked(bomLines)
+  // opts.forceWoHasLotLines overrides the auto-detection — used by the
+  // wrapper-mismatch retry (Bug A) when NS rejected our first guess with
+  // "configure the inventory detail in line N".
+  const woHasLotLines = opts.forceWoHasLotLines != null
+    ? opts.forceWoHasLotLines
+    : await nsInventory.anyLotTracked(bomLines)
   const { quantity: issueQty, detail } = nsInventory.buildComponentDetail(tracking, quantity, allocations, resolvedBinId, woHasLotLines)
 
   // issueQty == quantity for bin-only lines; for lot lines it's the sum of the
@@ -230,6 +235,32 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
     body: { component: { items: [componentEntry] } },
     allocations,
     tracking,
+  }
+}
+
+// NS rejects a bin-only component line with "Please configure the inventory
+// detail in line N" when the issue body used the camelCase `inventoryDetail`
+// wrapper but NS treats the WO as lot-bearing (so it silently ignored our
+// detail). This is the anyLotTracked() guessing wrong — observed firing on
+// EVERY tick of a single WO (4857929) until restart. See Bug A / [[ns-wo-issue-shape]].
+function isWrapperMismatch(err) {
+  return /configure the inventory detail in line/i.test(err?.message || '')
+}
+
+// POST a workOrderIssue, retrying ONCE with the lowercase componentinventorydetail
+// wrapper forced on if NS rejects with the wrapper-mismatch signature above.
+// Rebuilds the body via buildWoIssueBody with forceWoHasLotLines — an extra NS
+// round-trip, but only on the (rare) retry path. Returns { nsResult, body }.
+async function postWoIssueWithWrapperRetry({ nsWorkOrderId, targetItemId, quantity, binId, bomLines, body }) {
+  try {
+    const nsResult = await core.netsuitePost(`/record/v1/workOrder/${nsWorkOrderId}/!transform/workOrderIssue`, body)
+    return { nsResult, body }
+  } catch (err) {
+    if (!isWrapperMismatch(err)) throw err
+    console.warn(`[BlendTankMesService] WO ${nsWorkOrderId} rejected bin-only line wrapper ("configure inventory detail in line N") — retrying with lowercase componentinventorydetail`)
+    const rebuilt = await buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, binId, bomLines, { forceWoHasLotLines: true })
+    const nsResult = await core.netsuitePost(`/record/v1/workOrder/${nsWorkOrderId}/!transform/workOrderIssue`, rebuilt.body)
+    return { nsResult, body: rebuilt.body }
   }
 }
 
@@ -735,7 +766,12 @@ async function backfillUnmatchedInflows(batch) {
     }
 
     try {
-      const nsResult = await core.netsuitePost(`/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderIssue`, body)
+      const posted = await postWoIssueWithWrapperRetry({
+        nsWorkOrderId: batch.nsWorkOrderId, targetItemId: g.component.id,
+        quantity: g.totalLbs, binId: g.binId, bomLines, body,
+      })
+      body = posted.body
+      const nsResult = posted.nsResult
       const nsIssueId = extractNsIssueId(nsResult)
       for (const m of g.members) {
         await m.inflow.update({
@@ -943,7 +979,12 @@ async function processLineFlow(data) {
       ? ` via ${allocations.map(a => `lot ${a.lotName}@${a.binName} ${a.qty.toFixed(1)}`).join(' + ')}`
       : ''
     console.log(`[BlendTankMesService] tail-catcher ${line} → WO ${targetBatch.nsWorkOrderId} (${targetBatch.tankId}): ${delta.toFixed(1)} lb (peak ${totalLbs.toFixed(1)}, tick had issued ${lastIssued.toFixed(1)})${allocSummary}`)
-    const nsResult = await core.netsuitePost(`/record/v1/workOrder/${targetBatch.nsWorkOrderId}/!transform/workOrderIssue`, body)
+    const issued = await postWoIssueWithWrapperRetry({
+      nsWorkOrderId: targetBatch.nsWorkOrderId, targetItemId: component.id,
+      quantity: delta, binId, bomLines, body,
+    })
+    body = issued.body
+    const nsResult = issued.nsResult
     const nsIssueId = extractNsIssueId(nsResult)
 
     await inflowRecord.update({ nsIssueId: nsIssueId ? String(nsIssueId) : null, status: 'completed' })
@@ -1527,7 +1568,12 @@ async function tickIssuesForBatch(batch, lineReadings) {
         ? ` via ${allocations.map(a => `lot ${a.lotName}@${a.binName} ${a.qty.toFixed(1)}`).join(' + ')}`
         : ''
       console.log(`[BlendTankMesService] tick issue ${memberLabel} → WO ${batch.nsWorkOrderId} (${batch.tankId}): ${g.totalDelta.toFixed(1)} lb "${g.component.name}" (NS ${g.component.id})${allocSummary}`)
-      const nsResult = await core.netsuitePost(`/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderIssue`, body)
+      const issued = await postWoIssueWithWrapperRetry({
+        nsWorkOrderId: batch.nsWorkOrderId, targetItemId: g.component.id,
+        quantity: g.totalDelta, binId: g.binId, bomLines, body,
+      })
+      body = issued.body
+      const nsResult = issued.nsResult
       const nsIssueId = extractNsIssueId(nsResult)
 
       for (const m of g.members) {

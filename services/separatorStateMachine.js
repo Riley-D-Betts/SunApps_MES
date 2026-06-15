@@ -20,6 +20,9 @@ const STATE_RUNNING = 'running'
 
 const IDLE_RPM_THRESHOLD = 100
 const TICKS_TO_CLOSE_ON_IDLE = 30 // 5 min @ 10s/tick
+// Below this baselined input (lbs) a closed batch is treated as a phantom
+// reopen (no new flow over its window) and skipped rather than emitted to NS.
+const SEPARATION_MIN_INPUT_LBS = 1
 // Recovery fallback: if SM is IDLE but the separator is clearly running
 // (feedPermit + RPM up + startable) for this many ticks, open a batch even
 // without a rising edge. Catches the post-restart case where feedPermit was
@@ -46,6 +49,11 @@ let prevSnapshot = null
 let rpmLowTicks = 0
 let feedPermitZeroTicks = 0
 let runningWhileIdleTicks = 0
+// Totalizer readings at the moment the open batch started. Batch volumes are
+// (current − baseline) since the separator totalizers don't reset between
+// transfers. Persisted to the row (feed/cream/skimStartLbs) and restored on
+// hydrate so a resumed batch keeps subtracting the right baseline.
+let openBaselines = null
 
 function reset() {
   machineState = STATE_IDLE
@@ -54,6 +62,17 @@ function reset() {
   rpmLowTicks = 0
   feedPermitZeroTicks = 0
   runningWhileIdleTicks = 0
+  openBaselines = null
+}
+
+// A batch's volume is the totalizer's RISE over its own window. The totalizer
+// is a monotonic odometer, so subtract the baseline captured at open. If it
+// went backwards (CIP / shift reset zeroed the totalizer), the baseline is
+// stale — fall back to the raw current reading (delta from 0).
+function deltaVol(current, baseline) {
+  const c = Number(current) || 0
+  const b = Number(baseline) || 0
+  return c >= b ? c - b : c
 }
 
 /**
@@ -149,12 +168,23 @@ async function openBatch(snap) {
   const sourceSilo = itemConfig.normalizeSiloName(snap.xfrSource) || snap.xfrSource
   const batchId = `XFR-${snap.pollTime.getTime()}`
   const destinationsJson = JSON.stringify(buildResolvedDestinations(snap))
+  // Baseline the totalizers at open. Volumes start at 0 and grow as
+  // (current − baseline); without this a re-opened batch re-counts the whole
+  // cumulative total and posts a duplicate unbuild.
+  openBaselines = {
+    feed: snap.feedTotalLbs || 0,
+    cream: snap.creamTotalLbs || 0,
+    skim: snap.skimTotalLbs || 0,
+  }
   const row = await db.MesSeparationBatch.create({
     batchId,
     sourceSilo,
-    inputVolume: snap.feedTotalLbs || 0,
-    creamVolume: snap.creamTotalLbs || 0,
-    skimVolume: snap.skimTotalLbs || 0,
+    inputVolume: 0,
+    creamVolume: 0,
+    skimVolume: 0,
+    feedStartLbs: openBaselines.feed,
+    creamStartLbs: openBaselines.cream,
+    skimStartLbs: openBaselines.skim,
     batchStart: snap.pollTime,
     batchEnd: null,
     transferName: snap.xfrTransferName || null,
@@ -181,10 +211,11 @@ async function openBatch(snap) {
 
 async function persistTick(snap) {
   if (!openBatchId) return
+  const base = openBaselines || { feed: 0, cream: 0, skim: 0 }
   await db.MesSeparationBatch.update({
-    inputVolume: snap.feedTotalLbs || 0,
-    creamVolume: snap.creamTotalLbs || 0,
-    skimVolume: snap.skimTotalLbs || 0,
+    inputVolume: deltaVol(snap.feedTotalLbs, base.feed),
+    creamVolume: deltaVol(snap.creamTotalLbs, base.cream),
+    skimVolume: deltaVol(snap.skimTotalLbs, base.skim),
     destinations: JSON.stringify(buildResolvedDestinations(snap)),
     prevSourceSilo: snap.xfrSource,
     prevDestinationsJson: JSON.stringify(snap.xfrDestinations),
@@ -216,22 +247,50 @@ async function closeBatch(snap, endReason) {
   const prevDests = row.prevDestinationsJson ? JSON.parse(row.prevDestinationsJson) : snap.xfrDestinations
   const prevIndexCodes = row.prevIndexCodesJson ? JSON.parse(row.prevIndexCodesJson) : snap.siloProductConfig
 
+  // Baseline-corrected volumes (current totalizer − reading at open). Fall back
+  // to the last persisted delta if the close-tick totalizer reads falsy (sensor
+  // dropout) so we don't zero out a real batch.
+  const base = openBaselines || { feed: row.feedStartLbs, cream: row.creamStartLbs, skim: row.skimStartLbs }
+  const closeInput = snap.feedTotalLbs ? deltaVol(snap.feedTotalLbs, base.feed) : (Number(row.inputVolume) || 0)
+  const closeCream = snap.creamTotalLbs ? deltaVol(snap.creamTotalLbs, base.cream) : (Number(row.creamVolume) || 0)
+  const closeSkim = snap.skimTotalLbs ? deltaVol(snap.skimTotalLbs, base.skim) : (Number(row.skimVolume) || 0)
+
   await db.MesSeparationBatch.update({
-    inputVolume: snap.feedTotalLbs || row.inputVolume,
-    creamVolume: snap.creamTotalLbs || row.creamVolume,
-    skimVolume: snap.skimTotalLbs || row.skimVolume,
+    inputVolume: closeInput,
+    creamVolume: closeCream,
+    skimVolume: closeSkim,
     batchEnd: snap.pollTime,
     endReason,
     lastTickAt: snap.pollTime,
   }, { where: { id: openBatchId } })
 
-  console.log(`[SeparatorSM] CLOSE batch ${row.batchId} reason=${endReason} input=${Number(snap.feedTotalLbs).toFixed(1)} cream=${Number(snap.creamTotalLbs).toFixed(1)} skim=${Number(snap.skimTotalLbs).toFixed(1)}`)
+  console.log(`[SeparatorSM] CLOSE batch ${row.batchId} reason=${endReason} input=${closeInput.toFixed(1)} cream=${closeCream.toFixed(1)} skim=${closeSkim.toFixed(1)}`)
 
   const closedBatchId = openBatchId
   openBatchId = null
+  openBaselines = null
   machineState = STATE_IDLE
   rpmLowTicks = 0
   feedPermitZeroTicks = 0
+
+  // Phantom-reopen guard: a batch that opened on a flat totalizer (idle reopen /
+  // boundary swap / recovery with no new flow) baselines to ~0 input. Skip the
+  // NS emit entirely and mark it 'skipped' so it doesn't post a 0-qty unbuild
+  // (processSeparationBatch would throw "inputVolume must be > 0") or clutter the
+  // error log. This is the no-duplicate outcome the baselining is for.
+  if (closeInput < SEPARATION_MIN_INPUT_LBS) {
+    console.log(`[SeparatorSM] SKIP emit for batch ${row.batchId} — baselined input ${closeInput.toFixed(1)} lb below ${SEPARATION_MIN_INPUT_LBS} lb floor (phantom reopen, no new flow)`)
+    await db.MesSeparationBatch.update(
+      { status: 'skipped', errorMessage: `no flow over batch window (input ${closeInput.toFixed(1)} lb)` },
+      { where: { id: closedBatchId } },
+    )
+    const skipped = await db.MesSeparationBatch.findByPk(closedBatchId)
+    if (skipped) statusStore.pushSeparationBatchFromDbRow(skipped)
+    statusStore.pushEvent('separation.end', `Closed separation batch ${row.batchId} (${endReason}) — skipped, no flow`, {
+      batchId: row.batchId, endReason, status: 'skipped',
+    })
+    return
+  }
 
   // Hand off to the NS-emit path. Re-load the row to pass the canonical
   // payload shape it expects.
@@ -434,6 +493,14 @@ async function hydrateFromDb() {
     }
     openBatchId = row.id
     machineState = STATE_RUNNING
+    // Restore the totalizer baselines so the resumed batch keeps computing
+    // volume as (current − open reading). Null on pre-baseline rows → treated
+    // as 0 (legacy raw-totalizer behavior for that one in-flight batch).
+    openBaselines = {
+      feed: Number(row.feedStartLbs) || 0,
+      cream: Number(row.creamStartLbs) || 0,
+      skim: Number(row.skimStartLbs) || 0,
+    }
     // Seed prevSnapshot from the stored snapshot fields so boundary detection
     // has a baseline. The first tick after hydrate will repopulate it fully.
     const prevDests = row.prevDestinationsJson ? JSON.parse(row.prevDestinationsJson) : ['', '', '', '']

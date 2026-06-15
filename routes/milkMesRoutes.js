@@ -10,6 +10,11 @@ router.post('/bulk-milk/flow', controller.processBulkMilkFlow)
 // View collected data
 router.get('/separation/batches', controller.getSeparationBatches)
 
+// Separation Review — correct + retry, or reject, a pending_ns/error batch
+router.get('/separation/product-indices', controller.getProductIndexOptions)
+router.post('/separation/batches/:id/retry', controller.retrySeparationBatch)
+router.post('/separation/batches/:id/reject', controller.rejectSeparationBatch)
+
 // SunApps UI endpoints
 router.post('/bulk-milk/register', controller.registerBulkMilkRun)
 router.post('/bulk-milk/complete', controller.completeBulkMilkRun)

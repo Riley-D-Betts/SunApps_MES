@@ -64,8 +64,13 @@ async function getItemTracking(itemId) {
     }
   }
   if (!resolved) {
-    console.warn(`[NsInventoryLookup] Could not resolve tracking for item ${itemId} — defaulting to no tracking`)
-    resolved = { isLot: false, useBins: false, cost: 0 }
+    // Don't cache the default — a transient gateway miss (we see ECONNREFUSED /
+    // "fetch failed" intermittently) would otherwise permanently poison this
+    // item as no-tracking, flipping anyLotTracked() false for every WO that
+    // carries it → "configure the inventory detail in line N" on every issue
+    // until restart (Bug A). Return the default but let the next call retry.
+    console.warn(`[NsInventoryLookup] Could not resolve tracking for item ${itemId} — defaulting to no tracking (not caching)`)
+    return { isLot: false, useBins: false, cost: 0 }
   }
   _trackingCache.set(key, resolved)
   return resolved
