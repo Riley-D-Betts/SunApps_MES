@@ -212,6 +212,9 @@ async function processSeparationBatch(data) {
     throw err
   }
 
+  // Function-scoped so the catch can log the exact body NS rejected.
+  let capturedBody = null
+
   try {
     const needCream = !!(creamDest && (creamVolume || 0) > 0)
     const needSkim = !!(skimDest && (skimVolume || 0) > 0)
@@ -327,6 +330,7 @@ async function processSeparationBatch(data) {
       })
     }
     if (componentItems.length > 0) body.component = { items: componentItems }
+    capturedBody = body
 
     if (config.MES_DRY_RUN) {
       console.log(`[MilkMesService] DRY RUN — batch ${batchId} saved, skipping NS unbuild. Payload:\n${JSON.stringify(body, null, 2)}`)
@@ -345,17 +349,33 @@ async function processSeparationBatch(data) {
     // are bin-tracked / not lot-tracked (raw conventional/organic milk), so a
     // bin-only adjustment lands cleanly.
     if (sourceItem?.id && sourceBinId && inputVolume > 0) {
-      const onHand = await inventoryAdjustment.getBinQtyOnHand(sourceItem.id, sourceBinId)
+      let onHand = await inventoryAdjustment.getBinQtyOnHand(sourceItem.id, sourceBinId)
       if (onHand + 1e-6 < inputVolume) {
         const shortfall = inputVolume - onHand
         console.log(`[MilkMesService] Source bin short for unbuild on batch ${batchId}: item ${sourceItem.id} bin ${sourceBinId} has ${onHand.toFixed(1)}, need ${inputVolume.toFixed(1)} (Δ ${shortfall.toFixed(1)}) — auto-adjusting`)
-        await inventoryAdjustment.applyShortfallAdjustment({
+        const adj = await inventoryAdjustment.applyShortfallAdjustment({
           sourceBinId,
           itemId: sourceItem.id,
           shortfallQty: shortfall,
           tankName: sourceSilo,
           memo: `Auto-adjust: separation unbuild batch ${batchId} shortfall (+${shortfall.toFixed(2)} lb)`,
         })
+        if (!adj?.ok) {
+          console.warn(`[MilkMesService] Source bin auto-adjust for batch ${batchId} did not succeed: ${adj?.error || adj?.skipped || 'unknown'}`)
+        }
+        // NS inventorybalance lags the adjustment POST by a few seconds. Without
+        // waiting, the unbuild below sees the still-short balance and NS clamps
+        // the source assignment below the line qty, rejecting with "The total
+        // inventory detail quantity must be N". Poll (backoff) until the bin
+        // reflects the adjustment, mirroring the WO-issue shortfall path.
+        for (const delay of [1000, 2000, 3000]) {
+          if (onHand + 1e-6 >= inputVolume) break
+          await new Promise(r => setTimeout(r, delay))
+          onHand = await inventoryAdjustment.getBinQtyOnHand(sourceItem.id, sourceBinId)
+        }
+        if (onHand + 1e-6 < inputVolume) {
+          console.warn(`[MilkMesService] Source bin still short after adjust+poll for batch ${batchId}: on-hand ${onHand.toFixed(1)} < ${inputVolume.toFixed(1)} — submitting anyway`)
+        }
       }
     }
 
@@ -377,11 +397,19 @@ async function processSeparationBatch(data) {
 
   } catch (err) {
     console.error(`[MilkMesService] Failed to create unbuild for batch ${batchId}:`, err.message)
+    // Log the exact rejected body so a "total inventory detail quantity must be
+    // N" (assignment clamped / wrapper ignored) can be diagnosed without guessing
+    // at the shape — mirrors the blend/surge issue diagnostics. body may be
+    // undefined if we threw before building it.
+    const rejectedBody = capturedBody
+    if (rejectedBody) console.error(`[MilkMesService] rejected assemblyUnbuild body for batch ${batchId}: ${JSON.stringify(rejectedBody)}`)
     await record.update({ status: 'error', errorMessage: err.message, processedAt: new Date(clock.now()) })
     await db.MesProcessingLog.create({
       eventType: 'separation_unbuild', sourceId: batchId,
       nsTransactionType: 'assemblyUnbuild', nsTransactionId: null,
-      payload: JSON.stringify(data), result: null, success: false, errorMessage: err.message,
+      payload: JSON.stringify(data),
+      result: rejectedBody ? JSON.stringify({ rejectedBody }) : null,
+      success: false, errorMessage: err.message,
     })
     err.summary = { ...summary, status: 'error', errorMessage: err.message }
     throw err
