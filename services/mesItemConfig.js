@@ -189,31 +189,36 @@ const HISTORIAN_ITEM_MAP = {
 // not been created yet; batches that land on a null entry are deliberately
 // dropped to `pending_ns` so we have a list of what still needs to be
 // created in NetSuite before the flow is end-to-end.
+// Names mirror the NS item record's itemid (verified against NS 2026-06-15), not
+// old marketing labels — so logs/dashboard match what NetSuite shows. Only the
+// `name` is display; the `id` is what drives the unbuild. Items not present in
+// the sandbox (5405/5402 UF, 8366/8367/8368 A2 fat levels, 5406 Grade A) follow
+// the same naming convention but are marked unverified.
 const PRODUCT_INDEX_ITEM_MAP = {
-  1:  { id: 5416, name: 'Conventional Whole 3.5%' },
-  2:  { id: 5413, name: 'Conventional Whole 3.25%' },
-  3:  { id: 5412, name: 'Conventional Reduced Fat 2%' },
-  4:  { id: 5415, name: 'Conventional Low Fat 1%' },
-  5:  { id: 8163, name: 'Conventional Fat Free' },
-  6:  { id: 5401, name: 'Organic Whole 3.5%' },
-  7:  { id: 5411, name: 'Organic Whole 3.25%' },
-  8:  { id: 5410, name: 'Organic Reduced Fat 2%' },
-  9:  { id: 5409, name: 'Organic Low Fat 1%' },
-  10: { id: 5482, name: 'Organic Fat Free' },
-  11: { id: 5480, name: 'Conventional Cream 40%' },
-  12: { id: 5483, name: 'Organic Cream 40%' },
-  13: { id: 5405, name: 'Conventional UF Milk' },
-  14: { id: 5402, name: 'Organic UF Milk' },
-  15: { id: 5417, name: 'Raw Conventional' },
-  16: { id: 5404, name: 'Raw Organic' },
+  1:  { id: 5416, name: 'Raw conventional 3.5%' },
+  2:  { id: 5413, name: 'Raw conventional 3.25%' },
+  3:  { id: 5412, name: 'Raw conventional 2%' },
+  4:  { id: 5415, name: 'Raw conventional 1%' },
+  5:  { id: 8163, name: 'Raw conventional 0% (skim)' },
+  6:  { id: 5401, name: 'Raw organic 3.5%' },
+  7:  { id: 5411, name: 'Raw organic 3.25%' },
+  8:  { id: 5410, name: 'Raw organic 2%' },
+  9:  { id: 5409, name: 'Raw organic 1%' },
+  10: { id: 5482, name: 'Raw organic 0% (skim)' },
+  11: { id: 5480, name: 'Raw conventional cream (40%)' },
+  12: { id: 5483, name: 'Raw organic cream (40%)' },
+  13: { id: 5405, name: 'Raw conventional UF milk' },     // not a standardized output; unverified in sandbox
+  14: { id: 5402, name: 'Raw organic UF milk' },          // not a standardized output; unverified in sandbox
+  15: { id: 5417, name: 'Raw conventional milk' },        // raw bulk source (pre-separation)
+  16: { id: 5404, name: 'Raw organic milk' },             // raw bulk source (pre-separation)
   19: { id: null, name: 'Water' },
   20: { id: null, name: 'Blowback' },
-  21: { id: 5403, name: 'Raw A2 Organic' },
-  22: { id: 8368, name: 'A2 Organic Whole 3.25%' },
-  23: { id: 8367, name: 'A2 Organic Reduced Fat 2%' },
-  24: { id: 8366, name: 'A2 Organic Low Fat 1%' },
-  25: { id: 5484, name: 'A2 Organic Fat Free' },
-  26: { id: 8365, name: 'A2 Organic Cream' },
+  21: { id: 5403, name: 'Raw organic A2 milk' },          // raw bulk source (pre-separation)
+  22: { id: 8368, name: 'Raw organic A2 3.25%' },         // unverified in sandbox
+  23: { id: 8367, name: 'Raw organic A2 2%' },            // unverified in sandbox
+  24: { id: 8366, name: 'Raw organic A2 1%' },            // unverified in sandbox
+  25: { id: 5484, name: 'Raw organic A2 0% (skim)' },
+  26: { id: 8365, name: 'Raw organic A2 cream (40%)' },
 }
 
 // Layer 2 → Layer 3 translation: each raw FG (blend tank assembly output) maps
