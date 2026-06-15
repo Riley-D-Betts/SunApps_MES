@@ -265,6 +265,34 @@ async function tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBi
   return !!result?.ok
 }
 
+// NS rejects a lot-tracked issue with "The following Inventory numbers are not
+// available: [Item:…, Number:<lot>, Quantity:N, On Hand:-N, …]" when the lot the
+// body pinned went negative BETWEEN allocation and POST — the surge totalizer
+// consuming raw-FG faster than the blend tank completes it into that lot. See Bug B.
+function isInventoryUnavailable(err) {
+  return /Inventory numbers are not available/i.test(err?.message || '')
+}
+
+// POST a surge workOrderIssue, retrying ONCE on the inventory-unavailable
+// signature above. The retry REBUILDS the body via buildWoIssueBody: by retry
+// time the pinned lot reads available<=0, so buildWoIssueBody's own lot
+// shortfall path auto-adjusts the source bin up and re-allocates onto a covered
+// lot (the negative lot is left as-is — it's the blend under-delivery / waste).
+// Reuses the same machinery as the query-time shortfall branch. Returns
+// { nsResult, body }.
+async function postSurgeIssueWithShortfallRetry({ nsWorkOrderId, targetItemId, quantity, binId, bomLines, body }) {
+  try {
+    const nsResult = await core.netsuitePost(`/record/v1/workOrder/${nsWorkOrderId}/!transform/workOrderIssue`, body)
+    return { nsResult, body }
+  } catch (err) {
+    if (!isInventoryUnavailable(err)) throw err
+    console.warn(`[SurgeTankMesService] WO ${nsWorkOrderId} lot unavailable at POST (item ${targetItemId}) — rebuilding with shortfall auto-adjust and retrying`)
+    const rebuilt = await buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, binId, bomLines)
+    const nsResult = await core.netsuitePost(`/record/v1/workOrder/${nsWorkOrderId}/!transform/workOrderIssue`, rebuilt.body)
+    return { nsResult, body: rebuilt.body }
+  }
+}
+
 function extractNsIssueId(nsResult) {
   if (nsResult?.body?.id) return String(nsResult.body.id)
   if (nsResult?.id) return String(nsResult.id)
@@ -1124,7 +1152,12 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
       ? ` via ${allocations.map(a => `lot ${a.lotName}@${a.binName} ${a.qty.toFixed(1)}`).join(' + ')}`
       : ''
     console.log(`[SurgeTankMesService] tick issue UHT ${batch.feedingUhtId} → WO ${batch.nsWorkOrderId} (${batch.tankId}): ${deltaLbs.toFixed(1)} lb "${component.itemName}" (NS ${component.itemId}, ${component.resolvedFrom})${allocSummary}`)
-    const nsResult = await core.netsuitePost(`/record/v1/workOrder/${batch.nsWorkOrderId}/!transform/workOrderIssue`, body)
+    const issued = await postSurgeIssueWithShortfallRetry({
+      nsWorkOrderId: batch.nsWorkOrderId, targetItemId: component.itemId,
+      quantity: deltaLbs, binId: component.binId, bomLines, body,
+    })
+    body = issued.body
+    const nsResult = issued.nsResult
     const nsIssueId = extractNsIssueId(nsResult)
 
     await state.update({
