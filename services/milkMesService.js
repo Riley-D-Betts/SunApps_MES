@@ -303,7 +303,12 @@ async function processSeparationBatch(data) {
     if (sourceBinId) {
       body.inventoryDetail = {
         inventoryAssignment: {
-          items: [{ quantity: unbuildQty, binnumber: { id: sourceBinId } }],
+          // inventoryStatus: { id: 1 } ("Good") is REQUIRED — NS silently drops
+          // an assignment without it on status-managed items, crediting 0 and
+          // rejecting with "The total inventory detail quantity must be N". This
+          // matches the proven-working surge bin-only shape (buildComponentDetail
+          // camelCase path). See Bug G / [[ns-wo-issue-shape]].
+          items: [{ quantity: unbuildQty, binnumber: { id: sourceBinId }, inventoryStatus: { id: 1 } }],
         },
       }
     }
@@ -316,7 +321,7 @@ async function processSeparationBatch(data) {
         item: creamItemId,
         quantity: creamVolume,
         componentInventoryDetail: creamDest.binId ? {
-          inventoryAssignment: { items: [{ quantity: creamVolume, binnumber: { id: creamDest.binId } }] },
+          inventoryAssignment: { items: [{ quantity: creamVolume, binnumber: { id: creamDest.binId }, inventoryStatus: { id: 1 } }] },
         } : undefined,
       })
     }
@@ -325,7 +330,7 @@ async function processSeparationBatch(data) {
         item: skimItem.id,
         quantity: skimVolume,
         componentInventoryDetail: skimDest.binId ? {
-          inventoryAssignment: { items: [{ quantity: skimVolume, binnumber: { id: skimDest.binId } }] },
+          inventoryAssignment: { items: [{ quantity: skimVolume, binnumber: { id: skimDest.binId }, inventoryStatus: { id: 1 } }] },
         } : undefined,
       })
     }
