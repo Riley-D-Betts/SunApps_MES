@@ -303,11 +303,10 @@ async function processSeparationBatch(data) {
     if (sourceBinId) {
       body.inventoryDetail = {
         inventoryAssignment: {
-          // inventoryStatus: { id: 1 } ("Good") is REQUIRED — NS silently drops
-          // an assignment without it on status-managed items, crediting 0 and
-          // rejecting with "The total inventory detail quantity must be N". This
-          // matches the proven-working surge bin-only shape (buildComponentDetail
-          // camelCase path). See Bug G / [[ns-wo-issue-shape]].
+          // inventoryStatus: { id: 1 } ("Good") mirrors the surge bin-only shape.
+          // NOTE: it is NOT what gates the "must be N" error — sandbox A/B testing
+          // showed NS accepts the assignment with or without it. The real gate is
+          // available >= request (see the source-bin buffer pre-check below).
           items: [{ quantity: unbuildQty, binnumber: { id: sourceBinId }, inventoryStatus: { id: 1 } }],
         },
       }
@@ -348,16 +347,23 @@ async function processSeparationBatch(data) {
       return { success: true, duplicate: false, batchId, nsTransactionId: null, status: 'dry_run', wastePercent: wastePercent != null ? parseFloat(wastePercent.toFixed(2)) : null, summary: { ...summary, status: 'dry_run' } }
     }
 
-    // Pre-check source bin on-hand. NS will 400 the unbuild outright if the
-    // source assembly item doesn't have enough in the source bin, so bump the
-    // bin up by exactly the shortfall before submitting. Source items here
-    // are bin-tracked / not lot-tracked (raw conventional/organic milk), so a
-    // bin-only adjustment lands cleanly.
+    // Pre-check source bin on-hand. The unbuild requires the source bin to hold
+    // STRICTLY MORE than the unbuild quantity: requesting exactly the available
+    // amount is rejected with "The total inventory detail quantity must be N"
+    // (verified in sandbox) — NS stores available at higher precision than our
+    // 2dp request, so an exact request drifts microscopically over. So top the
+    // bin up to inputVolume + a small buffer, not exactly inputVolume. The buffer
+    // (a few lb on a ~500k lb transfer) is reconciled away when the silo settles
+    // at rest. Source items are bin-tracked raw milk, so a bin-only adjust lands
+    // cleanly. (inventoryStatus on the assignment is NOT what gates this — both
+    // shapes are accepted; the gate is purely available >= request.)
+    const UNBUILD_SOURCE_BUFFER_LBS = 5
     if (sourceItem?.id && sourceBinId && inputVolume > 0) {
+      const target = inputVolume + UNBUILD_SOURCE_BUFFER_LBS
       let onHand = await inventoryAdjustment.getBinQtyOnHand(sourceItem.id, sourceBinId)
-      if (onHand + 1e-6 < inputVolume) {
-        const shortfall = inputVolume - onHand
-        console.log(`[MilkMesService] Source bin short for unbuild on batch ${batchId}: item ${sourceItem.id} bin ${sourceBinId} has ${onHand.toFixed(1)}, need ${inputVolume.toFixed(1)} (Δ ${shortfall.toFixed(1)}) — auto-adjusting`)
+      if (onHand + 1e-6 < target) {
+        const shortfall = target - onHand
+        console.log(`[MilkMesService] Source bin short for unbuild on batch ${batchId}: item ${sourceItem.id} bin ${sourceBinId} has ${onHand.toFixed(1)}, need ${inputVolume.toFixed(1)}+${UNBUILD_SOURCE_BUFFER_LBS} buffer (Δ ${shortfall.toFixed(1)}) — auto-adjusting`)
         const adj = await inventoryAdjustment.applyShortfallAdjustment({
           sourceBinId,
           itemId: sourceItem.id,
@@ -368,18 +374,15 @@ async function processSeparationBatch(data) {
         if (!adj?.ok) {
           console.warn(`[MilkMesService] Source bin auto-adjust for batch ${batchId} did not succeed: ${adj?.error || adj?.skipped || 'unknown'}`)
         }
-        // NS inventorybalance lags the adjustment POST by a few seconds. Without
-        // waiting, the unbuild below sees the still-short balance and NS clamps
-        // the source assignment below the line qty, rejecting with "The total
-        // inventory detail quantity must be N". Poll (backoff) until the bin
-        // reflects the adjustment, mirroring the WO-issue shortfall path.
+        // NS inventorybalance lags the adjustment POST by a few seconds. Poll
+        // (backoff) until the bin reflects the new on-hand before submitting.
         for (const delay of [1000, 2000, 3000]) {
-          if (onHand + 1e-6 >= inputVolume) break
+          if (onHand + 1e-6 >= target) break
           await new Promise(r => setTimeout(r, delay))
           onHand = await inventoryAdjustment.getBinQtyOnHand(sourceItem.id, sourceBinId)
         }
-        if (onHand + 1e-6 < inputVolume) {
-          console.warn(`[MilkMesService] Source bin still short after adjust+poll for batch ${batchId}: on-hand ${onHand.toFixed(1)} < ${inputVolume.toFixed(1)} — submitting anyway`)
+        if (onHand + 1e-6 < target) {
+          console.warn(`[MilkMesService] Source bin still short after adjust+poll for batch ${batchId}: on-hand ${onHand.toFixed(1)} < ${target.toFixed(1)} — submitting anyway`)
         }
       }
     }
