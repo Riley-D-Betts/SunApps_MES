@@ -161,7 +161,7 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
     allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
     let allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
     if (allocatedQty + 1e-6 < quantity) {
-      const shortfall = quantity - allocatedQty
+      const shortfall = quantity - allocatedQty + SHORTFALL_BUFFER_LBS
       const adjusted = await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall })
       if (adjusted) {
         // NS inventorybalance view lags the inventoryAdjustment POST by a
@@ -196,7 +196,7 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
       const currentOnHand = preferredBinId
         ? await inventoryAdjustment.getBinQtyOnHand(targetItemId, preferredBinId)
         : 0
-      const realShortfall = quantity - currentOnHand
+      const realShortfall = quantity - currentOnHand + SHORTFALL_BUFFER_LBS
       const adjusted = preferredBinId && realShortfall > 0
         ? await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall: realShortfall })
         : false
@@ -273,6 +273,12 @@ async function postWoIssueWithWrapperRetry({ nsWorkOrderId, targetItemId, quanti
 // a few seconds to reflect the new on-hand. Poll the allocation lookup with
 // backoff (1s, 2s, 3s) instead of giving up on the immediate re-query.
 const SHORTFALL_POLL_DELAYS_MS = [1000, 2000, 3000]
+// When auto-adjusting a source bin up to cover an issue, overshoot by this much
+// so the post-adjust available STRICTLY exceeds the request. NS stores available
+// at higher precision than our 2dp request, so adjusting to exactly the request
+// can leave available a hair under it → "you only have N" / "must be N". The
+// extra few lb are reconciled by the at-rest sweep. See [[assemblyunbuild_must_be_n]].
+const SHORTFALL_BUFFER_LBS = 5
 
 async function pollAllocations(targetItemId, quantity, preferredBinId) {
   let allocations = []

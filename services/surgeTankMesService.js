@@ -139,7 +139,7 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
     allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
     let allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
     if (allocatedQty + 1e-6 < quantity) {
-      const shortfall = quantity - allocatedQty
+      const shortfall = quantity - allocatedQty + SHORTFALL_BUFFER_LBS
       const adjusted = await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall })
       if (adjusted) {
         // Poll with backoff — NS inventorybalance lags the adjustment POST.
@@ -171,7 +171,7 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
       const currentOnHand = preferredBinId
         ? await inventoryAdjustment.getBinQtyOnHand(targetItemId, preferredBinId)
         : 0
-      const realShortfall = quantity - currentOnHand
+      const realShortfall = quantity - currentOnHand + SHORTFALL_BUFFER_LBS
       const adjusted = preferredBinId && realShortfall > 0
         ? await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall: realShortfall })
         : false
@@ -214,6 +214,10 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
 // view lags the inventoryAdjustment POST by a few seconds. See
 // blendTankMesService.pollAllocations for the rationale.
 const SHORTFALL_POLL_DELAYS_MS = [1000, 2000, 3000]
+// Overshoot auto-adjusts so post-adjust available STRICTLY exceeds the request
+// (NS stores available at higher precision than our 2dp request). The extra few
+// lb are reconciled by the at-rest sweep. See [[assemblyunbuild_must_be_n]].
+const SHORTFALL_BUFFER_LBS = 5
 
 async function pollAllocations(targetItemId, quantity, preferredBinId) {
   let allocations = []
@@ -306,7 +310,7 @@ async function postSurgeIssueWithShortfallRetry({ nsWorkOrderId, targetItemId, b
     let totalNeeded = 0
     for (const s of shorts) {
       totalNeeded += s.needed || 0
-      const upBy = s.needed - s.onHand // onHand negative ⇒ upBy > needed
+      const upBy = s.needed - s.onHand + SHORTFALL_BUFFER_LBS // onHand negative ⇒ upBy > needed; +buffer so available strictly exceeds the issue
       if (!(upBy > 0)) continue
       const res = await inventoryAdjustment.applyTargetedLotUpAdjustment({
         binId,
