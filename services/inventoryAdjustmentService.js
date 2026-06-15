@@ -262,6 +262,10 @@ async function submitInventoryAdjustment(args) {
     nsQtyBefore = null,
     lastWoNumber = null,
     memo = null,
+    // When set, adjust THIS specific lot (by name) instead of resolving a lot
+    // via findExistingLotInBin. Needed to top up a NEGATIVE lot — findExistingLotInBin
+    // filters on-hand>0 so it can't see one. See Bug B (surge top-up).
+    explicitLotName = null,
   } = args
 
   if (!binId || !itemId) {
@@ -271,7 +275,9 @@ async function submitInventoryAdjustment(args) {
     return { ok: false, error: 'qtyDelta must be a non-zero finite number', nsAdjustmentId: null, lotId: null, lotName: null }
   }
 
-  const lot = await resolveLotForBinAdjustment({ binId, itemId, qtyDelta, lastWoNumber })
+  const lot = explicitLotName
+    ? { lotId: null, lotName: explicitLotName, isNewLot: false, tracking: await nsInventory.getItemTracking(itemId) }
+    : await resolveLotForBinAdjustment({ binId, itemId, qtyDelta, lastWoNumber })
   if (lot.unresolved) {
     const reason = `lot-tracked item ${itemId} has no existing lot in bin ${binId} and no lastWoNumber for a new-lot ${qtyDelta < 0 ? 'down-' : 'up-'}adjust`
     console.warn(`[InventoryAdjustment] Skipping (${source}) ${tankName || ''}: ${reason}`)
@@ -397,6 +403,26 @@ async function applyShortfallAdjustment({ sourceBinId, itemId, shortfallQty, las
   })
 }
 
+/**
+ * Up-adjust a SPECIFIC lot (by name) in a bin — used to top a negative lot back
+ * up to cover a pending issue. Unlike applyShortfallAdjustment, this targets the
+ * exact lot the WO issue pinned (which may be negative, so findExistingLotInBin
+ * can't see it) rather than finding/creating a positive one. See Bug B.
+ */
+async function applyTargetedLotUpAdjustment({ binId, itemId, lotName, upBy, tankName, memo }) {
+  if (!lotName) return { ok: false, error: 'lotName required', nsAdjustmentId: null }
+  if (!(upBy > 0)) return { ok: false, error: 'upBy must be positive', nsAdjustmentId: null }
+  return submitInventoryAdjustment({
+    binId,
+    itemId,
+    qtyDelta: upBy,
+    source: 'shortfall',
+    tankName,
+    explicitLotName: lotName,
+    memo: memo || `Auto-adjust: top up lot ${lotName} (+${upBy.toFixed(2)} lb)`,
+  })
+}
+
 async function safeAudit(row) {
   try {
     if (!db.MesInventoryAdjustment) return
@@ -409,6 +435,7 @@ async function safeAudit(row) {
 module.exports = {
   submitInventoryAdjustment,
   applyShortfallAdjustment,
+  applyTargetedLotUpAdjustment,
   resolveLotForBinAdjustment,
   findExistingLotInBin,
   getBinQtyOnHand,

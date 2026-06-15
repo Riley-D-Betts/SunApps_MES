@@ -273,23 +273,68 @@ function isInventoryUnavailable(err) {
   return /Inventory numbers are not available/i.test(err?.message || '')
 }
 
+// Pull each unavailable lot's (name, requested qty, current on-hand) out of the
+// NS error. The error conveniently carries the exact lot name we must top up
+// plus the on-hand to compute by how much.
+function parseUnavailableLots(err) {
+  const msg = err?.message || ''
+  const re = /Number:\s*([^,\]]+?)\s*,\s*Quantity:\s*(-?[\d.]+)\s*,\s*On Hand:\s*(-?[\d.]+)/gi
+  const out = []
+  let m
+  while ((m = re.exec(msg)) !== null) {
+    out.push({ lotName: m[1].trim(), needed: parseFloat(m[2]), onHand: parseFloat(m[3]) })
+  }
+  return out
+}
+
 // POST a surge workOrderIssue, retrying ONCE on the inventory-unavailable
-// signature above. The retry REBUILDS the body via buildWoIssueBody: by retry
-// time the pinned lot reads available<=0, so buildWoIssueBody's own lot
-// shortfall path auto-adjusts the source bin up and re-allocates onto a covered
-// lot (the negative lot is left as-is — it's the blend under-delivery / waste).
-// Reuses the same machinery as the query-time shortfall branch. Returns
-// { nsResult, body }.
-async function postSurgeIssueWithShortfallRetry({ nsWorkOrderId, targetItemId, quantity, binId, bomLines, body }) {
+// signature above. The retry TOPS UP the exact pinned lot(s) — adjusting each up
+// by (needed − onHand) so on-hand reaches the issue qty — then re-posts the SAME
+// body. We fabricate onto the real lot the issue references (not a phantom new
+// lot): if blend later completes that lot, the at-rest sweep reconciles the
+// overshoot. See Bug B + [[downstream_waste_tracking]]. Returns { nsResult, body }.
+async function postSurgeIssueWithShortfallRetry({ nsWorkOrderId, targetItemId, binId, body, tankName }) {
   try {
     const nsResult = await core.netsuitePost(`/record/v1/workOrder/${nsWorkOrderId}/!transform/workOrderIssue`, body)
     return { nsResult, body }
   } catch (err) {
     if (!isInventoryUnavailable(err)) throw err
-    console.warn(`[SurgeTankMesService] WO ${nsWorkOrderId} lot unavailable at POST (item ${targetItemId}) — rebuilding with shortfall auto-adjust and retrying`)
-    const rebuilt = await buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, binId, bomLines)
-    const nsResult = await core.netsuitePost(`/record/v1/workOrder/${nsWorkOrderId}/!transform/workOrderIssue`, rebuilt.body)
-    return { nsResult, body: rebuilt.body }
+    const shorts = parseUnavailableLots(err)
+    if (!binId || shorts.length === 0) throw err
+
+    let adjusted = 0
+    let totalNeeded = 0
+    for (const s of shorts) {
+      totalNeeded += s.needed || 0
+      const upBy = s.needed - s.onHand // onHand negative ⇒ upBy > needed
+      if (!(upBy > 0)) continue
+      const res = await inventoryAdjustment.applyTargetedLotUpAdjustment({
+        binId,
+        itemId: targetItemId,
+        lotName: s.lotName,
+        upBy,
+        tankName,
+        memo: `Auto-adjust: surge WO ${nsWorkOrderId} top up lot ${s.lotName} to cover issue (on-hand ${s.onHand} → +${upBy.toFixed(2)} lb)`,
+      })
+      if (res?.ok) {
+        adjusted++
+        console.warn(`[SurgeTankMesService] WO ${nsWorkOrderId} topped up lot ${s.lotName} by ${upBy.toFixed(2)} lb (was ${s.onHand} on-hand)`)
+      } else {
+        console.warn(`[SurgeTankMesService] WO ${nsWorkOrderId} top-up of lot ${s.lotName} failed: ${res?.error || res?.skipped}`)
+      }
+    }
+    if (!adjusted) throw err
+
+    // NS inventorybalance lags the adjustment POST — wait (with backoff) until the
+    // bin can cover the issue before re-posting the same body.
+    for (const delay of SHORTFALL_POLL_DELAYS_MS) {
+      await new Promise(r => setTimeout(r, delay))
+      const onHand = await inventoryAdjustment.getBinQtyOnHand(targetItemId, binId)
+      if (onHand + 1e-6 >= totalNeeded) break
+    }
+    console.warn(`[SurgeTankMesService] WO ${nsWorkOrderId} retrying issue after topping up ${adjusted} lot(s)`)
+    const nsResult = await core.netsuitePost(`/record/v1/workOrder/${nsWorkOrderId}/!transform/workOrderIssue`, body)
+    return { nsResult, body }
   }
 }
 
@@ -1154,7 +1199,7 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
     console.log(`[SurgeTankMesService] tick issue UHT ${batch.feedingUhtId} → WO ${batch.nsWorkOrderId} (${batch.tankId}): ${deltaLbs.toFixed(1)} lb "${component.itemName}" (NS ${component.itemId}, ${component.resolvedFrom})${allocSummary}`)
     const issued = await postSurgeIssueWithShortfallRetry({
       nsWorkOrderId: batch.nsWorkOrderId, targetItemId: component.itemId,
-      quantity: deltaLbs, binId: component.binId, bomLines, body,
+      binId: component.binId, body, tankName: batch.tankId,
     })
     body = issued.body
     const nsResult = issued.nsResult
