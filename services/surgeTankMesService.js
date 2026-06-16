@@ -1525,6 +1525,129 @@ function clearCaches() {
   _bomCache.clear()
 }
 
+const RETRYABLE_SURGE_STATUSES = ['pending_ns', 'error']
+
+async function getAllBatches({ status, limit = 200 } = {}) {
+  const where = {}
+  if (status) {
+    const statuses = String(status).split(',').map(s => s.trim()).filter(Boolean)
+    if (statuses.length === 1) where.status = statuses[0]
+    else if (statuses.length > 1) where.status = { [db.Sequelize.Op.in]: statuses }
+  }
+  const batches = await db.MesSurgeTankBatch.findAll({
+    where,
+    order: [['createdAt', 'DESC']],
+    limit: Math.min(Number(limit) || 200, 500),
+  })
+  return { success: true, batches }
+}
+
+async function retrySurgeBatch(id, { nsItemId, decidedBy } = {}) {
+  const batch = await db.MesSurgeTankBatch.findByPk(id)
+  if (!batch) throw new Error(`Batch ${id} not found`)
+  if (!RETRYABLE_SURGE_STATUSES.includes(batch.status)) {
+    throw new Error(`Batch ${id} has status '${batch.status}' — only ${RETRYABLE_SURGE_STATUSES.join('/')} are retryable`)
+  }
+
+  if (nsItemId) await batch.update({ mesItem: String(nsItemId) })
+  await batch.reload()
+
+  const itemId = batch.mesItem
+  if (!itemId) throw new Error(`No NS item set for batch ${id} — provide nsItemId`)
+
+  if (config.MES_DRY_RUN) {
+    await batch.update({ status: 'active', errorMessage: null })
+    await batch.reload()
+    return { success: true, batch }
+  }
+
+  const sourceEntity = batch.feedingFromEntName || null
+  const body = {
+    assemblyItem: { id: Number(itemId) },
+    quantity: 1,
+    location: { id: 30 },
+    subsidiary: { id: 3 },
+    isWip: true,
+    custbody_mes_tank_id: batch.tankId,
+    custbody_mes_product_name: batch.productName,
+    custbody_mes_source_entity: sourceEntity,
+    custbody_mes_dest_entity: batch.tankId,
+  }
+  if (batch.componentItemId) {
+    body.item = { items: [{ item: { id: Number(batch.componentItemId) }, quantity: 1 }] }
+  }
+
+  try {
+    const nsResult = await core.netsuitePost('/record/v1/workOrder', body)
+
+    let nsWorkOrderId = nsResult?.id || null
+    let nsWorkOrderNumber = nsResult?.tranid || null
+    if (!nsWorkOrderId && nsResult?.headers?.location) {
+      const match = nsResult.headers.location.match(/\/(\d+)$/)
+      if (match) {
+        nsWorkOrderId = match[1]
+        try {
+          const woDetail = await core.netsuiteGet(`/record/v1/workOrder/${nsWorkOrderId}?fields=tranId`)
+          const woBody = woDetail?.body || woDetail
+          nsWorkOrderNumber = woBody?.tranId || woBody?.tranid || null
+        } catch (e) {
+          console.warn(`[SurgeTankMesService] retry: could not fetch WO details: ${e.message}`)
+        }
+      }
+    }
+
+    await batch.update({ nsWorkOrderId, nsWorkOrderNumber, status: 'active', errorMessage: null })
+    await db.MesProcessingLog.create({
+      eventType: 'surge_tank_wo_retry', sourceId: `${batch.tankId}:${batch.productName}`,
+      nsTransactionType: 'workOrder', nsTransactionId: nsWorkOrderId,
+      payload: JSON.stringify({ batchId: id, nsItemId, decidedBy }),
+      result: JSON.stringify({ nsWorkOrderId, nsWorkOrderNumber }), success: true,
+    })
+    console.log(`[SurgeTankMesService] retry: "${batch.productName}" on ${batch.tankId} → NS WO ${nsWorkOrderNumber} (${nsWorkOrderId})`)
+    await batch.reload()
+    return { success: true, batch }
+  } catch (err) {
+    console.error(`[SurgeTankMesService] retry: failed for batch ${id}:`, err.message)
+    await batch.update({ status: 'error', errorMessage: err.message })
+    await db.MesProcessingLog.create({
+      eventType: 'surge_tank_wo_retry', sourceId: `${batch.tankId}:${batch.productName}`,
+      nsTransactionType: 'workOrder',
+      payload: JSON.stringify({ batchId: id, nsItemId, decidedBy }),
+      success: false, errorMessage: err.message,
+    })
+    await batch.reload()
+    return { success: false, batch, error: err.message }
+  }
+}
+
+async function rejectSurgeBatch(id, { decidedBy, reason } = {}) {
+  const batch = await db.MesSurgeTankBatch.findByPk(id)
+  if (!batch) throw new Error(`Batch ${id} not found`)
+  if (!RETRYABLE_SURGE_STATUSES.includes(batch.status)) {
+    throw new Error(`Batch ${id} has status '${batch.status}' — only ${RETRYABLE_SURGE_STATUSES.join('/')} can be rejected`)
+  }
+  const msg = [decidedBy ? `Rejected by ${decidedBy}` : 'Rejected', reason].filter(Boolean).join(': ')
+  await batch.update({ status: 'rejected', errorMessage: msg })
+  await batch.reload()
+  return { success: true, batch }
+}
+
+function getSurgeProductOptions() {
+  const byNsId = new Map()
+  for (const [name, nsId] of Object.entries(productParser.FG_ITEM_MAP)) {
+    if (!byNsId.has(nsId)) byNsId.set(nsId, name)
+  }
+  for (const p of productParser.PRODUCT_CATALOG) {
+    if (!byNsId.has(p.nsId)) byNsId.set(p.nsId, p.name)
+  }
+  return {
+    success: true,
+    options: Array.from(byNsId.entries())
+      .map(([nsId, name]) => ({ nsId, name }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+  }
+}
+
 module.exports = {
   processWOStart,
   processWOEnd,
@@ -1532,5 +1655,9 @@ module.exports = {
   tickCompletionForBatch,
   tickAllActiveBatches,
   resolveSurgeTankComponent,
+  getAllBatches,
+  retrySurgeBatch,
+  rejectSurgeBatch,
+  getSurgeProductOptions,
   clearCaches,
 }

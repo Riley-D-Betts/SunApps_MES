@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const controller = require('../controllers/milkMesController')
 const blendTankController = require('../controllers/blendTankMesController')
+const surgeTankController = require('../controllers/surgeTankMesController')
 
 // Receive raw data from MES_Service
 router.post('/separation/batch', controller.processSeparationBatch)
@@ -30,7 +31,17 @@ router.post('/blend-tank/clear-stale', blendTankController.clearStaleBatches)
 
 // Blend tank — SunApps UI endpoints
 router.get('/blend-tank/active', blendTankController.getActiveBatches)
+router.get('/blend-tank/batches', blendTankController.getAllBatches)
+router.get('/blend-tank/product-options', blendTankController.getProductOptions)
+router.post('/blend-tank/batches/:id/retry', blendTankController.retryBatch)
+router.post('/blend-tank/batches/:id/reject', blendTankController.rejectBatch)
 router.get('/blend-tank/:id/components', blendTankController.getBatchComponents)
 router.post('/blend-tank/:id/issue-ingredient', blendTankController.issueIngredient)
+
+// Surge tank — SunApps UI endpoints
+router.get('/surge-tank/batches', surgeTankController.getAllBatches)
+router.get('/surge-tank/product-options', surgeTankController.getProductOptions)
+router.post('/surge-tank/batches/:id/retry', surgeTankController.retryBatch)
+router.post('/surge-tank/batches/:id/reject', surgeTankController.rejectBatch)
 
 module.exports = router

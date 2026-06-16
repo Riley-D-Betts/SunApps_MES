@@ -1817,6 +1817,136 @@ async function tickCompletionForBatch(batch) {
   })
 }
 
+const RETRYABLE_BLEND_STATUSES = ['pending_ns', 'error']
+
+async function getAllBatches({ status, limit = 200 } = {}) {
+  const where = {}
+  if (status) {
+    const statuses = String(status).split(',').map(s => s.trim()).filter(Boolean)
+    if (statuses.length === 1) where.status = statuses[0]
+    else if (statuses.length > 1) where.status = { [db.Sequelize.Op.in]: statuses }
+  }
+  const batches = await db.MesBlendTankBatch.findAll({
+    where,
+    order: [['createdAt', 'DESC']],
+    limit: Math.min(Number(limit) || 200, 500),
+  })
+  return { success: true, batches }
+}
+
+async function retryBlendBatch(id, { nsItemId, decidedBy } = {}) {
+  const batch = await db.MesBlendTankBatch.findByPk(id)
+  if (!batch) throw new Error(`Batch ${id} not found`)
+  if (!RETRYABLE_BLEND_STATUSES.includes(batch.status)) {
+    throw new Error(`Batch ${id} has status '${batch.status}' — only ${RETRYABLE_BLEND_STATUSES.join('/')} are retryable`)
+  }
+
+  if (nsItemId) await batch.update({ mesItem: String(nsItemId) })
+  await batch.reload()
+
+  const itemId = batch.mesItem
+  if (!itemId) throw new Error(`No NS item set for batch ${id} — provide nsItemId`)
+
+  if (config.MES_DRY_RUN) {
+    await batch.update({ status: 'active', errorMessage: null })
+    await batch.reload()
+    return { success: true, batch }
+  }
+
+  const body = {
+    assemblyItem: { id: Number(itemId) },
+    quantity: batch.batchSize || 1,
+    location: { id: 30 },
+    subsidiary: { id: 3 },
+    isWip: true,
+    custbody_mes_tank_id: batch.tankId,
+    custbody_mes_product_name: batch.productName,
+    custbody_mes_source_entity: batch.fromEntName || null,
+    custbody_mes_dest_entity: batch.toEntName || null,
+  }
+
+  try {
+    let nsResult
+    try {
+      nsResult = await core.netsuitePost('/record/v1/workOrder', body)
+    } catch (woCreateErr) {
+      if (woCreateErr.message?.includes('at least one line item')) {
+        console.warn(`[BlendTankMesService] retry: item ${itemId} has no BOM — seeding component`)
+        body.item = { items: [{ item: { id: Number(itemId) }, quantity: 0 }] }
+        nsResult = await core.netsuitePost('/record/v1/workOrder', body)
+      } else {
+        throw woCreateErr
+      }
+    }
+
+    let nsWorkOrderId = nsResult?.id || null
+    let nsWorkOrderNumber = nsResult?.tranid || null
+    if (!nsWorkOrderId && nsResult?.headers?.location) {
+      const match = nsResult.headers.location.match(/\/(\d+)$/)
+      if (match) {
+        nsWorkOrderId = match[1]
+        try {
+          const woDetail = await core.netsuiteGet(`/record/v1/workOrder/${nsWorkOrderId}?fields=tranId`)
+          const woBody = woDetail?.body || woDetail
+          nsWorkOrderNumber = woBody?.tranId || woBody?.tranid || null
+        } catch (e) {
+          console.warn(`[BlendTankMesService] retry: could not fetch WO details: ${e.message}`)
+        }
+      }
+    }
+
+    await batch.update({ nsWorkOrderId, nsWorkOrderNumber, status: 'active', errorMessage: null })
+    await db.MesProcessingLog.create({
+      eventType: 'blend_tank_wo_retry', sourceId: `${batch.tankId}:${batch.productName}`,
+      nsTransactionType: 'workOrder', nsTransactionId: nsWorkOrderId,
+      payload: JSON.stringify({ batchId: id, nsItemId, decidedBy }),
+      result: JSON.stringify({ nsWorkOrderId, nsWorkOrderNumber }), success: true,
+    })
+    console.log(`[BlendTankMesService] retry: "${batch.productName}" on ${batch.tankId} → NS WO ${nsWorkOrderNumber} (${nsWorkOrderId})`)
+    await batch.reload()
+    return { success: true, batch }
+  } catch (err) {
+    console.error(`[BlendTankMesService] retry: failed for batch ${id}:`, err.message)
+    await batch.update({ status: 'error', errorMessage: err.message })
+    await db.MesProcessingLog.create({
+      eventType: 'blend_tank_wo_retry', sourceId: `${batch.tankId}:${batch.productName}`,
+      nsTransactionType: 'workOrder',
+      payload: JSON.stringify({ batchId: id, nsItemId, decidedBy }),
+      success: false, errorMessage: err.message,
+    })
+    await batch.reload()
+    return { success: false, batch, error: err.message }
+  }
+}
+
+async function rejectBlendBatch(id, { decidedBy, reason } = {}) {
+  const batch = await db.MesBlendTankBatch.findByPk(id)
+  if (!batch) throw new Error(`Batch ${id} not found`)
+  if (!RETRYABLE_BLEND_STATUSES.includes(batch.status)) {
+    throw new Error(`Batch ${id} has status '${batch.status}' — only ${RETRYABLE_BLEND_STATUSES.join('/')} can be rejected`)
+  }
+  const msg = [decidedBy ? `Rejected by ${decidedBy}` : 'Rejected', reason].filter(Boolean).join(': ')
+  await batch.update({ status: 'rejected', errorMessage: msg })
+  await batch.reload()
+  return { success: true, batch }
+}
+
+function getBlendProductOptions() {
+  const byNsId = new Map()
+  for (const [name, nsId] of Object.entries(productParser.RAW_FG_ITEM_MAP)) {
+    if (!byNsId.has(nsId)) byNsId.set(nsId, name)
+  }
+  for (const p of productParser.PRODUCT_CATALOG) {
+    if (!byNsId.has(p.nsId)) byNsId.set(p.nsId, p.name)
+  }
+  return {
+    success: true,
+    options: Array.from(byNsId.entries())
+      .map(([nsId, name]) => ({ nsId, name }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+  }
+}
+
 async function clearStaleBatches() {
   const stale = await db.MesBlendTankBatch.findAll({
     where: { status: ['active', 'dry_run'], nsWorkOrderId: null },
@@ -1840,10 +1970,14 @@ module.exports = {
   processWOEnd,
   processLineFlow,
   getActiveBatches,
+  getAllBatches,
   getBatchComponents,
   issueIngredient,
   tickAllActiveBatches,
   clearStaleBatches,
+  retryBlendBatch,
+  rejectBlendBatch,
+  getBlendProductOptions,
   normalizeTankRef,
   findMatchableUnmatchedInflows,
   clearCaches,
