@@ -21,6 +21,7 @@ const milkRoutes = require('./routes/milkRoutes')
 const liveStatusRoutes = require('./routes/liveStatusRoutes')
 const fgPairingRoutes = require('./routes/fgPairingRoutes')
 const devRoutes = require('./routes/devRoutes')
+const analyticsRoutes = require('./routes/analyticsRoutes')
 const clock = require('./sim/clock')
 
 const app = express()
@@ -178,6 +179,7 @@ app.use('/api/mes/live-status', liveStatusRoutes)
 app.use('/api/mes/fg-pairings', fgPairingRoutes)
 app.use('/api/milk', milkRoutes)
 app.use('/api/mes/dev/replay', devRoutes)
+app.use('/api/mes/analytics', analyticsRoutes)
 
 app.listen(config.PORT, () => {
   console.log(`SunApps MES Service running on port ${config.PORT}`)
