@@ -1,6 +1,6 @@
 {
   "name": "sunapps_mes",
-  "version": "0.0.1",
+  "version": "1.0.1",
   "description": "SunApps MES Service — Historian poller and liquid milk processing",
   "main": "server.js",
   "scripts": {
