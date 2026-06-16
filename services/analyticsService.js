@@ -63,7 +63,7 @@ async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', o
   if (outputField)    attrs.push([fn('SUM', col(outputField)),    'totalOutputLbs'])
   if (completedField) attrs.push([fn('SUM', col(completedField)), 'totalCompletedLbs'])
 
-  const result = await Model.findOne({ where, attributes: attrs, order: [], raw: true })
+  const [result] = await Model.findAll({ where, attributes: attrs, raw: true })
   return {
     batchCount:        Number(result?.batchCount)        || 0,
     avgWastePercent:   result?.avgWastePercent   != null ? Number(result.avgWastePercent)   : null,
