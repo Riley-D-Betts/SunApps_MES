@@ -33,10 +33,14 @@ function splitValues(raw) {
 function buildWhere({ from, to, dateField, tankId, tankField, status, product }) {
   const where = {}
 
-  const dateWhere = {}
-  if (from) dateWhere[Op.gte] = new Date(from)
-  if (to)   dateWhere[Op.lte] = new Date(to)
-  if (Object.keys(dateWhere).length) where[dateField] = dateWhere
+  // NOTE: Op.gte/Op.lte are Symbol keys, which Object.keys() does not see — guard
+  // on the raw inputs instead, or the date range is silently ignored.
+  if (from || to) {
+    const dateWhere = {}
+    if (from) dateWhere[Op.gte] = new Date(from)
+    if (to)   dateWhere[Op.lte] = new Date(to)
+    where[dateField] = dateWhere
+  }
 
   if (tankId) {
     const values = String(tankId).split(',').map(s => s.trim()).filter(Boolean)
@@ -220,10 +224,13 @@ async function getSeparationTrend({ from, to, groupBy, sourceSilo, status }) {
 function buildInvAdjustWhere({ from, to, source, status, binId, itemId, tankName }) {
   const where = {}
 
-  const dateWhere = {}
-  if (from) dateWhere[Op.gte] = new Date(from)
-  if (to)   dateWhere[Op.lte] = new Date(to)
-  if (Object.keys(dateWhere).length) where.createdAt = dateWhere
+  // Op.gte/Op.lte are Symbol keys (invisible to Object.keys) — guard on raw inputs.
+  if (from || to) {
+    const dateWhere = {}
+    if (from) dateWhere[Op.gte] = new Date(from)
+    if (to)   dateWhere[Op.lte] = new Date(to)
+    where.createdAt = dateWhere
+  }
 
   if (source) {
     const values = splitValues(source)
