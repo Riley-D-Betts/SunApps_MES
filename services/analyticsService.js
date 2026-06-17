@@ -1,7 +1,7 @@
 'use strict'
 
 const db = require('../models')
-const { Op, fn, col } = require('sequelize')
+const { Op, fn, col, cast } = require('sequelize')
 
 // ── Sort field whitelists (guard against SQL injection via ORDER BY) ──────────
 
@@ -54,7 +54,7 @@ function buildOrder(sortBy, sortDir, validFields) {
   return [[field, dir]]
 }
 
-async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', outputField = 'cumulativeOutputLbs', completedField = 'cumulativeCompletedLbs' } = {}) {
+async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', outputField = 'cumulativeOutputLbs', completedField = 'cumulativeCompletedLbs', concurrentField = null } = {}) {
   const attrs = [
     [fn('COUNT', col('id')), 'batchCount'],
     [fn('AVG', col('wastePercent')), 'avgWastePercent'],
@@ -62,6 +62,9 @@ async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', o
   ]
   if (outputField)    attrs.push([fn('SUM', col(outputField)),    'totalOutputLbs'])
   if (completedField) attrs.push([fn('SUM', col(completedField)), 'totalCompletedLbs'])
+  // Count batches whose waste is an upper bound because they filled and drained
+  // at once (BIT column → cast to INT so SUM works on SQL Server).
+  if (concurrentField) attrs.push([fn('SUM', cast(col(concurrentField), 'INT')), 'concurrentCount'])
 
   const [result] = await Model.findAll({ where, attributes: attrs, raw: true })
   return {
@@ -70,6 +73,7 @@ async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', o
     totalIssuedLbs:    result?.totalIssuedLbs    != null ? Number(result.totalIssuedLbs)    : null,
     totalOutputLbs:    result?.totalOutputLbs    != null ? Number(result.totalOutputLbs)    : null,
     totalCompletedLbs: result?.totalCompletedLbs != null ? Number(result.totalCompletedLbs) : null,
+    ...(concurrentField ? { concurrentCount: Number(result?.concurrentCount) || 0 } : {}),
   }
 }
 
@@ -143,7 +147,7 @@ async function getSurgeBatches({ from, to, tankId, status, product, sortBy, sort
 
   const [rows, summary] = await Promise.all([
     db.MesSurgeTankBatch.findAll({ where, order, limit: safeLimit, offset: safeOffset }),
-    getSummary(db.MesSurgeTankBatch, where),
+    getSummary(db.MesSurgeTankBatch, where, { concurrentField: 'concurrentFillDrain' }),
   ])
   return { total: summary.batchCount, batches: rows, summary }
 }
