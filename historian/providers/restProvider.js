@@ -1119,8 +1119,8 @@ class RestProvider extends BaseProvider {
    * Read the current value of the per-UHT software milk-flow totalizer (gal).
    * Note: this returns the cached accumulator, which is only updated when
    * getUhtStatus() runs. Callers that need a fresh value must await
-   * getUhtStatus() first (the equipment job poll does this every 15s, which
-   * is fine for the surge-tank tick cadence of every 5 min in production).
+   * getUhtStatus() first (equipment job polls every 5 s; surgeTankJob every
+   * 10 s — combined update interval is ~5 s).
    */
   async getUhtMilkTotalizer(uhtId) {
     return this._uhtMilkGal?.[uhtId] || 0

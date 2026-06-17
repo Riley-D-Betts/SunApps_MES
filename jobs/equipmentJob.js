@@ -4,9 +4,9 @@ const notifyService = require('../services/notifyService')
 // Minimum gal/tick delta required to count as genuine fill (above ~4 gal sensor noise).
 const FILL_NOISE_GAL = 5
 // Consecutive ticks the OTHER tank must exceed the noise floor before we switch designation.
-const SWITCH_TICKS = 4   // 4 × 15s = 60s of sustained fill on the other tank
+const SWITCH_TICKS = 12  // 12 × 5s = 60s of sustained fill on the other tank
 // Consecutive below-noise ticks across ALL connected tanks before clearing (UHT stopped/idle).
-const IDLE_TICKS = 12    // 12 × 15s = 3 min of silence
+const IDLE_TICKS = 36    // 36 × 5s = 3 min of silence
 
 // Persistent fill-tank state per UHT — survives across poll ticks so the badge
 // is sticky and doesn't flicker when the level sensor dips to noise momentarily.

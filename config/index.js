@@ -30,7 +30,10 @@ module.exports = {
   BULK_MILK_CRON: process.env.BULK_MILK_CRON || '*/1 * * * *',
   BLEND_TANK_CRON: process.env.BLEND_TANK_CRON || '*/10 * * * * *',
   SURGE_TANK_CRON: process.env.SURGE_TANK_CRON || '*/10 * * * * *',
-  EQUIPMENT_CRON: process.env.EQUIPMENT_CRON || '*/15 * * * * *',
+  // 5 s keeps the UHT software-totalizer (_uhtMilkGal) at a 5 s integration
+  // step, halving the trapezoidal error vs the old 15 s default.  The equipment
+  // job is a parallel batch OData fetch — 12 polls/min is fine for AVEVA.
+  EQUIPMENT_CRON: process.env.EQUIPMENT_CRON || '*/5 * * * * *',
   // Tick that fires periodic blend-tank WO issues + completions. Production cadence
   // is once every 5 minutes; sandbox can override to e.g. '*/30 * * * * *' for testing.
   TICK_CRON: process.env.TICK_CRON || '*/5 * * * *',
