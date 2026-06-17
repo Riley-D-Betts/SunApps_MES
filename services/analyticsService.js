@@ -1,7 +1,7 @@
 'use strict'
 
 const db = require('../models')
-const { Op, fn, col, cast } = require('sequelize')
+const { Op, fn, col, cast, literal } = require('sequelize')
 
 // ── Sort field whitelists (guard against SQL injection via ORDER BY) ──────────
 
@@ -18,6 +18,15 @@ const SEPARATION_SORT_FIELDS = [
   'batchStart', 'batchEnd', 'createdAt', 'inputVolume', 'creamVolume', 'skimVolume',
   'wasteVolume', 'wastePercent', 'sourceSilo', 'status',
 ]
+const INV_ADJUST_SORT_FIELDS = [
+  'createdAt', 'source', 'status', 'tankName', 'binId', 'itemId',
+  'qtyDelta', 'observedLbs', 'nsQtyBefore',
+]
+
+// Split a comma-separated filter value into a clean array of distinct terms.
+function splitValues(raw) {
+  return String(raw).split(',').map(s => s.trim()).filter(Boolean)
+}
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -77,12 +86,34 @@ async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', o
   }
 }
 
-async function runTrendQuery({ tableName, dateField, issuedField, from, to, groupBy = 'day' }) {
+async function runTrendQuery({ tableName, dateField, issuedField, from, to, groupBy = 'day', tankField, tankId, status, product }) {
   const conditions = [`[${dateField}] IS NOT NULL`]
   const replacements = {}
 
   if (from) { conditions.push(`[${dateField}] >= :from`); replacements.from = new Date(from) }
   if (to)   { conditions.push(`[${dateField}] <= :to`);   replacements.to   = new Date(to)   }
+
+  // Mirror the table's filters so the chart and table always agree.
+  if (tankField && tankId) {
+    const values = splitValues(tankId)
+    if (values.length) {
+      const names = values.map((_, i) => `:tank${i}`)
+      values.forEach((v, i) => { replacements[`tank${i}`] = v })
+      conditions.push(`[${tankField}] IN (${names.join(', ')})`)
+    }
+  }
+  if (status) {
+    const values = splitValues(status)
+    if (values.length) {
+      const names = values.map((_, i) => `:status${i}`)
+      values.forEach((v, i) => { replacements[`status${i}`] = v })
+      conditions.push(`[status] IN (${names.join(', ')})`)
+    }
+  }
+  if (product) {
+    conditions.push(`[productName] LIKE :product`)
+    replacements.product = `%${product}%`
+  }
 
   const dateExpr = groupBy === 'week'
     ? `DATEADD(day, -(DATEPART(weekday, [${dateField}]) - 1), CONVERT(date, [${dateField}]))`
@@ -132,9 +163,9 @@ async function getBlendBatches({ from, to, tankId, status, product, sortBy, sort
   return { total: summary.batchCount, batches: rows, summary }
 }
 
-async function getBlendTrend({ from, to, groupBy }) {
+async function getBlendTrend({ from, to, groupBy, tankId, status, product }) {
   const tableName = db.MesBlendTankBatch.getTableName()
-  return runTrendQuery({ tableName, dateField: 'detectedAt', issuedField: 'cumulativeIssuedLbs', from, to, groupBy })
+  return runTrendQuery({ tableName, dateField: 'detectedAt', issuedField: 'cumulativeIssuedLbs', from, to, groupBy, tankField: 'tankId', tankId, status, product })
 }
 
 // ── Surge Tanks ───────────────────────────────────────────────────────────────
@@ -152,9 +183,9 @@ async function getSurgeBatches({ from, to, tankId, status, product, sortBy, sort
   return { total: summary.batchCount, batches: rows, summary }
 }
 
-async function getSurgeTrend({ from, to, groupBy }) {
+async function getSurgeTrend({ from, to, groupBy, tankId, status, product }) {
   const tableName = db.MesSurgeTankBatch.getTableName()
-  return runTrendQuery({ tableName, dateField: 'detectedAt', issuedField: 'cumulativeIssuedLbs', from, to, groupBy })
+  return runTrendQuery({ tableName, dateField: 'detectedAt', issuedField: 'cumulativeIssuedLbs', from, to, groupBy, tankField: 'tankId', tankId, status, product })
 }
 
 // ── Separation ────────────────────────────────────────────────────────────────
@@ -176,9 +207,134 @@ async function getSeparationBatches({ from, to, sourceSilo, status, sortBy, sort
   return { total: summary.batchCount, batches: rows, summary }
 }
 
-async function getSeparationTrend({ from, to, groupBy }) {
+async function getSeparationTrend({ from, to, groupBy, sourceSilo, status }) {
   const tableName = db.MesSeparationBatch.getTableName()
-  return runTrendQuery({ tableName, dateField: 'batchStart', issuedField: 'inputVolume', from, to, groupBy })
+  return runTrendQuery({ tableName, dateField: 'batchStart', issuedField: 'inputVolume', from, to, groupBy, tankField: 'sourceSilo', tankId: sourceSilo, status })
+}
+
+// ── Inventory Adjustments ───────────────────────────────────────────────────
+// The auto inventory adjustments the system posts to NetSuite — 'sweep' (5-min
+// tank-at-rest reconciliation) and 'shortfall' (inline top-ups before a retry).
+// Every attempt is audited, including dry_run / error / skipped rows.
+
+function buildInvAdjustWhere({ from, to, source, status, binId, itemId, tankName }) {
+  const where = {}
+
+  const dateWhere = {}
+  if (from) dateWhere[Op.gte] = new Date(from)
+  if (to)   dateWhere[Op.lte] = new Date(to)
+  if (Object.keys(dateWhere).length) where.createdAt = dateWhere
+
+  if (source) {
+    const values = splitValues(source)
+    if (values.length === 1) where.source = values[0]
+    else if (values.length > 1) where.source = { [Op.in]: values }
+  }
+  if (status) {
+    const values = splitValues(status)
+    if (values.length === 1) where.status = values[0]
+    else if (values.length > 1) where.status = { [Op.in]: values }
+  }
+  if (binId)  where.binId  = Number(binId)
+  if (itemId) where.itemId = String(itemId)
+  if (tankName) where.tankName = { [Op.like]: `%${tankName}%` }
+
+  return where
+}
+
+async function getInvAdjustSummary(where) {
+  const attrs = [
+    [fn('COUNT', col('id')), 'count'],
+    [fn('SUM', col('qtyDelta')), 'netLbs'],
+    [fn('SUM', literal('CASE WHEN [qtyDelta] > 0 THEN [qtyDelta] ELSE 0 END')), 'netUp'],
+    [fn('SUM', literal('CASE WHEN [qtyDelta] < 0 THEN [qtyDelta] ELSE 0 END')), 'netDown'],
+    [fn('SUM', literal("CASE WHEN [status] = 'error'   THEN 1 ELSE 0 END")), 'errorCount'],
+    [fn('SUM', literal("CASE WHEN [status] = 'dry_run' THEN 1 ELSE 0 END")), 'dryRunCount'],
+    [fn('SUM', literal("CASE WHEN [source] = 'sweep'     THEN 1 ELSE 0 END")), 'sweepCount'],
+    [fn('SUM', literal("CASE WHEN [source] = 'shortfall' THEN 1 ELSE 0 END")), 'shortfallCount'],
+  ]
+  const [r] = await db.MesInventoryAdjustment.findAll({ where, attributes: attrs, raw: true })
+  return {
+    count:          Number(r?.count)          || 0,
+    netLbs:         r?.netLbs   != null ? Number(r.netLbs)   : 0,
+    netUp:          r?.netUp    != null ? Number(r.netUp)    : 0,
+    netDown:        r?.netDown  != null ? Number(r.netDown)  : 0,
+    errorCount:     Number(r?.errorCount)     || 0,
+    dryRunCount:    Number(r?.dryRunCount)    || 0,
+    sweepCount:     Number(r?.sweepCount)     || 0,
+    shortfallCount: Number(r?.shortfallCount) || 0,
+  }
+}
+
+async function getInventoryAdjustments({ from, to, source, status, binId, itemId, tankName, sortBy, sortDir, limit, offset }) {
+  const where = buildInvAdjustWhere({ from, to, source, status, binId, itemId, tankName })
+  const order = buildOrder(sortBy, sortDir, INV_ADJUST_SORT_FIELDS)
+  const safeLimit  = Math.min(Number(limit)  || 200, 500)
+  const safeOffset = Math.max(Number(offset) || 0, 0)
+
+  const [rows, summary] = await Promise.all([
+    db.MesInventoryAdjustment.findAll({ where, order, limit: safeLimit, offset: safeOffset }),
+    getInvAdjustSummary(where),
+  ])
+  return { total: summary.count, adjustments: rows, summary }
+}
+
+async function getInventoryAdjustmentTrend({ from, to, groupBy = 'day', source, status }) {
+  const tableName = db.MesInventoryAdjustment.getTableName()
+  const dateField = 'createdAt'
+  const conditions = [`[${dateField}] IS NOT NULL`]
+  const replacements = {}
+
+  if (from) { conditions.push(`[${dateField}] >= :from`); replacements.from = new Date(from) }
+  if (to)   { conditions.push(`[${dateField}] <= :to`);   replacements.to   = new Date(to)   }
+  if (source) {
+    const values = splitValues(source)
+    if (values.length) {
+      const names = values.map((_, i) => `:source${i}`)
+      values.forEach((v, i) => { replacements[`source${i}`] = v })
+      conditions.push(`[source] IN (${names.join(', ')})`)
+    }
+  }
+  if (status) {
+    const values = splitValues(status)
+    if (values.length) {
+      const names = values.map((_, i) => `:status${i}`)
+      values.forEach((v, i) => { replacements[`status${i}`] = v })
+      conditions.push(`[status] IN (${names.join(', ')})`)
+    }
+  }
+
+  const dateExpr = groupBy === 'week'
+    ? `DATEADD(day, -(DATEPART(weekday, [${dateField}]) - 1), CONVERT(date, [${dateField}]))`
+    : `CONVERT(date, [${dateField}])`
+
+  const sql = `
+    SELECT
+      ${dateExpr} AS [date],
+      COUNT(*) AS [count],
+      ISNULL(SUM([qtyDelta]), 0) AS [netLbs],
+      SUM(CASE WHEN [status] = 'error' THEN 1 ELSE 0 END) AS [errorCount]
+    FROM [${tableName}]
+    WHERE ${conditions.join(' AND ')}
+    GROUP BY ${dateExpr}
+    ORDER BY [date] ASC
+  `
+
+  try {
+    const rows = await db.sequelize.query(sql, {
+      replacements,
+      type: db.Sequelize.QueryTypes.SELECT,
+    })
+    return (Array.isArray(rows) ? rows : []).map(r => ({
+      date:       r.date instanceof Date ? r.date.toISOString().slice(0, 10) : String(r.date).slice(0, 10),
+      count:      Number(r.count) || 0,
+      netLbs:     Number(r.netLbs) || 0,
+      errorCount: Number(r.errorCount) || 0,
+    }))
+  } catch (err) {
+    console.error(`[analyticsService] Trend query error (${tableName}):`, err.message)
+    return []
+  }
 }
 
 module.exports = {
@@ -188,4 +344,6 @@ module.exports = {
   getSurgeTrend,
   getSeparationBatches,
   getSeparationTrend,
+  getInventoryAdjustments,
+  getInventoryAdjustmentTrend,
 }

@@ -23,8 +23,8 @@ exports.getBlendBatches = async (req, res) => {
 
 exports.getBlendTrend = async (req, res) => {
   try {
-    const { from, to, groupBy } = req.query
-    const points = await analyticsService.getBlendTrend({ from, to, groupBy })
+    const params = pick(req.query, ['from', 'to', 'groupBy', 'tankId', 'status', 'product'])
+    const points = await analyticsService.getBlendTrend(params)
     return res.json({ success: true, points })
   } catch (err) {
     console.error('[analyticsController] blend trend:', err)
@@ -47,8 +47,8 @@ exports.getSurgeBatches = async (req, res) => {
 
 exports.getSurgeTrend = async (req, res) => {
   try {
-    const { from, to, groupBy } = req.query
-    const points = await analyticsService.getSurgeTrend({ from, to, groupBy })
+    const params = pick(req.query, ['from', 'to', 'groupBy', 'tankId', 'status', 'product'])
+    const points = await analyticsService.getSurgeTrend(params)
     return res.json({ success: true, points })
   } catch (err) {
     console.error('[analyticsController] surge trend:', err)
@@ -71,11 +71,35 @@ exports.getSeparationBatches = async (req, res) => {
 
 exports.getSeparationTrend = async (req, res) => {
   try {
-    const { from, to, groupBy } = req.query
-    const points = await analyticsService.getSeparationTrend({ from, to, groupBy })
+    const params = pick(req.query, ['from', 'to', 'groupBy', 'sourceSilo', 'status'])
+    const points = await analyticsService.getSeparationTrend(params)
     return res.json({ success: true, points })
   } catch (err) {
     console.error('[analyticsController] separation trend:', err)
+    return res.status(500).json({ success: false, error: err.message })
+  }
+}
+
+// ── Inventory Adjustments ───────────────────────────────────────────────────
+
+exports.getInventoryAdjustments = async (req, res) => {
+  try {
+    const params = pick(req.query, ['from', 'to', 'source', 'status', 'binId', 'itemId', 'tankName', 'sortBy', 'sortDir', 'limit', 'offset'])
+    const result = await analyticsService.getInventoryAdjustments(params)
+    return res.json({ success: true, ...result })
+  } catch (err) {
+    console.error('[analyticsController] inventory adjustments:', err)
+    return res.status(500).json({ success: false, error: err.message })
+  }
+}
+
+exports.getInventoryAdjustmentTrend = async (req, res) => {
+  try {
+    const params = pick(req.query, ['from', 'to', 'groupBy', 'source', 'status'])
+    const points = await analyticsService.getInventoryAdjustmentTrend(params)
+    return res.json({ success: true, points })
+  } catch (err) {
+    console.error('[analyticsController] inventory adjustment trend:', err)
     return res.status(500).json({ success: false, error: err.message })
   }
 }
