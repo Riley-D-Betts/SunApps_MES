@@ -13,6 +13,7 @@ const db = require('../models')
 const statusStore = require('./statusStore')
 const itemConfig = require('./mesItemConfig')
 const milkMesService = require('./milkMesService')
+const batchStartFinder = require('./batchStartFinder')
 const clock = require('../sim/clock')
 
 const STATE_IDLE = 'idle'
@@ -164,7 +165,7 @@ function feedPermitRisingEdge(prev, curr) {
   return curr.feedPermit && !prev.feedPermit
 }
 
-async function openBatch(snap) {
+async function openBatch(snap, historian) {
   const sourceSilo = itemConfig.normalizeSiloName(snap.xfrSource) || snap.xfrSource
   const batchId = `XFR-${snap.pollTime.getTime()}`
   const destinationsJson = JSON.stringify(buildResolvedDestinations(snap))
@@ -207,6 +208,25 @@ async function openBatch(snap) {
   statusStore.pushEvent('separation.start', `Opened separation batch ${batchId}`, {
     batchId, sourceSilo, destinations: snap.xfrDestinations.filter(Boolean),
   })
+
+  // Fire-and-forget: crawl back to find the actual FEEDPERMIT rising edge and
+  // correct feedStartLbs so milk that flowed before MES detected the batch is
+  // not missed.  The openBaselines.feed in-memory value is also updated so the
+  // next persistTick uses the corrected baseline immediately.
+  const _rowId = row.id
+  batchStartFinder.findSeparationActualStart(snap.pollTime, historian)
+    .then(async result => {
+      if (!result) return
+      // Guard against the batch closing before the backfinder returned
+      if (openBatchId !== _rowId) return
+      openBaselines.feed = result.feedLbsAtStart
+      await db.MesSeparationBatch.update(
+        { batchStart: result.estimatedStartAt, feedStartLbs: result.feedLbsAtStart },
+        { where: { id: _rowId } }
+      )
+      console.log(`[SeparatorSM] Back-projected ${batchId} start: ${result.estimatedStartAt.toISOString()}, feedStart: ${result.feedLbsAtStart.toFixed(1)} lb (was ${(snap.feedTotalLbs || 0).toFixed(1)} lb)`)
+    })
+    .catch(err => console.warn(`[SeparatorSM] actualStart finder failed for ${batchId}: ${err.message}`))
 }
 
 async function persistTick(snap) {
@@ -379,14 +399,14 @@ async function tick(historian) {
       // transfer_complete / cip_started / idle_* the transfer is over — a new
       // batch must wait for the next feed-permit rising edge in STATE_IDLE.
       if (BOUNDARY_END_REASONS.has(reason) && canStart(snap)) {
-        await openBatch(snap)
+        await openBatch(snap, historian)
       }
     } else {
       await persistTick(snap)
     }
   } else if (machineState === STATE_IDLE) {
     if (feedPermitRisingEdge(prevSnapshot, snap) && canStart(snap)) {
-      await openBatch(snap)
+      await openBatch(snap, historian)
     } else if (snap.feedPermit && (Number(snap.motorRpm) || 0) >= IDLE_RPM_THRESHOLD && canStart(snap)) {
       // Recovery: equipment is already running but we never saw a rising edge
       // (e.g., MES restarted while separator was active and no DB row was
@@ -422,13 +442,13 @@ async function tick(historian) {
                 existingBatchId: recentFailed.batchId, prevVol, currVol,
               })
             } else {
-              await openBatch(snap)
+              await openBatch(snap, historian)
               statusStore.pushEvent('separation.recovery', `Opened batch via recovery fallback (no rising edge)`, {
                 motorRpm: snap.motorRpm, source: snap.xfrSource, destinations: snap.xfrDestinations.filter(Boolean),
               })
             }
           } else {
-            await openBatch(snap)
+            await openBatch(snap, historian)
             statusStore.pushEvent('separation.recovery', `Opened batch via recovery fallback (no rising edge)`, {
               motorRpm: snap.motorRpm, source: snap.xfrSource, destinations: snap.xfrDestinations.filter(Boolean),
             })

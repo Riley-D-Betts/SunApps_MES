@@ -13,8 +13,9 @@
 
 const LINES = ['ML1', 'ML2', 'ML3', 'ML4', 'CL1', 'CL2']
 
-const BLEND_LOOKBACK_MS = 6 * 60 * 60 * 1000   // 6 h — covers late-named fills
-const SURGE_LOOKBACK_MS = 4 * 60 * 60 * 1000   // 4 h — covers fill-and-drain cycle
+const BLEND_LOOKBACK_MS      = 6 * 60 * 60 * 1000  // 6 h — covers late-named fills
+const SURGE_LOOKBACK_MS      = 4 * 60 * 60 * 1000  // 4 h — covers fill-and-drain cycle
+const SEPARATION_LOOKBACK_MS = 2 * 60 * 60 * 1000  // 2 h — covers feed-permit gaps
 
 // Max gap between consecutive REQUESTED_BY samples for the same tank before
 // we treat the gap as a fill boundary (different batch / idle period).
@@ -173,4 +174,107 @@ function _findRisingEdge(series, minRise) {
   return null
 }
 
-module.exports = { findBlendTankActualStart, findSurgeTankActualStart }
+/**
+ * Integrate UHT FT1102_Output (milk inlet GPM) over [since, until] from
+ * historian to estimate how many gallons accumulated BEFORE the batch was
+ * detected.  The result can be subtracted from the current software totalizer
+ * to back-fill the issue-state baseline (surgeTankMesService pre-seeding).
+ *
+ * Uses trapezoidal integration; only counts positive GPM values.  Returns 0
+ * when data is unavailable or the window is empty.
+ *
+ * @param {string} uhtId     'UHT1' or 'UHT2'
+ * @param {Date}   since     start of backfill window (actual batch start)
+ * @param {Date}   until     end of backfill window (detection time)
+ * @param {object} historian restProvider / historicalProvider
+ * @returns {Promise<number>} gallons accumulated in the window; 0 on failure
+ */
+async function integrateFt1102BackfillGal(uhtId, since, until, historian) {
+  if (!historian?._queryProcessValues || !uhtId) return 0
+  if (until <= since) return 0
+  const tag = `${uhtId}.FT1102_Output`
+  try {
+    const rows = await historian._queryProcessValues(tag, since, until, { verbose: false })
+    if (!rows || rows.length < 2) return 0
+    const series = rows
+      .map(r => ({ t: new Date(r.DateTime), v: Math.max(0, parseFloat(r.Value) || 0) }))
+      .filter(p => isFinite(p.v))
+      .sort((a, b) => a.t - b.t)
+    if (series.length < 2) return 0
+    let totalGal = 0
+    for (let i = 1; i < series.length; i++) {
+      const elapsedMin = (series[i].t - series[i - 1].t) / 60000
+      const avgGpm = (series[i - 1].v + series[i].v) / 2
+      if (avgGpm > 0 && elapsedMin > 0) totalGal += avgGpm * elapsedMin
+    }
+    return totalGal
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * For a separation batch, find when the separator actually started flowing.
+ *
+ * Primary strategy: FEEDPERMIT rising edge (0→1 transition) — the same
+ * signal the state machine uses to open a batch, so the actual start is the
+ * last 0→1 edge before openTime.
+ *
+ * Also reads SepFeedTotal (the cumulative feed odometer) at the rising edge
+ * so the caller can correct feedStartLbs and recover milk that flowed before
+ * MES detected the batch.
+ *
+ * @param {Date}   openTime  when MES opened the batch (snap.pollTime)
+ * @param {object} historian restProvider / historicalProvider
+ * @param {object} [opts]    { lookbackMs }
+ * @returns {{ estimatedStartAt: Date, feedLbsAtStart: number, method: string } | null}
+ */
+async function findSeparationActualStart(openTime, historian, opts = {}) {
+  if (!historian?._queryProcessValues) return null
+  const since = new Date(openTime.getTime() - (opts.lookbackMs ?? SEPARATION_LOOKBACK_MS))
+
+  let estimatedStartAt = null
+  try {
+    const fpRows = await historian._queryProcessValues('SEPSTAT.FEEDPERMIT', since, openTime, { verbose: false })
+    if (fpRows && fpRows.length >= 2) {
+      const series = fpRows
+        .map(r => ({ t: new Date(r.DateTime), v: parseFloat(r.Value) || 0 }))
+        .filter(p => !isNaN(p.v))
+        .sort((a, b) => a.t - b.t)
+      // Walk backward to find the last 0→1 transition before openTime
+      for (let i = series.length - 2; i >= 0; i--) {
+        if (series[i].v < 0.5 && series[i + 1].v >= 0.5) {
+          estimatedStartAt = series[i + 1].t
+          break
+        }
+      }
+    }
+  } catch {}
+
+  if (!estimatedStartAt) return null
+
+  // Read SepFeedTotal at the actual start to provide a corrected baseline.
+  // Query from estimatedStartAt to openTime and take the earliest sample —
+  // the first reading after the permit rose is the baseline we should have set.
+  let feedLbsAtStart = null
+  try {
+    const feedRows = await historian._queryProcessValues(
+      'Product.SepFeedTotal', estimatedStartAt, openTime, { verbose: false }
+    )
+    if (feedRows && feedRows.length > 0) {
+      const sorted = feedRows.sort((a, b) => new Date(a.DateTime) - new Date(b.DateTime))
+      feedLbsAtStart = parseFloat(sorted[0].Value)
+    }
+  } catch {}
+
+  if (feedLbsAtStart == null || !isFinite(feedLbsAtStart)) return null
+
+  return { estimatedStartAt, feedLbsAtStart, method: 'feedpermit-rising-edge' }
+}
+
+module.exports = {
+  findBlendTankActualStart,
+  findSurgeTankActualStart,
+  integrateFt1102BackfillGal,
+  findSeparationActualStart,
+}

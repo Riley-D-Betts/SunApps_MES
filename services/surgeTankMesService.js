@@ -61,6 +61,11 @@ const GAL_TO_LBS = 8.6
 // ~68k lb per tick). See [[uht-milk-totalizer-gating]].
 const TOTALIZER_RESET_DROP_GAL = 50
 
+// Max backfill window for pre-seeding the issue-state baseline. If the
+// estimated actual start is more than this before detection, the level signal
+// likely found an old fill rather than the current batch — skip seeding.
+const BACKFILL_MAX_GAP_MS = 30 * 60 * 1000
+
 // A level reading (lbs) is implausible when it reads ~empty but we just saw a
 // substantial level. That's the replay-overrun signature (future timestamps
 // return 0/null) — treating it as a real drain would zero out arrival and make
@@ -896,10 +901,52 @@ async function processWOStart(data, historian) {
 
     console.log(`[SurgeTankMesService] "${productName}" → NS WO ${nsWorkOrderNumber} (${nsWorkOrderId})`)
 
-    // Fire-and-forget: back-project the actual start time from historian data.
-    batchStartFinder.findSurgeTankActualStart(tankId, new Date(detectedAt || clock.now()), historian)
-      .then(result => { if (result) return record.update({ actualStartAt: result.estimatedStartAt }) })
-      .catch(err => console.warn(`[SurgeTankMesService] actualStart finder failed for ${tankId}: ${err.message}`))
+    // Snapshot the UHT totalizer at WO creation — the fire-and-forget below
+    // uses it to seed the issue-state baseline so the first tick catches up
+    // milk that flowed between actual batch start and detection.
+    const _seedGalAtCreate = feedingUhtId
+      ? await historian.getUhtMilkTotalizer(feedingUhtId).catch(() => null)
+      : null
+    const _seedBatchId  = record.id
+    const _seedUhtId    = feedingUhtId
+    const _seedDetected = new Date(detectedAt || clock.now())
+
+    // Fire-and-forget: back-project the actual start time from historian data,
+    // then pre-seed MesSurgeTankIssueState so the first tick issues from
+    // actual start (not from detection time).
+    batchStartFinder.findSurgeTankActualStart(tankId, _seedDetected, historian)
+      .then(async result => {
+        if (!result) return
+        await record.update({ actualStartAt: result.estimatedStartAt })
+
+        if (_seedGalAtCreate == null || !_seedUhtId) return
+        const gapMs = _seedDetected.getTime() - result.estimatedStartAt.getTime()
+        // Suspicious if gap is negative or > 30 min (likely matched an old fill)
+        if (gapMs <= 0 || gapMs > BACKFILL_MAX_GAP_MS) return
+
+        const backfillGal = await batchStartFinder.integrateFt1102BackfillGal(
+          _seedUhtId, result.estimatedStartAt, _seedDetected, historian
+        )
+        if (!(backfillGal > 0)) return
+
+        // Only pre-seed if the first tick hasn't already created the state row
+        const existing = await db.MesSurgeTankIssueState.findOne({
+          where: { surgeTankBatchId: _seedBatchId, uhtId: _seedUhtId }
+        })
+        if (existing) return
+
+        const seedBaselineGal = Math.max(0, _seedGalAtCreate - backfillGal)
+        await db.MesSurgeTankIssueState.create({
+          surgeTankBatchId: _seedBatchId,
+          uhtId: _seedUhtId,
+          lastIssuedUhtGal: seedBaselineGal,
+          lastTotalizerGal: seedBaselineGal,
+          lastObservedAt: _seedDetected,
+          lastFromEntName: record.feedingFromEntName || null,
+        })
+        console.log(`[SurgeTankMesService] ${tankId}: pre-seeded issue baseline ${seedBaselineGal.toFixed(1)} gal (backfill ${backfillGal.toFixed(1)} gal from ${result.estimatedStartAt.toISOString()})`)
+      })
+      .catch(err => console.warn(`[SurgeTankMesService] actualStart/seed failed for ${tankId}: ${err.message}`))
 
     return { success: true, duplicate: false, tankId, productName, nsWorkOrderId, nsWorkOrderNumber, status: 'active', parsed }
 
