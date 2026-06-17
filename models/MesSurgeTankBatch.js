@@ -128,6 +128,27 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DECIMAL(8, 2),
         allowNull: true,
       },
+      // True if, during any tick, the UHT issued milk into this tank while a
+      // filler was latched to it (Sel{N}=1). The net-level-rise arrival
+      // under-counts under simultaneous fill+drain, so when this is set the
+      // waste % is a loose upper bound — not a number to trust to the point.
+      concurrentFillDrain: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+      },
+      // How many ticks saw concurrent fill+drain — a rough severity measure.
+      concurrentTickCount: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        defaultValue: 0,
+      },
+      // Comma-separated filler line numbers observed draining during fill
+      // (e.g. "3" or "3,4"), from the Sel{N} latch.
+      drainFillerLines: {
+        type: DataTypes.STRING(50),
+        allowNull: true,
+      },
       lastIssueAt: {
         type: DataTypes.DATE,
         allowNull: true,

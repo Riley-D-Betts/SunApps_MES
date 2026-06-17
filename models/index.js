@@ -119,6 +119,21 @@ db.ensureRuntimeSchema = async function () {
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'wastePercent' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
       ALTER TABLE MesSurgeTankBatches ADD wastePercent DECIMAL(8,2) NULL;
   `)
+  // Concurrent fill+drain flag: a filler was latched to the tank (Sel{N}=1)
+  // during a tick that also issued UHT milk, so the net-rise arrival under-counts
+  // and the resulting waste % is a loose upper bound, not a trustworthy figure.
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'concurrentFillDrain' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
+      ALTER TABLE MesSurgeTankBatches ADD concurrentFillDrain BIT NOT NULL CONSTRAINT DF_MesSurgeTankBatches_concurrentFillDrain DEFAULT 0;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'concurrentTickCount' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
+      ALTER TABLE MesSurgeTankBatches ADD concurrentTickCount INT NOT NULL CONSTRAINT DF_MesSurgeTankBatches_concurrentTickCount DEFAULT 0;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'drainFillerLines' AND Object_ID = Object_ID(N'MesSurgeTankBatches'))
+      ALTER TABLE MesSurgeTankBatches ADD drainFillerLines NVARCHAR(50) NULL;
+  `)
   // Actual-start backfill: historian-derived timestamp of when milk actually
   // started flowing, as opposed to when MES detected the batch (detectedAt).
   await sequelize.query(`

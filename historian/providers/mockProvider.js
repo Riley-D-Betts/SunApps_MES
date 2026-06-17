@@ -219,6 +219,8 @@ class MockProvider extends BaseProvider {
       const prev = this._prevSurgeGal[tankId]
       const pollDeltaGal = prev == null ? null : mainGallons - prev
       this._prevSurgeGal[tankId] = mainGallons
+      // Simulate a filler latched to a line ~half the time a tank holds product.
+      const fillerLines = filling && Math.random() > 0.5 ? [1 + (i % 5)] : []
       return {
         tankId,
         mainLevelPct,
@@ -230,6 +232,8 @@ class MockProvider extends BaseProvider {
         connected: true,
         sterProdBarrOK: true,
         fillingOK: filling,
+        fillerLines,
+        drainingToFiller: fillerLines.length > 0,
       }
     })
   }

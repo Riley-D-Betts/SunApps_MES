@@ -1013,9 +1013,14 @@ class RestProvider extends BaseProvider {
         `ThermaRoute.${t.tankId}${TAGS.ST_CONNECTED}`,     // 5 — discrete
         `ThermaRoute.${t.tankId}${TAGS.ST_STER_PROD_BARR}`,// 6 — discrete
         `ThermaRoute.${t.tankId}${TAGS.ST_FILLING_OK}`,    // 7 — discrete
+        // 8..12 — Sel{1-5}_Filling latch: tank is routed to filler line 1..5.
+        // The latch holds for the whole run (set on connect, cleared on
+        // disconnect/CIP), so it identifies WHICH filler is consuming this tank,
+        // not the moment-to-moment draw. Used to detect concurrent fill+drain.
+        ...[1, 2, 3, 4, 5].map(s => `ThermaRoute.${t.tankId}_Sel${s}_Filling_Indicator`),
       ]
     }
-    const perTank = 8
+    const perTank = 13
 
     const fqns = tanks.flatMap(fqnsPerTank)
     const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
@@ -1032,6 +1037,12 @@ class RestProvider extends BaseProvider {
       const pollDeltaGal = prevGal == null ? null : mainGallons - prevGal
       this._prevSurgeGal[t.tankId] = mainGallons
 
+      // Filler lines this tank is routed to (Sel{1-5} latch === 1). When any is
+      // set a filler is plumbed to the tank and may draw product out the bottom
+      // while the UHT fills the top — the concurrent fill+drain that makes the
+      // net-level-rise arrival under-count.
+      const fillerLines = [1, 2, 3, 4, 5].filter(s => val(7 + s) === 1)
+
       return {
         tankId: t.tankId,
         mainLevelPct: val(0),
@@ -1043,6 +1054,8 @@ class RestProvider extends BaseProvider {
         connected: !!val(5),
         sterProdBarrOK: !!val(6),
         fillingOK: !!val(7),
+        fillerLines,
+        drainingToFiller: fillerLines.length > 0,
       }
     })
   }

@@ -951,7 +951,7 @@ async function processWOEnd(data, historian) {
   try {
     flushedIssue = await tickIssueForBatch(record, historian)
     if (flushedIssue) await record.reload()
-    await tickArrivalForBatch(record, historian, 'issue')
+    await tickArrivalForBatch(record, historian, 'issue', flushedIssue)
     await record.reload()
     flushedCompletion = await tickCompletionForBatch(record)
   } catch (err) {
@@ -968,6 +968,14 @@ async function processWOEnd(data, historian) {
   const wastePercent = issuedLbs >= 10
     ? Math.max(0, Math.min(999999.99, (wasteLbs / issuedLbs) * 100))
     : null
+
+  // When the tank filled and drained at once, the net-rise arrival under-counts,
+  // so the waste figure above is a loose upper bound — flag it as not fully
+  // trustworthy rather than presenting it as measured.
+  const concurrent = !!record.concurrentFillDrain
+  const concurrentNote = concurrent
+    ? ` ⚠ concurrent fill+drain on ${record.concurrentTickCount} tick(s) (filler line(s) ${record.drainFillerLines || '?'}) — waste is an upper bound, not a measured value`
+    : ''
 
   await record.update({
     status: 'completed',
@@ -991,6 +999,9 @@ async function processWOEnd(data, historian) {
       wasteLbs,
       wastePercent,
       note: 'waste = UHT-leg loss (issued − reached); upper bound under concurrent fill+drain',
+      concurrentFillDrain: concurrent,
+      concurrentTickCount: Number(record.concurrentTickCount) || 0,
+      drainFillerLines: record.drainFillerLines || null,
       flushedIssue,
       flushedCompletion,
     }),
@@ -1001,11 +1012,11 @@ async function processWOEnd(data, historian) {
     console.warn(`[SurgeTankMesService] High waste alert: ${wastePercent.toFixed(1)}% on ${tankId}`)
     await core.sendStagingNotification(
       'MES Surge Tank: High Waste Alert',
-      `Batch "${record.productName}" on ${tankId}\nWaste: ${wasteLbs.toFixed(1)} LBS (${wastePercent.toFixed(1)}%) — UHT-leg loss\nIssued ${issuedLbs.toFixed(0)} | Reached surge ${outputLbs.toFixed(0)}\nThreshold: ${itemConfig.WASTE_ALERT_THRESHOLD}%`
+      `Batch "${record.productName}" on ${tankId}\nWaste: ${wasteLbs.toFixed(1)} LBS (${wastePercent.toFixed(1)}%) — UHT-leg loss\nIssued ${issuedLbs.toFixed(0)} | Reached surge ${outputLbs.toFixed(0)}\nThreshold: ${itemConfig.WASTE_ALERT_THRESHOLD}%${concurrent ? `\n${concurrentNote.trim()}` : ''}`
     ).catch(e => console.warn(`[SurgeTankMesService] waste alert send failed: ${e.message}`))
   }
 
-  console.log(`[SurgeTankMesService] Batch "${record.productName}" on ${tankId} closed — issued ${issuedLbs.toFixed(0)} lb, reached ${outputLbs.toFixed(0)} lb, completed ${parseFloat(record.cumulativeCompletedLbs).toFixed(0)} lb, waste ${wasteLbs.toFixed(0)} lb (${wastePercent != null ? wastePercent.toFixed(1) + '%' : 'n/a'})`)
+  console.log(`[SurgeTankMesService] Batch "${record.productName}" on ${tankId} closed — issued ${issuedLbs.toFixed(0)} lb, reached ${outputLbs.toFixed(0)} lb, completed ${parseFloat(record.cumulativeCompletedLbs).toFixed(0)} lb, waste ${wasteLbs.toFixed(0)} lb (${wastePercent != null ? wastePercent.toFixed(1) + '%' : 'n/a'})${concurrentNote}`)
   return {
     success: true,
     tankId,
@@ -1016,6 +1027,9 @@ async function processWOEnd(data, historian) {
     cumulativeCompletedLbs: parseFloat(record.cumulativeCompletedLbs) || 0,
     wasteLbs,
     wastePercent,
+    concurrentFillDrain: concurrent,
+    concurrentTickCount: Number(record.concurrentTickCount) || 0,
+    drainFillerLines: record.drainFillerLines || null,
   }
 }
 
@@ -1455,7 +1469,7 @@ function resolveIssueModes(activeBatches) {
  * arrival. Caveat: when a tank fills and drains at once, the net rise
  * under-counts arrival, so waste is a conservative UPPER bound on UHT loss.
  */
-async function tickArrivalForBatch(batch, historian, issueMode) {
+async function tickArrivalForBatch(batch, historian, issueMode, issuedThisTick = false) {
   let statuses
   try {
     statuses = await historian.getSurgeTankStatus()
@@ -1471,6 +1485,24 @@ async function tickArrivalForBatch(batch, historian, issueMode) {
   if (!plausibleLevelLbs(curLbs, prevLbs)) return
 
   const updates = { lastDestLevelLbs: curLbs }
+
+  // Concurrent fill+drain flag: this tick issued UHT milk (fill) AND a filler is
+  // latched to the tank (Sel{N}=1). Under simultaneous fill+drain the net level
+  // rise under-counts arrival, so the batch's eventual waste % is only a loose
+  // upper bound. Conservative by design — the Sel latch holds for the whole run,
+  // so this flags any fill that overlaps a connected filler, drawing or not.
+  if (issuedThisTick && st.drainingToFiller) {
+    const prevLines = String(batch.drainFillerLines || '').split(',').filter(Boolean)
+    const merged = Array.from(new Set([...prevLines, ...st.fillerLines.map(String)]))
+      .sort((a, b) => Number(a) - Number(b))
+    updates.concurrentFillDrain = true
+    updates.concurrentTickCount = (Number(batch.concurrentTickCount) || 0) + 1
+    updates.drainFillerLines = merged.join(',')
+    if (!batch.concurrentFillDrain) {
+      console.warn(`[SurgeTankMesService] ${batch.tankId}: concurrent fill+drain — UHT filling while filler line(s) ${merged.join(',')} draw; waste % will be an upper bound`)
+    }
+  }
+
   if (issueMode === 'issue' && prevLbs != null) {
     const rise = curLbs - prevLbs
     if (rise > config.MES_WASTE_RISE_FLOOR_LBS) {
@@ -1498,9 +1530,10 @@ async function tickAllActiveBatches(historian) {
   for (const batch of activeBatches) {
     summary.batchesProcessed++
     const issueMode = issueModeByBatch[batch.id] || 'issue'
+    let issuedThisTick = false
     try {
-      const issued = await tickIssueForBatch(batch, historian, issueMode)
-      if (issued) summary.issuesFired++
+      issuedThisTick = await tickIssueForBatch(batch, historian, issueMode)
+      if (issuedThisTick) summary.issuesFired++
     } catch (err) {
       console.error(`[SurgeTankMesService] tick issue failed for batch ${batch.id} (${batch.tankId}):`, err.message)
       summary.errors.push({ phase: 'issues', batchId: batch.id, error: err.message })
@@ -1508,7 +1541,7 @@ async function tickAllActiveBatches(historian) {
     try {
       await batch.reload()
       // Measure arrival (surge level rise) → cumulativeOutputLbs before completing.
-      await tickArrivalForBatch(batch, historian, issueMode)
+      await tickArrivalForBatch(batch, historian, issueMode, issuedThisTick)
       await batch.reload()
       const completed = await tickCompletionForBatch(batch)
       if (completed) summary.completionsFired++
