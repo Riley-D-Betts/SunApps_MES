@@ -59,7 +59,8 @@
       "Bash(sed -n '283,295p' services/tankAtRestSweepService.js)",
       "Bash(sed -n '234,250p' services/nsInventoryLookup.js)",
       "Bash(sed 's/.*\"FQN\": \"\\\\\\([^\"]*\\\\\\)\".*/\\\\1/')",
-      "Bash(xargs ls -la)"
+      "Bash(xargs ls -la)",
+      "Bash(grep -iv \"DENSITY_PPG\\\\|//\\\\|SILO_DENSITY\\\\|LINE_DENSITY\")"
     ]
   }
 }

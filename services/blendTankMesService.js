@@ -1259,6 +1259,19 @@ async function tickArrivalForBatch(batch, curWeightLbs) {
       }
     }
   }
+
+  // Level-floor correction: when the first tick fired before issued had fully
+  // accumulated, the initial credit was capped at the issued-at-that-time and
+  // lastDestLevelLbs was set to the current level — leaving cumulativeOutputLbs
+  // stuck below the actual tank level even though issued has since grown to cover
+  // it. Once issued ≥ curLbs, min(issued, curLbs) = curLbs is provably arrived.
+  const levelFloor = Math.min(issued, curLbs)
+  const postOutput = parseFloat(updates.cumulativeOutputLbs) || output
+  if (levelFloor > postOutput) {
+    updates.cumulativeOutputLbs = levelFloor
+    console.log(`[BlendTankMesService] arrival ${batch.tankId}: level-floor +${(levelFloor - output).toFixed(1)} lb (issued ${issued.toFixed(0)}, tank ${curLbs.toFixed(0)}, was ${output.toFixed(0)}→${levelFloor.toFixed(0)})`)
+  }
+
   await batch.update(updates)
 }
 
