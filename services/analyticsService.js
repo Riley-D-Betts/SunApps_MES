@@ -67,7 +67,7 @@ function buildOrder(sortBy, sortDir, validFields) {
   return [[field, dir]]
 }
 
-async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', outputField = 'cumulativeOutputLbs', completedField = 'cumulativeCompletedLbs', concurrentField = null } = {}) {
+async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', outputField = 'cumulativeOutputLbs', completedField = 'cumulativeCompletedLbs', skimField = null, concurrentField = null } = {}) {
   const attrs = [
     [fn('COUNT', col('id')), 'batchCount'],
     [fn('AVG', col('wastePercent')), 'avgWastePercent'],
@@ -75,6 +75,7 @@ async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', o
   ]
   if (outputField)    attrs.push([fn('SUM', col(outputField)),    'totalOutputLbs'])
   if (completedField) attrs.push([fn('SUM', col(completedField)), 'totalCompletedLbs'])
+  if (skimField)      attrs.push([fn('SUM', col(skimField)),      'totalSkimLbs'])
   // Count batches whose waste is an upper bound because they filled and drained
   // at once (BIT column → cast to INT so SUM works on SQL Server).
   if (concurrentField) attrs.push([fn('SUM', cast(col(concurrentField), 'INT')), 'concurrentCount'])
@@ -86,6 +87,7 @@ async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', o
     totalIssuedLbs:    result?.totalIssuedLbs    != null ? Number(result.totalIssuedLbs)    : null,
     totalOutputLbs:    result?.totalOutputLbs    != null ? Number(result.totalOutputLbs)    : null,
     totalCompletedLbs: result?.totalCompletedLbs != null ? Number(result.totalCompletedLbs) : null,
+    totalSkimLbs:      result?.totalSkimLbs      != null ? Number(result.totalSkimLbs)      : null,
     ...(concurrentField ? { concurrentCount: Number(result?.concurrentCount) || 0 } : {}),
   }
 }
@@ -206,6 +208,7 @@ async function getSeparationBatches({ from, to, sourceSilo, status, sortBy, sort
       issuedField: 'inputVolume',
       outputField: 'creamVolume',
       completedField: null,
+      skimField: 'skimVolume',
     }),
   ])
   return { total: summary.batchCount, batches: rows, summary }
