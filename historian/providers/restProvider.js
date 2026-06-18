@@ -21,8 +21,13 @@ const { PROCESS_STEP_NAMES, CIP_STEP_NAMES } = require('./uhtStepNames')
 
 // Density constants (PPG — pounds per gallon)
 // Flow totalizers record gallons; multiply by these to get LBS
-const CREAM_DENSITY_PPG = 8.3
-const SKIM_DENSITY_PPG = 8.63
+const CREAM_DENSITY_PPG  = 8.3
+const SKIM_DENSITY_PPG   = 8.63
+const MILK_DENSITY_PPG   = 8.6   // whole/low-fat estimate for surge tank rate display
+
+// Number of consecutive poll samples to average when computing surge flow rate.
+// At the default 5-second poll interval this gives ~20 s of smoothing.
+const SURGE_RATE_WINDOW  = 4
 
 // PROCESS step 24 — the only step where the UHT is actually pushing sterile
 // product downstream into a surge tank. FT1102 still reads ~100 GPM during the
@@ -164,10 +169,12 @@ class RestProvider extends BaseProvider {
     this._prevCreamTotal = null
     this._prevSkimTotal = null
 
-    // Per-surge-tank previous gallons for inflow delta tracking. Populated on
-    // first poll, then each subsequent poll computes (current - prev) so the
-    // dashboard can show "+X gal this tick" per tank.
-    this._prevSurgeGal = { ST81: null, ST82: null, ST83: null, ST84: null }
+    // Per-surge-tank previous gallons + timestamp for flow-rate calculation.
+    // First poll populates prevGal; second poll produces a delta + rate.
+    this._prevSurgeGal   = { ST81: null, ST82: null, ST83: null, ST84: null }
+    this._prevSurgeGalAt = { ST81: null, ST82: null, ST83: null, ST84: null }
+    // Sliding window of recent instantaneous rates (lbs/min) per tank.
+    this._surgeRateWindow = { ST81: [], ST82: [], ST83: [], ST84: [] }
 
     // Previous value of the XFR TransferComplete bit. Used to detect the 0→1
     // rising edge that signals a completed separation batch. Null on first poll
@@ -1025,17 +1032,33 @@ class RestProvider extends BaseProvider {
     const fqns = tanks.flatMap(fqnsPerTank)
     const values = await Promise.all(fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false })))
 
+    const now = Date.now()
     return tanks.map((t, i) => {
       const offset = i * perTank
       const val = (idx) => values[offset + idx]?.Value ?? 0
       const txt = (idx) => values[offset + idx]?.Text ?? ''
 
       const mainGallons = val(1)
-      // Inflow delta — positive means UHT pushed more milk in since last
-      // poll, negative means filler pulled more out. Null on first poll.
+      // Level delta — positive = UHT filling, negative = filler draining. Null on first poll.
       const prevGal = this._prevSurgeGal[t.tankId]
       const pollDeltaGal = prevGal == null ? null : mainGallons - prevGal
       this._prevSurgeGal[t.tankId] = mainGallons
+
+      // Rolling-averaged flow rate in lbs/min so the dashboard can show
+      // "filling at X lbs/min" / "draining at X lbs/min".
+      const prevAt = this._prevSurgeGalAt[t.tankId]
+      let pollRateLbsPerMin = null
+      if (pollDeltaGal != null && prevAt != null) {
+        const elapsedMin = (now - prevAt) / 60000
+        if (elapsedMin > 0) {
+          const instantRate = (pollDeltaGal * MILK_DENSITY_PPG) / elapsedMin
+          const win = this._surgeRateWindow[t.tankId]
+          win.push(instantRate)
+          if (win.length > SURGE_RATE_WINDOW) win.shift()
+          pollRateLbsPerMin = win.reduce((a, b) => a + b, 0) / win.length
+        }
+      }
+      this._prevSurgeGalAt[t.tankId] = now
 
       // Filler lines this tank is routed to (Sel{1-5} latch === 1). When any is
       // set a filler is plumbed to the tank and may draw product out the bottom
@@ -1048,6 +1071,7 @@ class RestProvider extends BaseProvider {
         mainLevelPct: val(0),
         mainGallons,
         pollDeltaGal,
+        pollRateLbsPerMin,
         productDesc: txt(2),
         state: val(3),
         empty: !!val(4),

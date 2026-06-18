@@ -226,6 +226,7 @@ class MockProvider extends BaseProvider {
         mainLevelPct,
         mainGallons,
         pollDeltaGal,
+        pollRateLbsPerMin: null,
         productDesc: filling ? ['Marcels 1%', 'KS 2% org', 'Conv 3.25%', 'Horizon whole'][i] : '',
         state: filling ? 5 + Math.floor(Math.random() * 10) : 1,
         empty: mainLevelPct < 2,
