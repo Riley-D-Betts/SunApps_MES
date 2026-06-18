@@ -26,8 +26,8 @@ const SKIM_DENSITY_PPG   = 8.63
 const MILK_DENSITY_PPG   = 8.6   // whole/low-fat estimate for surge tank rate display
 
 // Number of consecutive poll samples to average when computing surge flow rate.
-// At the default 5-second poll interval this gives ~20 s of smoothing.
-const SURGE_RATE_WINDOW  = 4
+// At the default 5-second poll interval, 24 samples ≈ 2 minutes of smoothing.
+const SURGE_RATE_WINDOW  = 24
 
 // PROCESS step 24 — the only step where the UHT is actually pushing sterile
 // product downstream into a surge tank. FT1102 still reads ~100 GPM during the
@@ -175,6 +175,9 @@ class RestProvider extends BaseProvider {
     this._prevSurgeGalAt = { ST81: null, ST82: null, ST83: null, ST84: null }
     // Sliding window of recent instantaneous rates (lbs/min) per tank.
     this._surgeRateWindow = { ST81: [], ST82: [], ST83: [], ST84: [] }
+    // Previous state code per tank — used to detect CIP↔production transitions
+    // so the rate window can be flushed before stale data reaches the dashboard.
+    this._prevSurgeState = { ST81: null, ST82: null, ST83: null, ST84: null }
 
     // Previous value of the XFR TransferComplete bit. Used to detect the 0→1
     // rising edge that signals a completed separation batch. Null on first poll
@@ -1046,9 +1049,20 @@ class RestProvider extends BaseProvider {
 
       // Rolling-averaged flow rate in lbs/min so the dashboard can show
       // "filling at X lbs/min" / "draining at X lbs/min".
+      // Gate: skip accumulation during CIP (state 4) so cleaning fill/drain
+      // never contaminates the production rate. Flush the window on any state
+      // transition so CIP data doesn't bleed into the next production run.
+      const stateVal = val(3)
+      const prevState = this._prevSurgeState[t.tankId]
+      if (prevState !== null && prevState !== stateVal) {
+        this._surgeRateWindow[t.tankId] = []
+      }
+      this._prevSurgeState[t.tankId] = stateVal
+
       const prevAt = this._prevSurgeGalAt[t.tankId]
       let pollRateLbsPerMin = null
-      if (pollDeltaGal != null && prevAt != null) {
+      const isCip = stateVal === 4
+      if (!isCip && pollDeltaGal != null && prevAt != null) {
         const elapsedMin = (now - prevAt) / 60000
         if (elapsedMin > 0) {
           const instantRate = (pollDeltaGal * MILK_DENSITY_PPG) / elapsedMin
@@ -1073,7 +1087,7 @@ class RestProvider extends BaseProvider {
         pollDeltaGal,
         pollRateLbsPerMin,
         productDesc: txt(2),
-        state: val(3),
+        state: stateVal,
         empty: !!val(4),
         connected: !!val(5),
         sterProdBarrOK: !!val(6),
