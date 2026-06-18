@@ -2,14 +2,19 @@
  * Tank-at-rest inventory reconciliation sweep.
  *
  * Every 5 min, walks the M-silos, C-silos, and blend tanks. For each tank
- * that has had no flow movement during the window, computes the 5-min
+ * that has no live flow movement during the window, computes the 5-min
  * average level in lbs, compares it to NS bin (and lot, for blend tanks)
  * on-hand, and posts a signed inventory adjustment when |delta| >= 500 lb.
  *
- * Surge tanks are out of scope — UHT/surge production is continuous and
- * doesn't have meaningful at-rest windows. Lot-tracked blend tanks are
- * only swept BETWEEN WOs (active batches are skipped); the regular blend
- * tank tick handles motion-driven inventory while a WO is running.
+ * Silos are swept between batches to pre-fund the NS bin before the next
+ * blend WO starts issuing from it. During an active blend batch the silo
+ * is in live flow (siloName set on the milk line) so it is skipped here;
+ * the blend tick's WO issues handle consumption accounting at that point.
+ *
+ * Blend tanks are only swept BETWEEN WOs (active batches are skipped); the
+ * regular blend tank tick handles motion-driven inventory while a WO is
+ * running. Surge tanks are out of scope — UHT/surge production is
+ * continuous and doesn't have meaningful at-rest windows.
  *
  * Tanks-at-rest have +/- ~800 lbs of sensor noise, which is why we average
  * across the window instead of using a single instantaneous read.
@@ -48,24 +53,25 @@ function normName(s) {
 }
 
 /**
- * Collect the set of tank / silo names that any milk line has touched as
- * either source (siloName / memSiloName) or destination (requestedBy /
- * memRequestedBy) in the current snapshot. The MEM* tags latch the most
- * recent flow's source/dest even after the live tags clear, so they cover
- * tanks that just stopped flowing within the window.
+ * Collect the set of tank / silo names that are currently in live flow on
+ * any milk line, using only the live tags (siloName, requestedBy). MEM*
+ * latch tags (memSiloName, memRequestedBy) are intentionally excluded:
+ * they hold the last flow's source/dest indefinitely after flow ends and
+ * would permanently pin recently-used silos in the skip set, preventing
+ * the sweep from pre-funding those silo bins before the next batch.
+ * Tanks that just stopped flowing within the window are caught by the
+ * AT_REST_RANGE_LBS range check instead.
  */
 function collectActiveRoutes(milkLines) {
   const set = new Set()
   for (const line of milkLines || []) {
-    const candidates = [line.siloName, line.memSiloName, line.requestedBy, line.memRequestedBy]
+    const candidates = [line.siloName, line.requestedBy]
     for (const c of candidates) {
       const n = normName(c)
       if (n) set.add(n)
       const canonical = itemConfig.normalizeSiloName(n)
       if (canonical) set.add(canonical)
     }
-    // Active flow on the line itself doesn't pin a tank by name alone, but the
-    // siloName + requestedBy fields above already do.
   }
   return set
 }
