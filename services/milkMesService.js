@@ -5,6 +5,13 @@ const config = require('../config')
 const db = require('../models')
 const clock = require('../sim/clock')
 
+// NS bin id for "SEPARATOR-ADJUSTMENTS" — the scratch bin we stage phantom
+// source-item inventory into to defeat the assemblyUnbuild "largest-other-bin"
+// cap (constraint #2 in [[assemblyunbuild_must_be_n]]). Raised to unbuildQty+1
+// just before the unbuild and zeroed right back out after, so it never carries
+// lasting inventory.
+const SEPARATOR_ADJ_BIN_ID = 5016
+
 async function processSeparationBatch(data) {
   const {
     batchId, sourceSilo: sourceRaw, destinations: destsRaw = [], siloProductConfig = {},
@@ -387,7 +394,70 @@ async function processSeparationBatch(data) {
       }
     }
 
-    const nsResult = await core.netsuitePost('/record/v1/assemblyUnbuild', body)
+    // Defeat the assemblyUnbuild "largest-other-bin" cap (constraint #2 in
+    // [[assemblyunbuild_must_be_n]]): NS caps the unbuild qty at the on-hand of
+    // the single largest-content bin OTHER than the assigned source bin. Stage
+    // unbuildQty+1 of the source item into the SEPARATOR-ADJUSTMENTS bin (5016)
+    // so it becomes the largest-other bin and lifts the cap above our request.
+    // Zeroed back out in the finally below, success or fail, so it carries no
+    // lasting phantom inventory.
+    let capBinStaged = false
+    if (sourceItem?.id && unbuildQty > 0) {
+      const capTarget = unbuildQty + 1
+      let capOnHand = await inventoryAdjustment.getBinQtyOnHand(sourceItem.id, SEPARATOR_ADJ_BIN_ID)
+      if (capOnHand + 1e-6 < capTarget) {
+        const upBy = capTarget - capOnHand
+        console.log(`[MilkMesService] Raising unbuild cap for batch ${batchId}: staging item ${sourceItem.id} into bin ${SEPARATOR_ADJ_BIN_ID} (+${upBy.toFixed(2)} lb → ${capTarget.toFixed(2)})`)
+        const adj = await inventoryAdjustment.submitInventoryAdjustment({
+          binId: SEPARATOR_ADJ_BIN_ID,
+          itemId: sourceItem.id,
+          qtyDelta: upBy,
+          source: 'unbuild_cap',
+          tankName: 'SEPARATOR-ADJUSTMENTS',
+          memo: `Auto-adjust: raise unbuild cap for batch ${batchId} (+${upBy.toFixed(2)} lb to bin ${SEPARATOR_ADJ_BIN_ID})`,
+        })
+        if (!adj?.ok) {
+          console.warn(`[MilkMesService] Unbuild-cap stage for batch ${batchId} did not succeed: ${adj?.error || adj?.skipped || 'unknown'}`)
+        }
+        // NS inventorybalance lags the adjustment POST — poll (backoff) until the
+        // cap bin reflects the staged on-hand before submitting the unbuild.
+        for (const delay of [1000, 2000, 3000]) {
+          if (capOnHand + 1e-6 >= capTarget) break
+          await new Promise(r => setTimeout(r, delay))
+          capOnHand = await inventoryAdjustment.getBinQtyOnHand(sourceItem.id, SEPARATOR_ADJ_BIN_ID)
+        }
+        if (capOnHand + 1e-6 < capTarget) {
+          console.warn(`[MilkMesService] Cap bin still short after stage+poll for batch ${batchId}: on-hand ${capOnHand.toFixed(1)} < ${capTarget.toFixed(1)} — submitting anyway`)
+        }
+      }
+      capBinStaged = true
+    }
+
+    let nsResult
+    try {
+      nsResult = await core.netsuitePost('/record/v1/assemblyUnbuild', body)
+    } finally {
+      // Always remove the staged cap inventory, whether the unbuild succeeded or
+      // threw — leaving it would carry lasting phantom source-item inventory.
+      if (capBinStaged && sourceItem?.id) {
+        try {
+          const leftover = await inventoryAdjustment.getBinQtyOnHand(sourceItem.id, SEPARATOR_ADJ_BIN_ID)
+          if (leftover > 1e-6) {
+            console.log(`[MilkMesService] Clearing unbuild cap bin for batch ${batchId}: item ${sourceItem.id} bin ${SEPARATOR_ADJ_BIN_ID} (-${leftover.toFixed(2)} lb → 0)`)
+            await inventoryAdjustment.submitInventoryAdjustment({
+              binId: SEPARATOR_ADJ_BIN_ID,
+              itemId: sourceItem.id,
+              qtyDelta: -leftover,
+              source: 'unbuild_cap',
+              tankName: 'SEPARATOR-ADJUSTMENTS',
+              memo: `Auto-adjust: clear unbuild cap bin for batch ${batchId} (-${leftover.toFixed(2)} lb)`,
+            })
+          }
+        } catch (clearErr) {
+          console.warn(`[MilkMesService] Failed to clear unbuild cap bin for batch ${batchId}: ${clearErr.message.slice(0, 200)}`)
+        }
+      }
+    }
 
     const locHeader = nsResult?.headers?.location || nsResult?.headers?.Location || ''
     const locId = locHeader.match(/\/(\d+)(?:\?.*)?$/)?.[1] || null
