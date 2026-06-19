@@ -146,15 +146,18 @@ class MockProvider extends BaseProvider {
 
   async getSiloStatus() {
     const SILO_CAPACITY_GAL = { milk: 60000, cream: 20000 }
+    // productIndex mirrors the live IndexSelectRead tag (Standardization HMI
+    // 1-40 code) the sweep now resolves the item from. 15=raw conv milk,
+    // 16=raw org milk, 11=conv cream, 12=org cream.
     const silos = [
-      { siloId: 'MSilo1', kind: 'milk', productName: 'Raw Conventional Milk' },
-      { siloId: 'MSilo2', kind: 'milk', productName: 'Raw Conventional Milk' },
-      { siloId: 'MSilo3', kind: 'milk', productName: 'Raw Conventional Milk' },
-      { siloId: 'MSilo4', kind: 'milk', productName: 'Raw Organic Milk' },
-      { siloId: 'MSilo5', kind: 'milk', productName: 'Raw Organic Milk' },
-      { siloId: 'CSilo1', kind: 'cream', productName: 'Raw Conventional Cream' },
-      { siloId: 'CSilo2', kind: 'cream', productName: 'Raw Conventional Cream' },
-      { siloId: 'CSilo3', kind: 'cream', productName: 'Raw Organic Cream' },
+      { siloId: 'MSilo1', kind: 'milk', productName: 'Raw Conventional Milk', productIndex: 15 },
+      { siloId: 'MSilo2', kind: 'milk', productName: 'Raw Conventional Milk', productIndex: 15 },
+      { siloId: 'MSilo3', kind: 'milk', productName: 'Raw Conventional Milk', productIndex: 15 },
+      { siloId: 'MSilo4', kind: 'milk', productName: 'Raw Organic Milk', productIndex: 16 },
+      { siloId: 'MSilo5', kind: 'milk', productName: 'Raw Organic Milk', productIndex: 16 },
+      { siloId: 'CSilo1', kind: 'cream', productName: 'Raw Conventional Cream', productIndex: 11 },
+      { siloId: 'CSilo2', kind: 'cream', productName: 'Raw Conventional Cream', productIndex: 11 },
+      { siloId: 'CSilo3', kind: 'cream', productName: 'Raw Organic Cream', productIndex: 12 },
     ]
     return silos.map(s => {
       const capacity = SILO_CAPACITY_GAL[s.kind]

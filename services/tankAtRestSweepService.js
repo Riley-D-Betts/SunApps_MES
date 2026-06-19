@@ -117,10 +117,22 @@ async function sweepSilo({ silo, activeRoutes, historian, windowStart, windowEnd
     return { tankName, skipped: 'active-route' }
   }
 
-  const item = itemConfig.SILO_ITEM_MAP[tankName]
   const binId = itemConfig.SILO_BIN_MAP[tankName]
-  if (!item?.id || !binId) {
-    return { tankName, skipped: 'no-item-or-bin-mapping' }
+  if (!binId) {
+    return { tankName, skipped: 'no-bin-mapping' }
+  }
+
+  // Silos are product-flexible — any silo can hold any milk or cream, raw or
+  // separated — so the static SILO_ITEM_MAP cannot say what's actually in the
+  // silo. Resolve the item from the LIVE Standardization HMI product index
+  // (IndexSelectRead, surfaced as silo.productIndex by getSiloStatus), exactly
+  // as the separation unbuild does (milkMesService getItemByProductIndex). If
+  // the live index yields no NS item, SKIP rather than reconcile against an
+  // arbitrary item — posting against the wrong item is what produced mislabeled
+  // adjustments whose two transfer legs never cancelled per item.
+  const item = itemConfig.getItemByProductIndex(silo.productIndex)
+  if (!item?.id) {
+    return { tankName, skipped: 'no-product-index', productIndex: silo.productIndex || 0 }
   }
 
   const reading = await readAvgLbs(historian, siloLbsFqn(tankName), windowStart, windowEnd, silo.lbs)
@@ -135,7 +147,7 @@ async function sweepSilo({ silo, activeRoutes, historian, windowStart, windowEnd
     return { tankName, skipped: 'below-threshold', delta }
   }
 
-  console.log(`[TankAtRestSweep] ${tankName}: observed ${reading.avgLbs.toFixed(0)} lb (${reading.source}, n=${reading.sampleCount}), NS ${nsQty.toFixed(0)} lb → Δ ${delta.toFixed(0)} lb`)
+  console.log(`[TankAtRestSweep] ${tankName}: observed ${reading.avgLbs.toFixed(0)} lb (${reading.source}, n=${reading.sampleCount}), NS ${nsQty.toFixed(0)} lb (item ${item.id} "${item.name}", idx ${silo.productIndex}) → Δ ${delta.toFixed(0)} lb`)
   const result = await inventoryAdjustment.submitInventoryAdjustment({
     binId,
     itemId: item.id,
@@ -144,9 +156,9 @@ async function sweepSilo({ silo, activeRoutes, historian, windowStart, windowEnd
     tankName,
     observedLbs: reading.avgLbs,
     nsQtyBefore: nsQty,
-    memo: `Sweep: ${tankName} 5-min avg ${reading.avgLbs.toFixed(0)} vs NS ${nsQty.toFixed(0)} lb`,
+    memo: `Sweep: ${tankName} 5-min avg ${reading.avgLbs.toFixed(0)} vs NS ${nsQty.toFixed(0)} lb (item ${item.id}, idx ${silo.productIndex})`,
   })
-  return { tankName, adjusted: !!result?.ok, failed: !result?.ok, delta, ...result }
+  return { tankName, adjusted: !!result?.ok, failed: !result?.ok, delta, itemId: item.id, productIndex: silo.productIndex, ...result }
 }
 
 async function sweepBlendTank({ tank, activeRoutes, historian, windowStart, windowEnd }) {
