@@ -29,6 +29,14 @@ const MILK_DENSITY_PPG   = 8.6   // whole/low-fat estimate for surge tank rate d
 // At the default 5-second poll interval, 24 samples ≈ 2 minutes of smoothing.
 const SURGE_RATE_WINDOW  = 24
 
+// Reject flow-rate samples whose interval is shorter than this (minutes). Two
+// crons hit getSurgeTankStatus against the shared provider — surgeTank @5s and
+// equipment @10s — so every ~10s they fire within the same second. A quantized
+// 1-5 gal level change divided by that sub-second gap yields a 5k-30k lbs/min
+// spike that pollutes the rolling average. A floor just under the fastest real
+// poll (5s ≈ 0.083 min) drops the co-incident samples but keeps legitimate ones.
+const MIN_RATE_ELAPSED_MIN = 0.05   // ≈ 3 seconds
+
 // PROCESS step 24 — the only step where the UHT is actually pushing sterile
 // product downstream into a surge tank. FT1102 still reads ~100 GPM during the
 // "Sterile on Water" / phase-change steps, but that flow is recirculating water
@@ -169,12 +177,22 @@ class RestProvider extends BaseProvider {
     this._prevCreamTotal = null
     this._prevSkimTotal = null
 
-    // Per-surge-tank previous gallons + timestamp for flow-rate calculation.
-    // First poll populates prevGal; second poll produces a delta + rate.
+    // Per-surge-tank previous gallons for the pollDeltaGal fill-detection signal
+    // (consumed by equipmentJob hysteresis + the batch-start gate). First poll
+    // populates it; subsequent polls produce a signed delta.
     this._prevSurgeGal   = { ST81: null, ST82: null, ST83: null, ST84: null }
-    this._prevSurgeGalAt = { ST81: null, ST82: null, ST83: null, ST84: null }
+    // Dedicated baseline (gal + timestamp) for the flow-RATE calc, owned solely
+    // by getSurgeTankStatus. Kept separate from _prevSurgeGal and from
+    // getUhtDestinationSurgeTank's baseline so no other caller can desync the
+    // rate's gal-vs-timestamp pairing. Advances only on an accepted sample.
+    this._surgeRatePrevGal = { ST81: null, ST82: null, ST83: null, ST84: null }
+    this._surgeRatePrevAt  = { ST81: null, ST82: null, ST83: null, ST84: null }
     // Sliding window of recent instantaneous rates (lbs/min) per tank.
     this._surgeRateWindow = { ST81: [], ST82: [], ST83: [], ST84: [] }
+    // Previous gallons for getUhtDestinationSurgeTank's rising-tank detection.
+    // Separate from the above so that method never stomps the rate / pollDelta
+    // baselines used by getSurgeTankStatus.
+    this._destPrevGal = { ST81: null, ST82: null, ST83: null, ST84: null }
     // Previous state code per tank — used to detect CIP↔production transitions
     // so the rate window can be flushed before stale data reaches the dashboard.
     this._prevSurgeState = { ST81: null, ST82: null, ST83: null, ST84: null }
@@ -1050,29 +1068,48 @@ class RestProvider extends BaseProvider {
       // Rolling-averaged flow rate in lbs/min so the dashboard can show
       // "filling at X lbs/min" / "draining at X lbs/min".
       // Gate: skip accumulation during CIP (state 4) so cleaning fill/drain
-      // never contaminates the production rate. Flush the window on any state
-      // transition so CIP data doesn't bleed into the next production run.
+      // never contaminates the production rate. Flush the window AND drop the
+      // rate baseline on any state transition so CIP data doesn't bleed into
+      // the next production run and the first post-transition interval doesn't
+      // span the gap.
       const stateVal = val(3)
       const prevState = this._prevSurgeState[t.tankId]
+      const isCip = stateVal === 4
       if (prevState !== null && prevState !== stateVal) {
-        this._surgeRateWindow[t.tankId] = []
+        this._surgeRateWindow[t.tankId]  = []
+        this._surgeRatePrevGal[t.tankId] = null
+        this._surgeRatePrevAt[t.tankId]  = null
       }
       this._prevSurgeState[t.tankId] = stateVal
 
-      const prevAt = this._prevSurgeGalAt[t.tankId]
+      // Measured against this method's own baseline, and a new sample is folded
+      // in only once the interval clears MIN_RATE_ELAPSED_MIN — that drops the
+      // sub-second samples produced when the surgeTank and equipment crons call
+      // back-to-back (which otherwise spike the average into the tens of
+      // thousands of lbs/min). The baseline advances only on an accepted sample,
+      // so every interval is a real poll gap. The smoothed average is always
+      // reported, so a too-soon poll still returns the last good rate, not null.
       let pollRateLbsPerMin = null
-      const isCip = stateVal === 4
-      if (!isCip && pollDeltaGal != null && prevAt != null) {
-        const elapsedMin = (now - prevAt) / 60000
-        if (elapsedMin > 0) {
-          const instantRate = (pollDeltaGal * MILK_DENSITY_PPG) / elapsedMin
-          const win = this._surgeRateWindow[t.tankId]
-          win.push(instantRate)
-          if (win.length > SURGE_RATE_WINDOW) win.shift()
-          pollRateLbsPerMin = win.reduce((a, b) => a + b, 0) / win.length
+      const win = this._surgeRateWindow[t.tankId]
+      if (!isCip) {
+        const ratePrevGal = this._surgeRatePrevGal[t.tankId]
+        const ratePrevAt  = this._surgeRatePrevAt[t.tankId]
+        if (ratePrevGal != null && ratePrevAt != null) {
+          const elapsedMin = (now - ratePrevAt) / 60000
+          if (elapsedMin >= MIN_RATE_ELAPSED_MIN) {
+            const instantRate = ((mainGallons - ratePrevGal) * MILK_DENSITY_PPG) / elapsedMin
+            win.push(instantRate)
+            if (win.length > SURGE_RATE_WINDOW) win.shift()
+            this._surgeRatePrevGal[t.tankId] = mainGallons
+            this._surgeRatePrevAt[t.tankId]  = now
+          }
+        } else {
+          // Seed the baseline on the first qualifying poll (or after a flush).
+          this._surgeRatePrevGal[t.tankId] = mainGallons
+          this._surgeRatePrevAt[t.tankId]  = now
         }
+        if (win.length > 0) pollRateLbsPerMin = win.reduce((a, b) => a + b, 0) / win.length
       }
-      this._prevSurgeGalAt[t.tankId] = now
 
       // Filler lines this tank is routed to (Sel{1-5} latch === 1). When any is
       // set a filler is plumbed to the tank and may draw product out the bottom
@@ -1134,8 +1171,8 @@ class RestProvider extends BaseProvider {
     let bestDelta = -Infinity
     connectedTanks.forEach((tid, i) => {
       const currentGal = galValues[i]?.Value ?? 0
-      const delta = this._prevSurgeGal[tid] == null ? 0 : currentGal - this._prevSurgeGal[tid]
-      this._prevSurgeGal[tid] = currentGal
+      const delta = this._destPrevGal[tid] == null ? 0 : currentGal - this._destPrevGal[tid]
+      this._destPrevGal[tid] = currentGal
       if (delta > bestDelta) { bestDelta = delta; activeTank = tid }
     })
     const surgeTankId = bestDelta > 0 ? activeTank : connectedTanks[0]
