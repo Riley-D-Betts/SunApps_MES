@@ -28,6 +28,11 @@ function splitValues(raw) {
   return String(raw).split(',').map(s => s.trim()).filter(Boolean)
 }
 
+// Coerce a query-string flag ('true'/'1'/true) to a boolean.
+function truthy(v) {
+  return v === true || v === 'true' || v === '1' || v === 1
+}
+
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
 function buildWhere({ from, to, dateField, tankId, tankField, status, product }) {
@@ -224,7 +229,7 @@ async function getSeparationTrend({ from, to, groupBy, sourceSilo, status }) {
 // tank-at-rest reconciliation) and 'shortfall' (inline top-ups before a retry).
 // Every attempt is audited, including dry_run / error / skipped rows.
 
-function buildInvAdjustWhere({ from, to, source, status, binId, itemId, tankName }) {
+function buildInvAdjustWhere({ from, to, source, status, binId, itemId, tankName, excludePositiveSilo }) {
   const where = {}
 
   // Op.gte/Op.lte are Symbol keys (invisible to Object.keys) — guard on raw inputs.
@@ -248,6 +253,15 @@ function buildInvAdjustWhere({ from, to, source, status, binId, itemId, tankName
   if (binId)  where.binId  = Number(binId)
   if (itemId) where.itemId = String(itemId)
   if (tankName) where.tankName = { [Op.like]: `%${tankName}%` }
+
+  // Exclude positive silo adjustments — a sweep up-adjustment on a silo, i.e. as
+  // if a truck delivery raised the silo level. Keep null-tankName rows and any
+  // non-positive delta (NOT (silo AND up) expressed null-safely).
+  if (truthy(excludePositiveSilo)) {
+    where[Op.and] = [
+      literal("([tankName] IS NULL OR [tankName] NOT LIKE '%silo%' OR [qtyDelta] <= 0)"),
+    ]
+  }
 
   return where
 }
@@ -276,8 +290,8 @@ async function getInvAdjustSummary(where) {
   }
 }
 
-async function getInventoryAdjustments({ from, to, source, status, binId, itemId, tankName, sortBy, sortDir, limit, offset }) {
-  const where = buildInvAdjustWhere({ from, to, source, status, binId, itemId, tankName })
+async function getInventoryAdjustments({ from, to, source, status, binId, itemId, tankName, excludePositiveSilo, sortBy, sortDir, limit, offset }) {
+  const where = buildInvAdjustWhere({ from, to, source, status, binId, itemId, tankName, excludePositiveSilo })
   const order = buildOrder(sortBy, sortDir, INV_ADJUST_SORT_FIELDS)
   const safeLimit  = Math.min(Number(limit)  || 200, 500)
   const safeOffset = Math.max(Number(offset) || 0, 0)
@@ -289,7 +303,7 @@ async function getInventoryAdjustments({ from, to, source, status, binId, itemId
   return { total: summary.count, adjustments: rows, summary }
 }
 
-async function getInventoryAdjustmentTrend({ from, to, groupBy = 'day', source, status }) {
+async function getInventoryAdjustmentTrend({ from, to, groupBy = 'day', source, status, excludePositiveSilo }) {
   const tableName = db.MesInventoryAdjustment.getTableName()
   const dateField = 'createdAt'
   const conditions = [`[${dateField}] IS NOT NULL`]
@@ -312,6 +326,9 @@ async function getInventoryAdjustmentTrend({ from, to, groupBy = 'day', source, 
       values.forEach((v, i) => { replacements[`status${i}`] = v })
       conditions.push(`[status] IN (${names.join(', ')})`)
     }
+  }
+  if (truthy(excludePositiveSilo)) {
+    conditions.push("([tankName] IS NULL OR [tankName] NOT LIKE '%silo%' OR [qtyDelta] <= 0)")
   }
 
   const dateExpr = groupBy === 'week'

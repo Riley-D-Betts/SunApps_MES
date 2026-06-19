@@ -84,7 +84,7 @@ exports.getSeparationTrend = async (req, res) => {
 
 exports.getInventoryAdjustments = async (req, res) => {
   try {
-    const params = pick(req.query, ['from', 'to', 'source', 'status', 'binId', 'itemId', 'tankName', 'sortBy', 'sortDir', 'limit', 'offset'])
+    const params = pick(req.query, ['from', 'to', 'source', 'status', 'binId', 'itemId', 'tankName', 'excludePositiveSilo', 'sortBy', 'sortDir', 'limit', 'offset'])
     const result = await analyticsService.getInventoryAdjustments(params)
     return res.json({ success: true, ...result })
   } catch (err) {
@@ -95,7 +95,7 @@ exports.getInventoryAdjustments = async (req, res) => {
 
 exports.getInventoryAdjustmentTrend = async (req, res) => {
   try {
-    const params = pick(req.query, ['from', 'to', 'groupBy', 'source', 'status'])
+    const params = pick(req.query, ['from', 'to', 'groupBy', 'source', 'status', 'excludePositiveSilo'])
     const points = await analyticsService.getInventoryAdjustmentTrend(params)
     return res.json({ success: true, points })
   } catch (err) {
