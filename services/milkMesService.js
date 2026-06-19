@@ -4,6 +4,7 @@ const inventoryAdjustment = require('./inventoryAdjustmentService')
 const config = require('../config')
 const db = require('../models')
 const clock = require('../sim/clock')
+const statusStore = require('./statusStore')
 
 // NS bin id for "SEPARATOR-ADJUSTMENTS" — the scratch bin we stage phantom
 // source-item inventory into to defeat the assemblyUnbuild "largest-other-bin"
@@ -661,6 +662,11 @@ async function retrySeparationBatch(id, overrides = {}) {
 
   const result = await processSeparationBatch(payload)
   const batch = await db.MesSeparationBatch.findByPk(id)
+  // Retry runs OUTSIDE the separator state machine (which is what normally
+  // pushes batch summaries into statusStore's recentBatches ring). Without this
+  // the live status panel keeps rendering the stale pre-retry 'error' entry even
+  // though the DB row is now 'completed'. Refresh the ring from the updated row.
+  if (batch) statusStore.pushSeparationBatchFromDbRow(batch)
   return { result, batch }
 }
 
@@ -679,6 +685,9 @@ async function rejectSeparationBatch(id, { decidedBy, reason } = {}) {
     errorMessage: reason ? `Rejected by ${who}: ${reason}` : `Rejected by ${who}`,
   })
   console.log(`[MilkMesService] Separation batch ${id} (${row.batchId}) rejected by ${who}`)
+  // Same as retry: refresh the live ring so the rejected batch stops rendering
+  // as an 'error' on the live status panel.
+  statusStore.pushSeparationBatchFromDbRow(row)
   return row
 }
 
