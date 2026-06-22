@@ -5,6 +5,7 @@ const lineMapper = require('./lineIngredientMapper')
 const nsInventory = require('./nsInventoryLookup')
 const inventoryAdjustment = require('./inventoryAdjustmentService')
 const batchStartFinder = require('./batchStartFinder')
+const costReval = require('./costRevaluationService')
 const statusStore = require('./statusStore')
 const config = require('../config')
 const db = require('../models')
@@ -18,6 +19,44 @@ function nsErrShort(err) {
   const msg = String(err?.message || '')
   const m = msg.match(/"detail":"([^"]+)"/)
   return m ? m[1] : msg.slice(0, 200)
+}
+
+// Per-process throttle so we attempt a cost-basis revaluation at most once per
+// assembly item — needsCostBasis() is also idempotent (it bails once an InvReval
+// exists), this just avoids re-querying NS every failed tick.
+const _costBasisAttempted = new Set()
+
+// Fallback for the misleading NS error "Inventory Revaluation is no longer the
+// first transaction in the item's history". For a STANDARD-cost item with no
+// cost basis (cost=0, no InvReval) this means no revaluation ever happened, so
+// the assembly can't be issued/built. We post a BOM-rollup inventoryCostRevaluation
+// (see costRevaluationService); baselines didn't advance on the failed issue, so
+// the next tick re-issues naturally once the basis exists. Alerts either way so a
+// human knows. Throttled to one attempt per assembly item per process.
+async function remediateCostBasisIfNeeded(batch, err) {
+  if (!costReval.isNoCostBasisError(err)) return
+  const assemblyItemId = batch?.mesItem
+  if (!assemblyItemId) return
+  if (_costBasisAttempted.has(assemblyItemId)) return
+  _costBasisAttempted.add(assemblyItemId)
+
+  try {
+    const result = await costReval.ensureCostBasis({ assemblyItemId })
+    if (result.revalued) {
+      const msg = `${batch.tankId}: item ${assemblyItemId} had no cost basis — posted revaluation @ ${result.unitCost?.toFixed?.(5)}/unit (tranDate ${result.tranDate}). Issues will retry next tick.`
+      console.log(`[BlendTankMesService] ${msg}`)
+      statusStore.pushEvent('blendTank.costBasisFixed', msg, { tankId: batch.tankId, assemblyItemId, unitCost: result.unitCost })
+      await core.sendStagingNotification('MES: auto-revalued item with no cost basis', msg).catch(() => {})
+    } else {
+      const msg = `${batch.tankId}: item ${assemblyItemId} issues are failing on a missing cost basis and auto-revaluation did NOT run (${result.reason}). Needs manual standard-cost setup in NetSuite.`
+      console.warn(`[BlendTankMesService] ${msg}`)
+      statusStore.pushEvent('blendTank.costBasisBlocked', msg, { tankId: batch.tankId, assemblyItemId, reason: result.reason })
+      await core.sendStagingNotification('MES: item blocked — no cost basis, manual fix needed', msg).catch(() => {})
+    }
+  } catch (e) {
+    console.error(`[BlendTankMesService] cost-basis remediation for item ${assemblyItemId} failed: ${e.message}`)
+    _costBasisAttempted.delete(assemblyItemId) // allow a retry next tick on transient failure
+  }
 }
 
 // NS rejects a workOrderCompletion with this (wrapped through Core API as a
@@ -423,6 +462,33 @@ async function processWOStart(data, historian) {
       return { success: true, duplicate: false, tankId, productName, status: 'pending_ns', parsed }
     }
 
+    // Defensive guard: a blend-tank WO must BUILD a lot-tracked item. If the
+    // product resolved to a NON-lot item (e.g. a standardization milk that
+    // wasn't repointed to its lot twin), creating the WO would seed the assembly
+    // as its own component (circular) and the issue/build would fail on a
+    // missing cost basis — the exact failure mode that lost 207k lb over a
+    // weekend. Park as pending_ns + alert instead of opening a doomed WO.
+    let assemblyTracking
+    try {
+      assemblyTracking = await nsInventory.getItemTracking(assemblyItem.id)
+    } catch (err) {
+      console.warn(`[BlendTankMesService] could not read tracking for item ${assemblyItem.id}: ${err.message} — proceeding`)
+    }
+    if (assemblyTracking && !assemblyTracking.isLot) {
+      const msg = `${tankId}: "${productName}" resolved to NON-lot item ${assemblyItem.id} (${assemblyItem.name}). A batch tank must build a lot-tracked item — needs a "(Batch)" lot twin + parser repoint. Parked pending_ns (no WO created).`
+      console.warn(`[BlendTankMesService] ${msg}`)
+      await record.update({ status: 'pending_ns', errorMessage: `non-lot assembly ${assemblyItem.id}` })
+      statusStore.pushEvent('blendTank.nonLotAssembly', msg, { tankId, productName, assemblyItemId: assemblyItem.id })
+      await core.sendStagingNotification('MES: batch product is not lot-tracked', msg).catch(() => {})
+      await db.MesProcessingLog.create({
+        eventType: 'blend_tank_wo_create', sourceId: `${tankId}:${productName}`,
+        nsTransactionType: 'workOrder', payload: JSON.stringify(data),
+        result: JSON.stringify({ skipped: 'assembly not lot-tracked', assemblyItemId: assemblyItem.id, parsed }),
+        success: true,
+      })
+      return { success: true, duplicate: false, tankId, productName, status: 'pending_ns', parsed }
+    }
+
     const body = {
       assemblyItem: { id: assemblyItem.id },
       quantity: batchSize || 1,
@@ -814,6 +880,7 @@ async function backfillUnmatchedInflows(batch) {
         payload: JSON.stringify({ batchId: batch.id, totalLbs: g.totalLbs, binId: g.binId }),
         success: false, errorMessage: err.message,
       })
+      await remediateCostBasisIfNeeded(batch, err)
     }
   }
 
@@ -839,7 +906,7 @@ async function backfillUnmatchedInflows(batch) {
  * captures it the moment blendTankJob detects the reset.
  */
 async function processLineFlow(data) {
-  const { line, totalLbs, lineProductName, ingredientType, siloName, destination, resetTime } = data
+  const { line, totalLbs, lineProductName, productCode, ingredientType, siloName, destination, resetTime } = data
 
   if (!line) throw new Error('line is required')
   if (!totalLbs || totalLbs <= 0) return { success: true, skipped: 'no flow' }
@@ -916,7 +983,7 @@ async function processLineFlow(data) {
     return { success: true, inflowId: record.id, status: 'tick_already_issued' }
   }
 
-  const component = resolveLineComponent({ line, productName: lineProductName })
+  const component = resolveLineComponent({ line, productName: lineProductName, productCode })
   const binId = itemConfig.getBinId(siloName)
 
   const inflowRecord = await db.MesBlendTankInflow.create({
@@ -1036,6 +1103,7 @@ async function processLineFlow(data) {
       nsTransactionType: 'workOrderIssue', payload: JSON.stringify(data),
       success: false, errorMessage: err.message,
     })
+    await remediateCostBasisIfNeeded(targetBatch, err)
     return { success: true, inflowId: inflowRecord.id, status: 'error', error: err.message }
   }
 }
@@ -1120,6 +1188,14 @@ async function issueIngredient(batchId, data) {
  * only when no productName is available at all.
  */
 function resolveLineComponent(reading) {
+  // Prefer the standardized AVEVA source Product Type code (exact-match) over
+  // the legacy free-text productName. Only when it resolves to a real item — a
+  // null (None/Water/Blowback/unmapped) falls through so an explicit skip code
+  // doesn't silently mis-issue via the free-text path.
+  if (reading.productCode != null) {
+    const m = lineMapper.resolveSourceProductCode(reading.productCode)
+    if (m) return { ...m, resolvedFrom: 'product-code' }
+  }
   if (reading.productName) {
     const m = lineMapper.resolveLineProduct(reading.productName)
     if (m) return { ...m, resolvedFrom: 'scada' }
@@ -1670,6 +1746,9 @@ async function tickIssuesForBatch(batch, lineReadings) {
         success: false,
         errorMessage: err.message,
       })
+      // If this is the "no cost basis" failure, post a revaluation so the next
+      // tick's retry can succeed (baselines deliberately not advanced below).
+      await remediateCostBasisIfNeeded(batch, err)
       // Don't advance any baselines — every member's delta retries on next tick
     }
   }

@@ -54,13 +54,17 @@ const tankState = {
 }
 
 const lineState = {
-  ML1: { prevValue: null, productName: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
-  ML2: { prevValue: null, productName: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
-  ML3: { prevValue: null, productName: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
-  ML4: { prevValue: null, productName: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
-  CL1: { prevValue: null, productName: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
-  CL2: { prevValue: null, productName: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  ML1: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  ML2: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  ML3: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  ML4: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  CL1: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  CL2: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
 }
+
+// A source product-type code is "real" (issuable) only when present and non-zero
+// — 0 = None and the idle/reset default. Used to pick the live vs latched code.
+const validCode = c => c != null && String(c).trim() !== '' && String(c).trim() !== '0'
 
 let lastPollTime = new Date()
 
@@ -166,7 +170,7 @@ async function run(historian) {
     for (const reading of lineReadings) {
       const {
         line, totalizerLbs, productName, siloName, requestedBy, requestedTargetLbs,
-        memRequestedBy, memSiloName, memProductName, memTotalizerLbs,
+        memRequestedBy, memSiloName, memProductName, memTotalizerLbs, memProductCode,
       } = reading
       const prev = lineState[line]
       if (!prev || prev.prevValue === null) continue
@@ -185,6 +189,10 @@ async function run(historian) {
 
       if ((totalizerReset || productCleared) && (hadProduct || validStr(memProductName))) {
         const flowProduct = validStr(memProductName) || prev.productName
+        // Live code reset to 0 on flow-end → prefer the latched MEM code, else
+        // the code captured during flow. Lets processLineFlow resolve the
+        // component by exact product-type code instead of the free-text name.
+        const flowProductCode = validCode(memProductCode) ? memProductCode : prev.productCode
         const flowSilo = validStr(memSiloName) || prev.siloName || ''
         const flowDest = validStr(memRequestedBy) || prev.requestedBy || ''
         const batchTotalLbs = memTotalizerLbs > 0
@@ -195,7 +203,7 @@ async function run(historian) {
         statusStore.pushEvent('line.flowComplete', `${line}: ${batchTotalLbs.toFixed(0)} LBS "${flowProduct}" (${flowSilo || '?'} → ${flowDest || '?'})`, { line, totalLbs: batchTotalLbs, productName: flowProduct, siloName: flowSilo, destination: flowDest })
         try {
           await blendTankMesService.processLineFlow({
-            line, totalLbs: batchTotalLbs, lineProductName: flowProduct,
+            line, totalLbs: batchTotalLbs, lineProductName: flowProduct, productCode: flowProductCode,
             siloName: flowSilo, destination: flowDest,
             requestedTargetLbs: prev.requestedTargetLbs || 0, resetTime: new Date(clock.now()).toISOString(),
           })
@@ -296,7 +304,7 @@ async function run(historian) {
     // MEM* routing tags come from the pre-pass; live tags update here.
     for (const reading of lineReadings) {
       const {
-        line, totalizerLbs, productName, siloName, requestedBy, requestedTargetLbs,
+        line, totalizerLbs, productName, productCode, siloName, requestedBy, requestedTargetLbs,
         memTotalizerLbs,
       } = reading
       const prev = lineState[line]
@@ -305,6 +313,7 @@ async function run(historian) {
       if (prev.prevValue === null) {
         prev.prevValue = totalizerLbs
         if (validStr(productName)) prev.productName = productName
+        if (validCode(productCode)) prev.productCode = productCode
         if (validStr(siloName)) prev.siloName = siloName
         if (validStr(requestedBy)) prev.requestedBy = requestedBy
         prev.prevMemTotalizer = memTotalizerLbs || 0
@@ -312,6 +321,7 @@ async function run(historian) {
       }
 
       if (validStr(productName)) prev.productName = productName
+      if (validCode(productCode)) prev.productCode = productCode
       if (validStr(siloName)) prev.siloName = siloName
       if (validStr(requestedBy)) prev.requestedBy = requestedBy
       if (requestedTargetLbs) prev.requestedTargetLbs = requestedTargetLbs
@@ -415,7 +425,7 @@ function reset() {
     tankState[k] = { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false }
   }
   for (const k of Object.keys(lineState)) {
-    lineState[k] = { prevValue: null, productName: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 }
+    lineState[k] = { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 }
   }
 }
 

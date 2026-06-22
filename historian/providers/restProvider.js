@@ -114,6 +114,7 @@ const TAGS = {
   LINE_MEM_REQUESTED_BY:   '.MEMREQUESTEDBY',
   LINE_MEM_SILO_NAME:      '.MEMSILONAME',
   LINE_MEM_PRODUCT_NAME:   '.MEMSILOPRODUCTNAME',
+  LINE_MEM_PRODUCT_CODE:   '.MEMSILOPRODUCTCODE',   // latched product-type code (tail-catcher)
 
   // Silo tags — the .GALLONS/.LBS/.LevelValue/.TempValue tags exist under the
   // UPPERCASE prefix but are bad quality (OpcQuality=0). The PLC writes live
@@ -746,6 +747,7 @@ class RestProvider extends BaseProvider {
       TAGS.LINE_MEM_SILO_NAME,     // 12 - source silo latched after flow ended
       TAGS.LINE_MEM_PRODUCT_NAME,  // 13 - product latched after flow ended
       TAGS.LINE_MEM_TOTALIZER,     // 14 - previous batch total LBS
+      TAGS.LINE_MEM_PRODUCT_CODE,  // 15 - product-type code latched after flow ended
     ]
 
     // Build all FQNs and fetch in parallel
@@ -775,6 +777,7 @@ class RestProvider extends BaseProvider {
         memSiloName: txt(12),
         memProductName: txt(13),
         memTotalizerLbs: val(14),
+        memProductCode: txt(15),
       }
     })
   }

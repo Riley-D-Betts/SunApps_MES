@@ -114,6 +114,60 @@ const LINE_PRODUCT_MAP = {
   'a2 organic cream':            { id: 8365, name: 'Raw Organic A2 Cream' },
 }
 
+// ── Source product-code map (standardized AVEVA selector) ────────────────
+// The blend-tank source-select popups (Popup_BT2B_<line>_Source_Select) emit a
+// numeric Product Type code (0-39) — the same constrained scheme used at intake
+// (SiloSelectedProductCode / TruckProductCode). This is the exact-match
+// replacement for the fuzzy resolveLineProduct() free-text path. Values are the
+// RAW component items (non-lot standardization milks) the blend-tank WO issues.
+//
+// Codes with no inventory impact (None/Water/Blowback/blank) map to null →
+// caller skips. ⚠️ VERIFY-flagged rows are best-guess mappings pending
+// confirmation (see chat 2026-06-22):
+//   - 1/2/6/7 "Whole Milk 3.5%/3.25%" → mapped to the standardized fat-level
+//     item (could instead mean raw whole 5417/5404).
+//   - 22 "A2 Organic Whole" → mapped to A2 4% (8370) on the "off-truck ~4%"
+//     reasoning; could be A2 3.25% (8368).
+const SOURCE_PRODUCT_CODE_MAP = {
+  0: null, // None
+  1: { id: 5416, name: 'Raw Conventional 3.5%' },   // Conventional Whole Milk 3.5%  ⚠️VERIFY
+  2: { id: 5413, name: 'Raw Conventional 3.25%' },  // Conventional Whole Milk 3.25% ⚠️VERIFY
+  3: { id: 5412, name: 'Raw Conventional 2%' },     // Conventional Reduced Fat 2%
+  4: { id: 5415, name: 'Raw Conventional 1%' },     // Conventional Low Fat 1%
+  5: { id: 5477, name: 'Raw Conventional 0%' },     // Conventional Fat Free
+  6: { id: 5481, name: 'Raw Organic 3.5%' },        // Organic Whole Milk 3.5%  ⚠️VERIFY
+  7: { id: 5411, name: 'Raw Organic 3.25%' },       // Organic Whole Milk 3.25% ⚠️VERIFY
+  8: { id: 5410, name: 'Raw Organic 2%' },          // Organic Reduced Fat 2%
+  9: { id: 5409, name: 'Raw Organic 1%' },          // Organic Low Fat 1%
+  10: { id: 5482, name: 'Raw Organic 0%' },         // Organic Fat Free
+  11: { id: 5480, name: 'Raw Conventional Cream' }, // Conventional Cream 40%
+  12: { id: 5483, name: 'Raw Organic Cream' },      // Organic Cream 40%
+  13: { id: 5405, name: 'Raw Conventional UF Milk' }, // Conventional UF Milk
+  14: { id: 5402, name: 'Raw Organic UF Milk' },    // Organic UF Milk
+  15: { id: 5417, name: 'Raw Conventional Milk' },  // Raw Conventional
+  16: { id: 5404, name: 'Raw Organic Milk' },       // Raw Organic
+  19: null, // Water  — no NS item, skip issue
+  20: null, // Blowback — no NS item, skip issue
+  21: { id: 5403, name: 'Raw Organic A2 Milk' },    // Raw A2 Organic
+  22: { id: 8370, name: 'Raw Organic A2 4%' },      // A2 Organic Whole ⚠️VERIFY (8370 vs 8368)
+  23: { id: 8367, name: 'Raw Organic A2 2%' },      // A2 Organic Reduced Fat 2%
+  24: { id: 8366, name: 'Raw Organic A2 1%' },      // A2 Organic Low Fat 1%
+  25: { id: 5484, name: 'Raw Organic A2 0%' },      // A2 Organic Fat Free
+}
+
+/**
+ * Resolve a standardized source Product Type code (0-39 from the AVEVA
+ * source-select popup) to a NS raw component item. Returns null for codes with
+ * no inventory impact (None/Water/Blowback) or unmapped codes — caller skips.
+ * @param {number|string} code
+ * @returns {{ id: number, name: string } | null}
+ */
+function resolveSourceProductCode(code) {
+  const n = Number(code)
+  if (!Number.isInteger(n)) return null
+  return SOURCE_PRODUCT_CODE_MAP[n] || null
+}
+
 /**
  * Resolve a SCADA line product name to a NS raw ingredient item.
  * @param {string} productName - from ML#.CURRENTSILOPRODUCTNAME tag
@@ -159,6 +213,8 @@ function matchBomComponent(resolvedItem, bomItems) {
 
 module.exports = {
   resolveLineProduct,
+  resolveSourceProductCode,
   matchBomComponent,
   LINE_PRODUCT_MAP,
+  SOURCE_PRODUCT_CODE_MAP,
 }
