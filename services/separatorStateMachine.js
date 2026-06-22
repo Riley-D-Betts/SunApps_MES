@@ -24,6 +24,12 @@ const TICKS_TO_CLOSE_ON_IDLE = 30 // 5 min @ 10s/tick
 // Below this baselined input (lbs) a closed batch is treated as a phantom
 // reopen (no new flow over its window) and skipped rather than emitted to NS.
 const SEPARATION_MIN_INPUT_LBS = 1
+// Mass-balance guard: cream+skim can't exceed feed input (+ small tolerance for
+// rounding / density / measurement). When it does, the totalizer windows didn't
+// line up (e.g. cream/skim per-batch totals over a different span than the feed
+// odometer delta) — hold the batch for review instead of posting a physically
+// impossible unbuild that conjures inventory into NS. See SD-597.
+const MASS_BALANCE_TOLERANCE = 0.02
 // Recovery fallback: if SM is IDLE but the separator is clearly running
 // (feedPermit + RPM up + startable) for this many ticks, open a batch even
 // without a rising edge. Catches the post-restart case where feedPermit was
@@ -165,7 +171,7 @@ function feedPermitRisingEdge(prev, curr) {
   return curr.feedPermit && !prev.feedPermit
 }
 
-async function openBatch(snap, historian) {
+async function openBatch(snap, historian, { backfill = true } = {}) {
   const sourceSilo = itemConfig.normalizeSiloName(snap.xfrSource) || snap.xfrSource
   const batchId = `XFR-${snap.pollTime.getTime()}`
   const destinationsJson = JSON.stringify(buildResolvedDestinations(snap))
@@ -209,22 +215,26 @@ async function openBatch(snap, historian) {
     batchId, sourceSilo, destinations: snap.xfrDestinations.filter(Boolean),
   })
 
-  // Fire-and-forget: crawl back to find the actual FEEDPERMIT rising edge and
-  // correct feedStartLbs so milk that flowed before MES detected the batch is
-  // not missed.  The openBaselines.feed in-memory value is also updated so the
-  // next persistTick uses the corrected baseline immediately.
+  // Fire-and-forget: crawl back to the sustained FEEDPERMIT-on edge and correct
+  // ALL THREE baselines (feed/cream/skim) to their totalizer readings there, so
+  // the input window matches the cream/skim per-batch totalizers and milk that
+  // flowed before MES detected the batch isn't missed. Skipped on boundary
+  // re-opens: the boundary instant IS the true edge, and crawling back would
+  // pull the baseline across the boundary into the previous segment.
+  if (!backfill) return
   const _rowId = row.id
+  const _openFeed = snap.feedTotalLbs || 0
   batchStartFinder.findSeparationActualStart(snap.pollTime, historian)
     .then(async result => {
       if (!result) return
       // Guard against the batch closing before the backfinder returned
       if (openBatchId !== _rowId) return
-      openBaselines.feed = result.feedLbsAtStart
-      await db.MesSeparationBatch.update(
-        { batchStart: result.estimatedStartAt, feedStartLbs: result.feedLbsAtStart },
-        { where: { id: _rowId } }
-      )
-      console.log(`[SeparatorSM] Back-projected ${batchId} start: ${result.estimatedStartAt.toISOString()}, feedStart: ${result.feedLbsAtStart.toFixed(1)} lb (was ${(snap.feedTotalLbs || 0).toFixed(1)} lb)`)
+      const update = { batchStart: result.estimatedStartAt, feedStartLbs: result.feedStart }
+      openBaselines.feed = result.feedStart
+      if (result.creamStart != null) { openBaselines.cream = result.creamStart; update.creamStartLbs = result.creamStart }
+      if (result.skimStart != null) { openBaselines.skim = result.skimStart; update.skimStartLbs = result.skimStart }
+      await db.MesSeparationBatch.update(update, { where: { id: _rowId } })
+      console.log(`[SeparatorSM] Back-projected ${batchId} start: ${result.estimatedStartAt.toISOString()}, feedStart: ${result.feedStart.toFixed(1)} lb (was ${_openFeed.toFixed(1)}), creamStart: ${result.creamStart != null ? result.creamStart.toFixed(1) : '—'}, skimStart: ${result.skimStart != null ? result.skimStart.toFixed(1) : '—'}`)
     })
     .catch(err => console.warn(`[SeparatorSM] actualStart finder failed for ${batchId}: ${err.message}`))
 }
@@ -308,6 +318,25 @@ async function closeBatch(snap, endReason) {
     if (skipped) statusStore.pushSeparationBatchFromDbRow(skipped)
     statusStore.pushEvent('separation.end', `Closed separation batch ${row.batchId} (${endReason}) — skipped, no flow`, {
       batchId: row.batchId, endReason, status: 'skipped',
+    })
+    return
+  }
+
+  // Mass-balance guard: outputs (cream+skim) can't exceed input. When they do,
+  // the totalizer windows are misaligned — hold for review instead of posting an
+  // unbuild that would conjure phantom inventory into NetSuite.
+  const closeOutput = closeCream + closeSkim
+  if (closeOutput > closeInput * (1 + MASS_BALANCE_TOLERANCE)) {
+    const reason = `mass balance: cream+skim ${closeOutput.toFixed(0)} lb > input ${closeInput.toFixed(0)} lb (out/in ${(closeOutput / closeInput).toFixed(2)}) — totalizer window mismatch, held for review`
+    console.warn(`[SeparatorSM] HOLD batch ${row.batchId} — ${reason}`)
+    await db.MesSeparationBatch.update(
+      { status: 'pending_ns', errorMessage: reason },
+      { where: { id: closedBatchId } },
+    )
+    const held = await db.MesSeparationBatch.findByPk(closedBatchId)
+    if (held) statusStore.pushSeparationBatchFromDbRow(held)
+    statusStore.pushEvent('separation.end', `Closed separation batch ${row.batchId} (${endReason}) — held for review (mass balance)`, {
+      batchId: row.batchId, endReason, status: 'pending_ns',
     })
     return
   }
@@ -399,7 +428,9 @@ async function tick(historian) {
       // transfer_complete / cip_started / idle_* the transfer is over — a new
       // batch must wait for the next feed-permit rising edge in STATE_IDLE.
       if (BOUNDARY_END_REASONS.has(reason) && canStart(snap)) {
-        await openBatch(snap, historian)
+        // Boundary re-open: the boundary instant is the true segment edge, so
+        // baseline off the live snap — don't crawl back across the boundary.
+        await openBatch(snap, historian, { backfill: false })
       }
     } else {
       await persistTick(snap)

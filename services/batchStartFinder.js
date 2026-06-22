@@ -24,6 +24,18 @@ const LINE_GAP_MS = 20 * 60 * 1000  // 20 min
 const SURGE_MIN_RISE_GAL = 100   // gal net rise required to call a surge start real
 const BLEND_MIN_RISE_LBS = 200   // lbs rise required for the weight fallback
 
+// Separator totalizer tags + densities (mirror historian/providers/restProvider).
+// Feed is a continuous LBS odometer; cream/skim are per-batch GAL totalizers
+// converted to lbs by density so all three baselines are in the same unit.
+const SEP_FEED_TOTAL_TAG  = 'Product.SepFeedTotal'
+const SEP_CREAM_TOTAL_TAG = 'Ing_Sep_CMSep1_HIST.Cream_Flow_Totalized'
+const SEP_SKIM_TOTAL_TAG  = 'Ing_Sep_CMSep1_HIST.Skim_Flow_Totalized'
+const CREAM_DENSITY_PPG = 8.3
+const SKIM_DENSITY_PPG  = 8.63
+// Feed-permit off-gaps shorter than this are treated as flicker (a brief drop at
+// a source/destination change), not a true end of the feed-on run.
+const FEEDPERMIT_FLICKER_MS = 90 * 1000
+
 /**
  * For a blend tank, find when milk actually started flowing into it.
  *
@@ -214,20 +226,69 @@ async function integrateFt1102BackfillGal(uhtId, since, until, historian) {
 }
 
 /**
- * For a separation batch, find when the separator actually started flowing.
+ * Read a totalizer tag's value at (or just after) a timestamp. Queries a window
+ * around ts and takes the first sample at/after ts, falling back to the last
+ * sample before it. Returns null when no data.
+ */
+async function _readTotalizerAt(tag, ts, historian, windowMs = 10 * 60 * 1000) {
+  try {
+    const rows = await historian._queryProcessValues(
+      tag, new Date(ts.getTime() - windowMs), new Date(ts.getTime() + windowMs), { verbose: false }
+    )
+    if (!rows || !rows.length) return null
+    const series = rows
+      .map(r => ({ t: new Date(r.DateTime), v: parseFloat(r.Value) }))
+      .filter(p => !isNaN(p.v))
+      .sort((a, b) => a.t - b.t)
+    if (!series.length) return null
+    const atOrAfter = series.find(p => p.t >= ts)
+    return (atOrAfter || series[series.length - 1]).v
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Walk a sorted-ascending FEEDPERMIT series ({t, on}) backward from the most
+ * recent ON sample to the start of the sustained feed-on run, treating OFF gaps
+ * shorter than `flickerMs` as still-on (a brief permit drop at a source/dest
+ * change is flicker, not a true end of the run).
+ */
+function _sustainedFeedStart(series, flickerMs) {
+  if (!series.length) return null
+  let i = series.length - 1
+  while (i >= 0 && !series[i].on) i--          // skip trailing OFF samples
+  if (i < 0) return null
+  let blockStart = series[i].t
+  let j = i - 1
+  while (j >= 0) {
+    if (series[j].on) { blockStart = series[j].t; j--; continue }
+    // Contiguous run of OFF samples ending at j; measure the off duration as
+    // (first-off → next-on). A real gap ends the run; flicker is skipped.
+    let k = j
+    while (k - 1 >= 0 && !series[k - 1].on) k--
+    const offDuration = series[j + 1].t - series[k].t
+    if (offDuration >= flickerMs) break
+    j = k - 1
+  }
+  return blockStart
+}
+
+/**
+ * For a separation batch, find when the separator actually started flowing and
+ * the feed/cream/skim totalizer baselines at that moment.
  *
- * Primary strategy: FEEDPERMIT rising edge (0→1 transition) — the same
- * signal the state machine uses to open a batch, so the actual start is the
- * last 0→1 edge before openTime.
- *
- * Also reads SepFeedTotal (the cumulative feed odometer) at the rising edge
- * so the caller can correct feedStartLbs and recover milk that flowed before
- * MES detected the batch.
+ * The true start is the beginning of the sustained FEEDPERMIT-on run (flicker
+ * at source/destination boundaries debounced), which is the window the per-batch
+ * cream/skim totalizers key off — so reading ALL THREE totalizers there gives
+ * baselines whose deltas measure the same physical run (fixing input vs
+ * cream+skim mismatch). Feed is lbs; cream/skim are gal × density → lbs.
  *
  * @param {Date}   openTime  when MES opened the batch (snap.pollTime)
  * @param {object} historian restProvider / historicalProvider
  * @param {object} [opts]    { lookbackMs }
- * @returns {{ estimatedStartAt: Date, feedLbsAtStart: number, method: string } | null}
+ * @returns {{ estimatedStartAt: Date, feedStart: number, creamStart: number|null,
+ *            skimStart: number|null, method: string } | null}
  */
 async function findSeparationActualStart(openTime, historian, opts = {}) {
   if (!historian?._queryProcessValues) return null
@@ -238,38 +299,31 @@ async function findSeparationActualStart(openTime, historian, opts = {}) {
     const fpRows = await historian._queryProcessValues('SEPSTAT.FEEDPERMIT', since, openTime, { verbose: false })
     if (fpRows && fpRows.length >= 2) {
       const series = fpRows
-        .map(r => ({ t: new Date(r.DateTime), v: parseFloat(r.Value) || 0 }))
-        .filter(p => !isNaN(p.v))
+        .map(r => ({ t: new Date(r.DateTime), on: (parseFloat(r.Value) || 0) >= 0.5 }))
+        .filter(p => !isNaN(p.t.getTime()))
         .sort((a, b) => a.t - b.t)
-      // Walk backward to find the last 0→1 transition before openTime
-      for (let i = series.length - 2; i >= 0; i--) {
-        if (series[i].v < 0.5 && series[i + 1].v >= 0.5) {
-          estimatedStartAt = series[i + 1].t
-          break
-        }
-      }
+      estimatedStartAt = _sustainedFeedStart(series, FEEDPERMIT_FLICKER_MS)
     }
   } catch {}
 
   if (!estimatedStartAt) return null
 
-  // Read SepFeedTotal at the actual start to provide a corrected baseline.
-  // Query from estimatedStartAt to openTime and take the earliest sample —
-  // the first reading after the permit rose is the baseline we should have set.
-  let feedLbsAtStart = null
-  try {
-    const feedRows = await historian._queryProcessValues(
-      'Product.SepFeedTotal', estimatedStartAt, openTime, { verbose: false }
-    )
-    if (feedRows && feedRows.length > 0) {
-      const sorted = feedRows.sort((a, b) => new Date(a.DateTime) - new Date(b.DateTime))
-      feedLbsAtStart = parseFloat(sorted[0].Value)
-    }
-  } catch {}
+  // Read all three totalizers at the true start. Feed is required (it's the
+  // input measure); cream/skim are best-effort (null leaves the open baseline).
+  const [feedStart, creamGal, skimGal] = await Promise.all([
+    _readTotalizerAt(SEP_FEED_TOTAL_TAG, estimatedStartAt, historian),
+    _readTotalizerAt(SEP_CREAM_TOTAL_TAG, estimatedStartAt, historian),
+    _readTotalizerAt(SEP_SKIM_TOTAL_TAG, estimatedStartAt, historian),
+  ])
+  if (feedStart == null || !isFinite(feedStart)) return null
 
-  if (feedLbsAtStart == null || !isFinite(feedLbsAtStart)) return null
-
-  return { estimatedStartAt, feedLbsAtStart, method: 'feedpermit-rising-edge' }
+  return {
+    estimatedStartAt,
+    feedStart,
+    creamStart: creamGal != null && isFinite(creamGal) ? creamGal * CREAM_DENSITY_PPG : null,
+    skimStart: skimGal != null && isFinite(skimGal) ? skimGal * SKIM_DENSITY_PPG : null,
+    method: 'feedpermit-sustained-edge',
+  }
 }
 
 module.exports = {
