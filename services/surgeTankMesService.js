@@ -269,6 +269,7 @@ async function tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBi
     shortfallQty: shortfall,
     lastWoNumber,
     tankName,
+    triggerKind: 'wo', nsWorkOrderId: String(nsWorkOrderId), batchKind: 'surge',
     memo: `Auto-adjust: surge WO ${nsWorkOrderId} issue shortfall (+${shortfall.toFixed(2)} lb)`,
   })
   return !!result?.ok
@@ -323,6 +324,7 @@ async function postSurgeIssueWithShortfallRetry({ nsWorkOrderId, targetItemId, b
         lotName: s.lotName,
         upBy,
         tankName,
+        triggerKind: 'wo', nsWorkOrderId: String(nsWorkOrderId), batchKind: 'surge',
         memo: `Auto-adjust: surge WO ${nsWorkOrderId} top up lot ${s.lotName} to cover issue (on-hand ${s.onHand} → +${upBy.toFixed(2)} lb)`,
       })
       if (res?.ok) {

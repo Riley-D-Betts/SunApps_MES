@@ -209,6 +209,33 @@ db.ensureRuntimeSchema = async function () {
       ALTER TABLE MesSeparationBatches ALTER COLUMN wastePercent DECIMAL(8, 2) NULL;
   `)
 
+  // MesInventoryAdjustments: structured trigger linkage so an adjustment can be
+  // joined back to its WO / assembly-unbuild / batch without parsing the memo.
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'triggerKind' AND Object_ID = Object_ID(N'MesInventoryAdjustments'))
+      ALTER TABLE MesInventoryAdjustments ADD triggerKind NVARCHAR(20) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'nsWorkOrderId' AND Object_ID = Object_ID(N'MesInventoryAdjustments'))
+      ALTER TABLE MesInventoryAdjustments ADD nsWorkOrderId NVARCHAR(50) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'batchKind' AND Object_ID = Object_ID(N'MesInventoryAdjustments'))
+      ALTER TABLE MesInventoryAdjustments ADD batchKind NVARCHAR(20) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'mesBatchId' AND Object_ID = Object_ID(N'MesInventoryAdjustments'))
+      ALTER TABLE MesInventoryAdjustments ADD mesBatchId NVARCHAR(100) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE Name = N'idx_invadjust_ns_wo' AND Object_ID = Object_ID(N'MesInventoryAdjustments'))
+      CREATE INDEX idx_invadjust_ns_wo ON MesInventoryAdjustments (nsWorkOrderId);
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE Name = N'idx_invadjust_mes_batch' AND Object_ID = Object_ID(N'MesInventoryAdjustments'))
+      CREATE INDEX idx_invadjust_mes_batch ON MesInventoryAdjustments (mesBatchId);
+  `)
+
   // Seed MesFgInputPairings from the canonical RAW_FG_TO_FG_MAP. Idempotent —
   // findOrCreate on the unique (fgItemId, rawInputItemId) index skips existing
   // rows on every boot. Newly-added entries in RAW_FG_TO_FG_MAP get auto-seeded

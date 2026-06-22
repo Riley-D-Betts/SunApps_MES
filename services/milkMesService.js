@@ -377,6 +377,7 @@ async function processSeparationBatch(data) {
           itemId: sourceItem.id,
           shortfallQty: shortfall,
           tankName: sourceSilo,
+          triggerKind: 'sepBatch', batchKind: 'separation', mesBatchId: batchId,
           memo: `Auto-adjust: separation unbuild batch ${batchId} shortfall (+${shortfall.toFixed(2)} lb)`,
         })
         if (!adj?.ok) {
@@ -415,6 +416,7 @@ async function processSeparationBatch(data) {
           qtyDelta: upBy,
           source: 'unbuild_cap',
           tankName: 'SEPARATOR-ADJUSTMENTS',
+          triggerKind: 'sepBatch', batchKind: 'separation', mesBatchId: batchId,
           memo: `Auto-adjust: raise unbuild cap for batch ${batchId} (+${upBy.toFixed(2)} lb to bin ${SEPARATOR_ADJ_BIN_ID})`,
         })
         if (!adj?.ok) {
@@ -451,6 +453,7 @@ async function processSeparationBatch(data) {
               qtyDelta: -leftover,
               source: 'unbuild_cap',
               tankName: 'SEPARATOR-ADJUSTMENTS',
+              triggerKind: 'sepBatch', batchKind: 'separation', mesBatchId: batchId,
               memo: `Auto-adjust: clear unbuild cap bin for batch ${batchId} (-${leftover.toFixed(2)} lb)`,
             })
           }

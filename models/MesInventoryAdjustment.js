@@ -54,6 +54,31 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING(50),
         allowNull: true,
       },
+      // ── Trigger linkage ──────────────────────────────────────────────────
+      // What transaction caused this adjustment, captured structurally at write
+      // time so correlation doesn't depend on parsing the memo. Populated by the
+      // call sites: 'wo' (blend/surge WO issue shortfall), 'sepBatch' (separation
+      // unbuild shortfall / cap staging), 'sweep' (tank-at-rest reconciliation,
+      // which has no triggering transaction). See adjustmentCorrelationService.
+      triggerKind: {
+        type: DataTypes.STRING(20),
+        allowNull: true,
+      },
+      // NS internal work-order id — exact join to MesBlendTankBatch / MesSurgeTankBatch.
+      nsWorkOrderId: {
+        type: DataTypes.STRING(50),
+        allowNull: true,
+      },
+      // 'blend' | 'surge' | 'separation' — which batch table the link points at.
+      batchKind: {
+        type: DataTypes.STRING(20),
+        allowNull: true,
+      },
+      // MES separation batchId (XFR-<ts>) — exact join to MesSeparationBatch.batchId.
+      mesBatchId: {
+        type: DataTypes.STRING(100),
+        allowNull: true,
+      },
       memo: {
         type: DataTypes.STRING(500),
         allowNull: true,
@@ -84,6 +109,14 @@ module.exports = (sequelize, DataTypes) => {
         {
           fields: ['binId', 'itemId'],
           name: 'idx_invadjust_bin_item',
+        },
+        {
+          fields: ['nsWorkOrderId'],
+          name: 'idx_invadjust_ns_wo',
+        },
+        {
+          fields: ['mesBatchId'],
+          name: 'idx_invadjust_mes_batch',
         },
       ],
     }

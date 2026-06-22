@@ -269,7 +269,23 @@ async function submitInventoryAdjustment(args) {
     // When set, update this existing MesInventoryAdjustments row instead of
     // inserting a new one (manual retry of an errored/skipped adjustment).
     auditRowId = null,
+    // Structured trigger linkage — persisted so correlation back to the WO /
+    // assembly-unbuild / batch doesn't depend on parsing the memo. See
+    // adjustmentCorrelationService. triggerKind defaults from source.
+    triggerKind = null,
+    nsWorkOrderId = null,
+    batchKind = null,
+    mesBatchId = null,
   } = args
+
+  // One link blob spread into every audit row below, so all exit paths
+  // (skipped / dry_run / submitted / error) carry the same trigger linkage.
+  const link = {
+    triggerKind: triggerKind || (source === 'sweep' ? 'sweep' : null),
+    nsWorkOrderId: nsWorkOrderId != null ? String(nsWorkOrderId) : null,
+    batchKind: batchKind || null,
+    mesBatchId: mesBatchId != null ? String(mesBatchId) : null,
+  }
 
   if (!binId || !itemId) {
     return { ok: false, error: 'binId and itemId required', nsAdjustmentId: null, lotId: null, lotName: null }
@@ -290,6 +306,7 @@ async function submitInventoryAdjustment(args) {
       { source, tankName, binId, itemId, qtyDelta, reason }
     )
     await safeAudit({
+      ...link,
       source, tankName, binId, itemId, qtyDelta, observedLbs, nsQtyBefore,
       lotId: null, lotName: null, nsAdjustmentId: null, memo,
       status: 'skipped', errorMessage: reason,
@@ -315,6 +332,7 @@ async function submitInventoryAdjustment(args) {
         { source, tankName, binId, itemId, qtyDelta, reason }
       )
       await safeAudit({
+        ...link,
         source, tankName, binId, itemId, qtyDelta, observedLbs, nsQtyBefore,
         lotId: null, lotName: null, nsAdjustmentId: null, memo,
         status: 'skipped', errorMessage: reason,
@@ -344,6 +362,7 @@ async function submitInventoryAdjustment(args) {
     console.log(`[InventoryAdjustment] DRY_RUN (${source}) tank=${tankName} bin=${binId} item=${itemId} Δ=${qtyDelta.toFixed(2)} lot=${lot.lotName || lot.lotId || 'none'}`)
     console.log(`[InventoryAdjustment] DRY_RUN body: ${JSON.stringify(body)}`)
     await safeAudit({
+      ...link,
       source, tankName, binId, itemId, qtyDelta, observedLbs, nsQtyBefore,
       lotId: lot.lotId, lotName: lot.lotName, nsAdjustmentId: null,
       memo: body.memo, status: 'dry_run', errorMessage: null,
@@ -358,6 +377,7 @@ async function submitInventoryAdjustment(args) {
     const nsAdjustmentId = extractNsAdjustmentId(nsResult)
     console.log(`[InventoryAdjustment] OK (${source}) ${tankName || ''}: NS id=${nsAdjustmentId}`)
     await safeAudit({
+      ...link,
       source, tankName, binId, itemId, qtyDelta, observedLbs, nsQtyBefore,
       lotId: lot.lotId, lotName: lot.lotName, nsAdjustmentId,
       memo: body.memo, status: 'submitted', errorMessage: null,
@@ -371,6 +391,7 @@ async function submitInventoryAdjustment(args) {
       { source, tankName, binId, itemId, qtyDelta, error: err.message.slice(0, 500) }
     )
     await safeAudit({
+      ...link,
       source, tankName, binId, itemId, qtyDelta, observedLbs, nsQtyBefore,
       lotId: lot.lotId, lotName: lot.lotName, nsAdjustmentId: null,
       memo: body.memo, status: 'error', errorMessage: err.message.slice(0, 1900),
@@ -391,7 +412,7 @@ function extractNsErrorDetail(err) {
  * source bin up by exactly the shortfall (no buffer) and returns to the
  * caller, which must then re-query allocations before retrying the NS post.
  */
-async function applyShortfallAdjustment({ sourceBinId, itemId, shortfallQty, lastWoNumber, tankName, memo }) {
+async function applyShortfallAdjustment({ sourceBinId, itemId, shortfallQty, lastWoNumber, tankName, memo, triggerKind, nsWorkOrderId, batchKind, mesBatchId }) {
   if (!(shortfallQty > 0)) {
     return { ok: false, error: 'shortfallQty must be positive', nsAdjustmentId: null }
   }
@@ -402,6 +423,7 @@ async function applyShortfallAdjustment({ sourceBinId, itemId, shortfallQty, las
     source: 'shortfall',
     tankName,
     lastWoNumber,
+    triggerKind, nsWorkOrderId, batchKind, mesBatchId,
     memo: memo || `Auto-adjust: WO issue/unbuild shortfall (+${shortfallQty.toFixed(2)} lb)`,
   })
 }
@@ -412,7 +434,7 @@ async function applyShortfallAdjustment({ sourceBinId, itemId, shortfallQty, las
  * exact lot the WO issue pinned (which may be negative, so findExistingLotInBin
  * can't see it) rather than finding/creating a positive one. See Bug B.
  */
-async function applyTargetedLotUpAdjustment({ binId, itemId, lotName, upBy, tankName, memo }) {
+async function applyTargetedLotUpAdjustment({ binId, itemId, lotName, upBy, tankName, memo, triggerKind, nsWorkOrderId, batchKind, mesBatchId }) {
   if (!lotName) return { ok: false, error: 'lotName required', nsAdjustmentId: null }
   if (!(upBy > 0)) return { ok: false, error: 'upBy must be positive', nsAdjustmentId: null }
   return submitInventoryAdjustment({
@@ -422,6 +444,7 @@ async function applyTargetedLotUpAdjustment({ binId, itemId, lotName, upBy, tank
     source: 'shortfall',
     tankName,
     explicitLotName: lotName,
+    triggerKind, nsWorkOrderId, batchKind, mesBatchId,
     memo: memo || `Auto-adjust: top up lot ${lotName} (+${upBy.toFixed(2)} lb)`,
   })
 }
@@ -459,6 +482,8 @@ async function retryInventoryAdjustment(id, overrides = {}) {
     observedLbs: row.observedLbs != null ? Number(row.observedLbs) : null,
     nsQtyBefore: row.nsQtyBefore != null ? Number(row.nsQtyBefore) : null,
     explicitLotName: lotName != null && lotName !== '' ? String(lotName) : (row.lotName || null),
+    // Preserve the original trigger linkage across the retry.
+    triggerKind: row.triggerKind, nsWorkOrderId: row.nsWorkOrderId, batchKind: row.batchKind, mesBatchId: row.mesBatchId,
     memo: `MES manual retry${decidedBy ? ` by ${decidedBy}` : ''} of adjustment ${id}`,
     auditRowId: id,
   })

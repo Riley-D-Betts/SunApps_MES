@@ -360,6 +360,7 @@ async function tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBi
     shortfallQty: shortfall,
     lastWoNumber,
     tankName,
+    triggerKind: 'wo', nsWorkOrderId: String(nsWorkOrderId), batchKind: 'blend',
     memo: `Auto-adjust: blend WO ${nsWorkOrderId} issue shortfall (+${shortfall.toFixed(2)} lb)`,
   })
   return !!result?.ok

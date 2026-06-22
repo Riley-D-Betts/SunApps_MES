@@ -2,6 +2,7 @@
 
 const analyticsService = require('../services/analyticsService')
 const inventoryAdjustmentService = require('../services/inventoryAdjustmentService')
+const adjustmentCorrelationService = require('../services/adjustmentCorrelationService')
 
 function pick(obj, keys) {
   const out = {}
@@ -90,6 +91,20 @@ exports.getInventoryAdjustments = async (req, res) => {
     return res.json({ success: true, ...result })
   } catch (err) {
     console.error('[analyticsController] inventory adjustments:', err)
+    return res.status(500).json({ success: false, error: err.message })
+  }
+}
+
+// Correlate each adjustment back to the WO / assembly-unbuild / batch that
+// triggered it. Same filters as getInventoryAdjustments, plus a per-row
+// `correlation` block and a correlationStats summary of match quality.
+exports.getInventoryAdjustmentCorrelations = async (req, res) => {
+  try {
+    const params = pick(req.query, ['from', 'to', 'source', 'status', 'binId', 'itemId', 'tankName', 'excludePositiveSilo', 'sortBy', 'sortDir', 'limit', 'offset'])
+    const result = await adjustmentCorrelationService.getInventoryAdjustmentCorrelations(params)
+    return res.json({ success: true, ...result })
+  } catch (err) {
+    console.error('[analyticsController] inventory adjustment correlations:', err)
     return res.status(500).json({ success: false, error: err.message })
   }
 }
