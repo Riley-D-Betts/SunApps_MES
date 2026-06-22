@@ -29,7 +29,7 @@ advances all DB/accounting state and logs the exact payloads, but posts nothing 
 - [ ] `SD-597` PR reviewed and approved; CI/tests green.
 - [ ] Working tree clean; no debug-only changes (e.g. test cron overrides, `BLEND_TANK_OVERRIDES`,
       `SURGE_TANK_OVERRIDES`, forced `MES_DRY_RUN`) left in committed code.
-- [ ] `package.json` version is correct. It's `1.0.1` and **no tags exist yet**, so `v1.0.1` will be
+- [ ] `package.json` version is correct. It's `0.0.1` and **no tags exist yet**, so `v0.0.1` will be
       created cleanly. (Going forward: every merge to master MUST bump the version or `tag_production`
       fails on "tag already exists.")
 - [ ] Decide whether `MES_PARSER_STRICT_MODE` should be on. It's not written by the deploy workflow, so
@@ -102,8 +102,8 @@ environment with no extra secret needed.
 ## 6. Deploy execution
 
 - [ ] Merge `SD-597` → `master` (via approved PR).
-- [ ] Confirm `tag_production.yml` ran and created tag `v1.0.1`.
-- [ ] Create & **publish a GitHub Release** on `v1.0.1` (with release notes) — this is what triggers
+- [ ] Confirm `tag_production.yml` ran and created tag `v0.0.1`.
+- [ ] Create & **publish a GitHub Release** on `v0.0.1` (with release notes) — this is what triggers
       `production_deploy.yml`. (Alternatively: `workflow_dispatch` with the tag input.)
 - [ ] Watch the Actions run: `.env` created → files copied → `npm ci` clean → `pm2 restart` succeeded.
 - [ ] Confirm the Teams "Update!" success card posted.
