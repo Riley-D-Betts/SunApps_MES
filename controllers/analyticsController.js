@@ -109,6 +109,19 @@ exports.getInventoryAdjustmentCorrelations = async (req, res) => {
   }
 }
 
+// Holistic batch-centric view: each batch in the window with the inventory
+// adjustments correlated to it + per-batch rollups. Drives the Batch Adjustments page.
+exports.getBatchesWithAdjustments = async (req, res) => {
+  try {
+    const params = pick(req.query, ['from', 'to', 'kind', 'onlyWithAdjustments', 'limit'])
+    const result = await adjustmentCorrelationService.getBatchesWithAdjustments(params)
+    return res.json({ success: true, ...result })
+  } catch (err) {
+    console.error('[analyticsController] batches with adjustments:', err)
+    return res.status(500).json({ success: false, error: err.message })
+  }
+}
+
 // Re-post an errored/skipped adjustment, with optional operator corrections
 // (bin / item / qty / lot). Drives the Inventory Adjustment Review Retry button.
 exports.retryInventoryAdjustment = async (req, res) => {

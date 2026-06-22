@@ -121,8 +121,17 @@ async function getInventoryAdjustmentCorrelations(params = {}) {
   // Reuse the exact same filtered/sorted/paged read the review page uses, so the
   // correlation view and the table stay in lock-step.
   const { total, adjustments, summary } = await analytics.getInventoryAdjustments(params)
+  const out = await correlateAdjustmentRows(adjustments)
+  return { total, adjustments: out, summary, correlationStats: tallyStats(out) }
+}
+
+/**
+ * Core: attach a `.correlation` to each adjustment row (Sequelize instances or
+ * plain objects). Shared by the adjustment-centric and batch-centric endpoints.
+ */
+async function correlateAdjustmentRows(adjustments) {
   const rows = adjustments.map(r => (typeof r.get === 'function' ? r.get({ plain: true }) : r))
-  if (!rows.length) return { total, adjustments: [], summary, correlationStats: emptyStats() }
+  if (!rows.length) return []
 
   // ── 1. Exact links: bulk-fetch the batches the triggers point at ──────────
   const triggers = rows.map(resolveTrigger)
@@ -213,7 +222,120 @@ async function getInventoryAdjustmentCorrelations(params = {}) {
     return { ...r, correlation }
   })
 
-  return { total, adjustments: out, summary, correlationStats: tallyStats(out) }
+  return out
+}
+
+// Compact projection of an adjustment for the batch-centric view (drops the
+// nested correlation.batch — redundant once it's grouped under that batch).
+function projectAdjustment(a) {
+  const c = a.correlation || {}
+  return {
+    id: a.id,
+    source: a.source,
+    status: a.status,
+    qtyDelta: n(a.qtyDelta),
+    itemId: a.itemId != null ? String(a.itemId) : null,
+    binId: a.binId,
+    tankName: a.tankName,
+    lotName: a.lotName,
+    memo: a.memo,
+    nsAdjustmentId: a.nsAdjustmentId || null,
+    createdAt: a.createdAt,
+    matchType: c.matchType || null,
+    confidence: c.confidence || null,
+    via: c.trigger?.via || null,
+  }
+}
+
+// Roll a batch's adjustments up into headline numbers for the master row.
+function rollupAdjustments(adjs) {
+  const r = { count: adjs.length, netLbs: 0, shortfallLbs: 0, sweepNetLbs: 0, errorCount: 0, bySource: {} }
+  for (const a of adjs) {
+    const q = n(a.qtyDelta) || 0
+    if (a.status === 'submitted') r.netLbs += q
+    if (a.source === 'shortfall' || a.source === 'unbuild_cap') r.shortfallLbs += Math.abs(q)
+    if (a.source === 'sweep' && a.status === 'submitted') r.sweepNetLbs += q
+    if (a.status === 'error' || a.status === 'skipped') r.errorCount++
+    r.bySource[a.source] = (r.bySource[a.source] || 0) + 1
+  }
+  return r
+}
+
+const batchKey = (kind, id) => `${kind}#${id}`
+
+/**
+ * Batch-centric "holistic" view: every batch in the window with the inventory
+ * adjustments correlated to it (and per-batch rollups). Batches with no
+ * adjustments still appear (rollup.count = 0); adjustments whose correlation
+ * resolved to no batch are returned separately under `unattributed`.
+ *
+ * @param {object} params
+ * @param {string} [params.from] [params.to]   ISO window (default: last 7d).
+ * @param {string} [params.kind]               'blend'|'surge'|'separation' (comma-ok); default all.
+ * @param {boolean} [params.onlyWithAdjustments] only return batches that have ≥1 adjustment.
+ * @param {number} [params.limit]               max batches (default 300, cap 1000).
+ */
+async function getBatchesWithAdjustments(params = {}) {
+  const to = params.to ? new Date(params.to) : new Date()
+  const from = params.from ? new Date(params.from) : new Date(to.getTime() - 7 * 24 * 60 * 60 * 1000)
+  const kinds = params.kind
+    ? String(params.kind).split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+    : ['blend', 'surge', 'separation']
+  const want = k => kinds.includes(k)
+  const limit = Math.min(Number(params.limit) || 300, 1000)
+  const onlyWith = params.onlyWithAdjustments === true || params.onlyWithAdjustments === 'true'
+
+  // ── Batches in the window (each kind keyed by its own start field) ─────────
+  const [blend, surge, sep] = await Promise.all([
+    want('blend')
+      ? db.MesBlendTankBatch.findAll({ where: { detectedAt: { [Op.between]: [from, to] } }, order: [['detectedAt', 'DESC']], limit })
+      : [],
+    want('surge')
+      ? db.MesSurgeTankBatch.findAll({ where: { detectedAt: { [Op.between]: [from, to] } }, order: [['detectedAt', 'DESC']], limit })
+      : [],
+    want('separation')
+      ? db.MesSeparationBatch.findAll({ where: { batchStart: { [Op.between]: [from, to] } }, order: [['batchStart', 'DESC']], limit })
+      : [],
+  ])
+  const batches = [
+    ...blend.map(b => summarizeBatch('blend', b)),
+    ...surge.map(b => summarizeBatch('surge', b)),
+    ...sep.map(b => summarizeBatch('separation', b)),
+  ]
+  const byKey = new Map(batches.map(b => [batchKey(b.kind, b.id), { ...b, adjustments: [] }]))
+
+  // ── Adjustments in a widened window (catch end-of-batch sweeps just past
+  // completedAt), correlated, then grouped under their batch. ────────────────
+  const adjFrom = new Date(from.getTime() - FUZZY_TOLERANCE_MS)
+  const adjTo = new Date(to.getTime() + FUZZY_TOLERANCE_MS)
+  const rawAdjs = await db.MesInventoryAdjustment.findAll({
+    where: { createdAt: { [Op.between]: [adjFrom, adjTo] } },
+    order: [['createdAt', 'DESC']],
+    limit: 5000,
+  })
+  const correlated = await correlateAdjustmentRows(rawAdjs)
+
+  const unattributed = []
+  for (const a of correlated) {
+    const b = a.correlation?.batch
+    if (!b) { unattributed.push(projectAdjustment(a)); continue }
+    const entry = byKey.get(batchKey(b.kind, b.id))
+    if (entry) entry.adjustments.push(projectAdjustment(a))
+    // else: the adjustment's batch is outside the requested window/kind — skip.
+  }
+
+  let result = [...byKey.values()].map(b => ({ ...b, adjustmentRollup: rollupAdjustments(b.adjustments) }))
+  if (onlyWith) result = result.filter(b => b.adjustmentRollup.count > 0)
+  // Newest batch first across all kinds.
+  result.sort((a, b) => new Date(b.start || 0) - new Date(a.start || 0))
+
+  const stats = {
+    batchCount: result.length,
+    batchesWithAdjustments: result.filter(b => b.adjustmentRollup.count > 0).length,
+    adjustmentsLinked: correlated.length - unattributed.length,
+    adjustmentsUnattributed: unattributed.length,
+  }
+  return { from: from.toISOString(), to: to.toISOString(), batches: result, unattributed, stats }
 }
 
 /**
@@ -305,6 +427,8 @@ function tallyStats(out) {
 
 module.exports = {
   getInventoryAdjustmentCorrelations,
+  getBatchesWithAdjustments,
+  correlateAdjustmentRows,
   parseMemoTrigger,
   resolveTrigger,
   summarizeBatch,
