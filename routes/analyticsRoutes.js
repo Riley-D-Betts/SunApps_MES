@@ -12,5 +12,7 @@ router.get('/separation-batches', controller.getSeparationBatches)
 router.get('/separation-trend',   controller.getSeparationTrend)
 router.get('/inventory-adjustments',       controller.getInventoryAdjustments)
 router.get('/inventory-adjustments-trend', controller.getInventoryAdjustmentTrend)
+router.post('/inventory-adjustments/:id/retry',  controller.retryInventoryAdjustment)
+router.post('/inventory-adjustments/:id/reject', controller.rejectInventoryAdjustment)
 
 module.exports = router

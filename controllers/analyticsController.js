@@ -1,6 +1,7 @@
 'use strict'
 
 const analyticsService = require('../services/analyticsService')
+const inventoryAdjustmentService = require('../services/inventoryAdjustmentService')
 
 function pick(obj, keys) {
   const out = {}
@@ -90,6 +91,33 @@ exports.getInventoryAdjustments = async (req, res) => {
   } catch (err) {
     console.error('[analyticsController] inventory adjustments:', err)
     return res.status(500).json({ success: false, error: err.message })
+  }
+}
+
+// Re-post an errored/skipped adjustment, with optional operator corrections
+// (bin / item / qty / lot). Drives the Inventory Adjustment Review Retry button.
+exports.retryInventoryAdjustment = async (req, res) => {
+  try {
+    const { binId, itemId, qtyDelta, tankName, lotName, decidedBy } = req.body || {}
+    const out = await inventoryAdjustmentService.retryInventoryAdjustment(req.params.id, {
+      binId, itemId, qtyDelta, tankName, lotName, decidedBy,
+    })
+    return res.json({ success: true, ...out })
+  } catch (err) {
+    console.error('[analyticsController] retry inventory adjustment:', err)
+    return res.status(400).json({ success: false, error: err.message })
+  }
+}
+
+// Dismiss an adjustment that shouldn't post (status -> 'rejected').
+exports.rejectInventoryAdjustment = async (req, res) => {
+  try {
+    const { decidedBy, reason } = req.body || {}
+    const out = await inventoryAdjustmentService.rejectInventoryAdjustment(req.params.id, { decidedBy, reason })
+    return res.json({ success: true, ...out })
+  } catch (err) {
+    console.error('[analyticsController] reject inventory adjustment:', err)
+    return res.status(400).json({ success: false, error: err.message })
   }
 }
 

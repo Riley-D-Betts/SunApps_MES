@@ -266,6 +266,9 @@ async function submitInventoryAdjustment(args) {
     // via findExistingLotInBin. Needed to top up a NEGATIVE lot — findExistingLotInBin
     // filters on-hand>0 so it can't see one. See Bug B (surge top-up).
     explicitLotName = null,
+    // When set, update this existing MesInventoryAdjustments row instead of
+    // inserting a new one (manual retry of an errored/skipped adjustment).
+    auditRowId = null,
   } = args
 
   if (!binId || !itemId) {
@@ -290,7 +293,7 @@ async function submitInventoryAdjustment(args) {
       source, tankName, binId, itemId, qtyDelta, observedLbs, nsQtyBefore,
       lotId: null, lotName: null, nsAdjustmentId: null, memo,
       status: 'skipped', errorMessage: reason,
-    })
+    }, auditRowId)
     return { ok: false, skipped: reason, nsAdjustmentId: null, lotId: null, lotName: null }
   }
 
@@ -315,7 +318,7 @@ async function submitInventoryAdjustment(args) {
         source, tankName, binId, itemId, qtyDelta, observedLbs, nsQtyBefore,
         lotId: null, lotName: null, nsAdjustmentId: null, memo,
         status: 'skipped', errorMessage: reason,
-      })
+      }, auditRowId)
       return { ok: false, skipped: reason, nsAdjustmentId: null, lotId: null, lotName: null }
     }
     if (allocatedQty + 1e-6 < Math.abs(qtyDelta)) {
@@ -344,7 +347,7 @@ async function submitInventoryAdjustment(args) {
       source, tankName, binId, itemId, qtyDelta, observedLbs, nsQtyBefore,
       lotId: lot.lotId, lotName: lot.lotName, nsAdjustmentId: null,
       memo: body.memo, status: 'dry_run', errorMessage: null,
-    })
+    }, auditRowId)
     return { ok: true, nsAdjustmentId: null, lotId: lot.lotId, lotName: lot.lotName }
   }
 
@@ -358,7 +361,7 @@ async function submitInventoryAdjustment(args) {
       source, tankName, binId, itemId, qtyDelta, observedLbs, nsQtyBefore,
       lotId: lot.lotId, lotName: lot.lotName, nsAdjustmentId,
       memo: body.memo, status: 'submitted', errorMessage: null,
-    })
+    }, auditRowId)
     return { ok: true, nsAdjustmentId, lotId: lot.lotId, lotName: lot.lotName }
   } catch (err) {
     console.error(`[InventoryAdjustment] FAILED (${source}) tank=${tankName} bin=${binId} item=${itemId} Δ=${qtyDelta.toFixed(2)}:`, err.message.slice(0, 400))
@@ -371,7 +374,7 @@ async function submitInventoryAdjustment(args) {
       source, tankName, binId, itemId, qtyDelta, observedLbs, nsQtyBefore,
       lotId: lot.lotId, lotName: lot.lotName, nsAdjustmentId: null,
       memo: body.memo, status: 'error', errorMessage: err.message.slice(0, 1900),
-    })
+    }, auditRowId)
     return { ok: false, error: err.message, nsAdjustmentId: null, lotId: lot.lotId, lotName: lot.lotName }
   }
 }
@@ -423,17 +426,84 @@ async function applyTargetedLotUpAdjustment({ binId, itemId, lotName, upBy, tank
   })
 }
 
-async function safeAudit(row) {
+// Write the audit trail for one adjustment. When auditRowId is set (manual
+// retry of an existing errored/skipped row) we UPDATE that row in place so the
+// review backlog keeps a single record per adjustment across retries, instead
+// of accumulating a new row each attempt. Otherwise we insert a fresh row.
+// Statuses a manual review action can act on. 'error' = NS rejected the post;
+// 'skipped' = we never posted (no lot context / no allocatable lots).
+const RETRYABLE_STATUSES = ['error', 'skipped']
+
+/**
+ * Re-post an errored/skipped adjustment, optionally with operator-corrected
+ * bin / item / qty / lot. Updates the SAME audit row in place (see auditRowId)
+ * so the review backlog doesn't grow a new row per attempt. On success the row
+ * flips to 'submitted'; on failure it stays 'error'/'skipped' with a fresh
+ * errorMessage. Drives the Inventory Adjustment Review page's Retry action.
+ */
+async function retryInventoryAdjustment(id, overrides = {}) {
+  if (!db.MesInventoryAdjustment) throw new Error('MesInventoryAdjustment model unavailable')
+  const row = await db.MesInventoryAdjustment.findByPk(id)
+  if (!row) throw new Error(`Inventory adjustment ${id} not found`)
+  if (!RETRYABLE_STATUSES.includes(row.status)) {
+    throw new Error(`Adjustment ${id} is '${row.status}', not retryable (must be ${RETRYABLE_STATUSES.join(' or ')})`)
+  }
+
+  const { binId, itemId, qtyDelta, tankName, lotName, decidedBy } = overrides
+  const result = await submitInventoryAdjustment({
+    binId: binId != null && binId !== '' ? Number(binId) : row.binId,
+    itemId: itemId != null && itemId !== '' ? String(itemId) : row.itemId,
+    qtyDelta: qtyDelta != null && qtyDelta !== '' ? Number(qtyDelta) : Number(row.qtyDelta),
+    source: row.source,
+    tankName: tankName != null ? tankName : row.tankName,
+    observedLbs: row.observedLbs != null ? Number(row.observedLbs) : null,
+    nsQtyBefore: row.nsQtyBefore != null ? Number(row.nsQtyBefore) : null,
+    explicitLotName: lotName != null && lotName !== '' ? String(lotName) : (row.lotName || null),
+    memo: `MES manual retry${decidedBy ? ` by ${decidedBy}` : ''} of adjustment ${id}`,
+    auditRowId: id,
+  })
+
+  const adjustment = await db.MesInventoryAdjustment.findByPk(id)
+  return { result, adjustment }
+}
+
+/**
+ * Dismiss an adjustment that shouldn't post (sensor glitch, already handled
+ * manually, mislabeled silo item). Sets status='rejected' and keeps the row for
+ * the audit trail. Mirrors the batch-review reject actions.
+ */
+async function rejectInventoryAdjustment(id, { decidedBy = null, reason = null } = {}) {
+  if (!db.MesInventoryAdjustment) throw new Error('MesInventoryAdjustment model unavailable')
+  const row = await db.MesInventoryAdjustment.findByPk(id)
+  if (!row) throw new Error(`Inventory adjustment ${id} not found`)
+  if (row.status === 'submitted') {
+    throw new Error(`Adjustment ${id} already posted to NetSuite (id ${row.nsAdjustmentId || '?'}) — can't reject`)
+  }
+
+  const note = `Rejected${decidedBy ? ` by ${decidedBy}` : ''}${reason ? `: ${reason}` : ''}`
+  row.status = 'rejected'
+  row.errorMessage = note
+  await row.save()
+  return { adjustment: row }
+}
+
+async function safeAudit(row, auditRowId = null) {
   try {
     if (!db.MesInventoryAdjustment) return
-    await db.MesInventoryAdjustment.create(row)
+    if (auditRowId) {
+      await db.MesInventoryAdjustment.update(row, { where: { id: auditRowId } })
+    } else {
+      await db.MesInventoryAdjustment.create(row)
+    }
   } catch (err) {
-    console.warn(`[InventoryAdjustment] Audit insert failed: ${err.message.slice(0, 200)}`)
+    console.warn(`[InventoryAdjustment] Audit ${auditRowId ? 'update' : 'insert'} failed: ${err.message.slice(0, 200)}`)
   }
 }
 
 module.exports = {
   submitInventoryAdjustment,
+  retryInventoryAdjustment,
+  rejectInventoryAdjustment,
   applyShortfallAdjustment,
   applyTargetedLotUpAdjustment,
   resolveLotForBinAdjustment,
