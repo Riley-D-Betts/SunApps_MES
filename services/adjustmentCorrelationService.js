@@ -24,6 +24,7 @@
  */
 const { Op } = require('sequelize')
 const db = require('../models')
+const core = require('../clients/coreClient')
 
 // "blend WO 12345", "surge WO 12345 top up lot …" → the NS internal WO id.
 const WO_RE = /\bWO\s+(\d+)/i
@@ -513,6 +514,141 @@ function fuzzyMatch(row, pool) {
   }
 }
 
+// ── NetSuite pull ───────────────────────────────────────────────────────────
+// Rather than trust only our local MesProcessingLog/batch totals, pull the
+// ACTUAL transactions for a batch's work order from NetSuite by the transaction
+// ids we recorded, and report NS-posted quantities. SuiteQL notes (probed live):
+//   - `transaction.createdfrom` is NOT a queryable column → can't link WO→kids
+//     that way; we use the NS ids stored in MesProcessingLog.nsTransactionId /
+//     MesInventoryAdjustment.nsAdjustmentId instead.
+//   - type codes: WOIssue, WOCompl, Unbuild, InvAdjst.
+//   - lines are double-entry (offsetting ±). Headline qty per txn = MAX(ABS(qty));
+//     adjustments don't offset so their signed net = SUM(qty); an unbuild's input
+//     = |Σ negatives|, output (cream+skim) = Σ positives.
+const NS_QUERY = '/query/v1/suiteql'
+const round2 = v => Math.round((Number(v) || 0) * 100) / 100
+
+async function nsQuery(sql, retries = 1) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const r = await core.netsuitePost(NS_QUERY, { q: sql })
+      return r?.body?.items || r?.items || []
+    } catch (err) {
+      // Gateway 401/INVALID_LOGIN is transient on warm-up (see ns_suiteql notes).
+      if (attempt < retries && /401|INVALID_LOGIN|Unauthorized/i.test(err.message || '')) continue
+      throw err
+    }
+  }
+}
+
+function chunkIds(arr, size) {
+  const out = []
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
+  return out
+}
+
+function emptyNsTotals() {
+  return {
+    issuedLbs: 0, completedLbs: 0, adjustedNetLbs: 0, wasteWithAdjLbs: 0,
+    issueCount: 0, completionCount: 0, unbuildCount: 0, adjustmentCount: 0,
+  }
+}
+
+/**
+ * Pull a single batch's NetSuite transactions (issues / completions / unbuild /
+ * adjustments) by the NS ids we recorded, and report NS-posted quantities — the
+ * source-of-truth counterpart to the locally-derived figures. On-demand (one
+ * batch per call) because it hits live SuiteQL.
+ */
+async function getBatchNetSuiteTransactions({ kind, id }) {
+  const Model = kind === 'blend' ? db.MesBlendTankBatch
+    : kind === 'surge' ? db.MesSurgeTankBatch
+      : kind === 'separation' ? db.MesSeparationBatch : null
+  if (!Model) throw new Error(`unknown batch kind '${kind}'`)
+  const batch = await Model.findByPk(Number(id))
+  if (!batch) throw new Error(`${kind} batch ${id} not found`)
+
+  const woId = batch.nsWorkOrderId != null ? String(batch.nsWorkOrderId) : null
+  const sepBatchId = kind === 'separation' ? batch.batchId : null
+
+  // Collect NS transaction ids from our own records, tagged by category.
+  const idToCat = new Map()
+  const addId = (nsId, cat) => { if (nsId != null && String(nsId).trim()) idToCat.set(String(nsId), cat) }
+
+  const srcIds = [woId, sepBatchId].filter(Boolean)
+  if (srcIds.length) {
+    const logs = await db.MesProcessingLog.findAll({
+      where: { sourceId: { [Op.in]: srcIds }, nsTransactionId: { [Op.ne]: null } },
+      attributes: ['eventType', 'nsTransactionId'], raw: true,
+    })
+    for (const l of logs) {
+      const et = l.eventType || ''
+      const cat = /unbuild/.test(et) ? 'unbuild' : /complet/.test(et) ? 'completion' : /issue/.test(et) ? 'issue' : null
+      if (cat) addId(l.nsTransactionId, cat)
+    }
+  }
+  if (kind === 'separation' && batch.nsTransactionId) addId(batch.nsTransactionId, 'unbuild')
+
+  const adjOr = []
+  if (woId) adjOr.push({ nsWorkOrderId: woId })
+  if (sepBatchId) adjOr.push({ mesBatchId: sepBatchId })
+  if (adjOr.length) {
+    const adjs = await db.MesInventoryAdjustment.findAll({
+      where: { nsAdjustmentId: { [Op.ne]: null }, [Op.or]: adjOr },
+      attributes: ['nsAdjustmentId'], raw: true,
+    })
+    for (const a of adjs) addId(a.nsAdjustmentId, 'adjustment')
+  }
+
+  const ids = [...idToCat.keys()]
+  if (!ids.length) {
+    return { kind, id: Number(id), woId, sepBatchId, ids: 0, missing: 0, transactions: [], totals: emptyNsTotals(), note: 'No NetSuite transaction ids recorded for this batch.' }
+  }
+
+  // Query NS by id in chunks (createdfrom isn't queryable, so we use the id list).
+  const meta = new Map()
+  const qty = new Map()
+  for (const grp of chunkIds(ids, 200)) {
+    const inList = grp.join(',')
+    const metas = await nsQuery(`SELECT id, type, tranid, trandate, BUILTIN.DF(status) AS status FROM transaction WHERE id IN (${inList})`)
+    for (const m of metas) meta.set(String(m.id), m)
+    const qtys = await nsQuery(
+      `SELECT tl.transaction AS txn, MAX(ABS(tl.quantity)) AS maxabs, SUM(tl.quantity) AS net, ` +
+      `SUM(CASE WHEN tl.quantity > 0 THEN tl.quantity ELSE 0 END) AS possum, ` +
+      `SUM(CASE WHEN tl.quantity < 0 THEN tl.quantity ELSE 0 END) AS negsum ` +
+      `FROM transactionline tl WHERE tl.transaction IN (${inList}) GROUP BY tl.transaction`
+    )
+    for (const x of qtys) qty.set(String(x.txn), x)
+  }
+
+  const totals = emptyNsTotals()
+  const transactions = ids.map(tid => {
+    const m = meta.get(tid) || {}
+    const q = qty.get(tid) || {}
+    const cat = idToCat.get(tid)
+    const maxabs = Number(q.maxabs) || 0
+    const net = Number(q.net) || 0
+    const pos = Number(q.possum) || 0
+    const neg = Number(q.negsum) || 0
+    let lbs = maxabs
+    if (cat === 'issue') { totals.issuedLbs += maxabs; totals.issueCount++ }
+    else if (cat === 'completion') { totals.completedLbs += maxabs; totals.completionCount++ }
+    else if (cat === 'unbuild') { totals.issuedLbs += Math.abs(neg); totals.completedLbs += pos; totals.unbuildCount++; lbs = Math.abs(neg) }
+    else if (cat === 'adjustment') { totals.adjustedNetLbs += net; totals.adjustmentCount++; lbs = net }
+    return {
+      id: tid, category: cat,
+      type: m.type || null, tranid: m.tranid || null, date: m.trandate || null, status: m.status || null,
+      lbs: round2(lbs), inNetSuite: meta.has(tid),
+    }
+  })
+
+  for (const k of ['issuedLbs', 'completedLbs', 'adjustedNetLbs']) totals[k] = round2(totals[k])
+  totals.wasteWithAdjLbs = round2(totals.issuedLbs + totals.adjustedNetLbs - totals.completedLbs)
+  const missing = transactions.filter(t => !t.inNetSuite).length
+
+  return { kind, id: Number(id), woId, sepBatchId, ids: ids.length, missing, transactions, totals }
+}
+
 function indexBy(rows, keyFn) {
   const m = new Map()
   for (const r of rows) {
@@ -545,6 +681,7 @@ function tallyStats(out) {
 module.exports = {
   getInventoryAdjustmentCorrelations,
   getBatchesWithAdjustments,
+  getBatchNetSuiteTransactions,
   correlateAdjustmentRows,
   parseMemoTrigger,
   resolveTrigger,

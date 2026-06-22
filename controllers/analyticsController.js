@@ -122,6 +122,19 @@ exports.getBatchesWithAdjustments = async (req, res) => {
   }
 }
 
+// Pull one batch's ACTUAL transactions from NetSuite (issues/completions/
+// unbuild/adjustments) by the NS ids we recorded — source-of-truth reconciliation.
+exports.getBatchNetSuiteTransactions = async (req, res) => {
+  try {
+    const { kind, id } = req.params
+    const result = await adjustmentCorrelationService.getBatchNetSuiteTransactions({ kind, id })
+    return res.json({ success: true, ...result })
+  } catch (err) {
+    console.error('[analyticsController] batch netsuite transactions:', err)
+    return res.status(500).json({ success: false, error: err.message })
+  }
+}
+
 // Re-post an errored/skipped adjustment, with optional operator corrections
 // (bin / item / qty / lot). Drives the Inventory Adjustment Review Retry button.
 exports.retryInventoryAdjustment = async (req, res) => {
