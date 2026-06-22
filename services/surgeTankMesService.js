@@ -405,6 +405,12 @@ async function resolveLayer3Component(data, historian, fgItem) {
   let pairingStatus
   if (pair?.status === 'approved') {
     pairingStatus = 'ok'
+  } else if (pair?.status === 'rejected') {
+    // Operator marked this (FG ⇐ raw) combo bad. Signal the caller to HOLD the
+    // surge WO instead of auto-posting — the combo stays blocked until someone
+    // approves it (or fixes it to the correct raw input). See fgPairingService.
+    pairingStatus = 'blocked'
+    console.warn(`[SurgeTankMesService] Pairing BLOCKED (rejected): FG ${fgItemId} ← raw ${rawInputItemId} (id=${pair.id}) — surge WO will be held`)
   } else {
     pairingStatus = 'pending_review'
     if (!pair) {
@@ -831,6 +837,21 @@ async function processWOStart(data, historian) {
         result: JSON.stringify({ dryRun: true, parsed }), success: true,
       })
       return { success: true, duplicate: false, tankId, productName, status: 'dry_run', parsed }
+    }
+
+    // Held by a rejected FG⇐raw pairing: don't create the WO. Park the batch in
+    // 'error' so it lands on the Surge Tank Review backlog, where ops can retry
+    // after approving/fixing the pairing, or reject the batch outright.
+    if (resolvedComponent?.pairingStatus === 'blocked') {
+      const msg = `FG⇐raw pairing rejected (FG ${assemblyItem.id} ⇐ raw ${resolvedComponent.itemId}) — WO held. Approve or fix the pairing, then retry.`
+      console.warn(`[SurgeTankMesService] ${msg}`)
+      await record.update({ status: 'error', errorMessage: msg })
+      await db.MesProcessingLog.create({
+        eventType: 'surge_tank_wo_create', sourceId: `${tankId}:${productName}`,
+        nsTransactionType: 'workOrder', payload: JSON.stringify(data),
+        result: JSON.stringify({ blocked: 'pairing rejected', parsed }), success: false,
+      })
+      return { success: true, duplicate: false, tankId, productName, status: 'error', blocked: true, parsed }
     }
 
     if (!assemblyItem.id) {
