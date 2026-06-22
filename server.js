@@ -24,6 +24,18 @@ const devRoutes = require('./routes/devRoutes')
 const analyticsRoutes = require('./routes/analyticsRoutes')
 const clock = require('./sim/clock')
 
+// In prod, silence routine per-tick chatter (every cron job logs progress on each
+// fire) so pm2 logs stay readable. console.warn / console.error are left intact so
+// real problems still surface. dev / local stay fully verbose. bootLog keeps a
+// handle to the original logger so the startup banner below always prints.
+const bootLog = console.log.bind(console)
+if (config.ENVIRONMENT === 'prod') {
+  const noop = () => {}
+  console.log = noop
+  console.info = noop
+  console.debug = noop
+}
+
 const app = express()
 const startTime = Date.now()
 
@@ -182,7 +194,7 @@ app.use('/api/mes/dev/replay', devRoutes)
 app.use('/api/mes/analytics', analyticsRoutes)
 
 app.listen(config.PORT, () => {
-  console.log(`SunApps MES Service running on port ${config.PORT}`)
-  console.log(`  Base historian provider (replay-off): ${baseProviderType}`)
-  console.log(`  Dry run: ${config.MES_DRY_RUN}`)
+  bootLog(`SunApps MES Service running on port ${config.PORT} [env=${config.ENVIRONMENT}, tablePrefix=${config.TABLE_PREFIX}]`)
+  bootLog(`  Base historian provider (replay-off): ${baseProviderType}`)
+  bootLog(`  Dry run: ${config.MES_DRY_RUN}`)
 })

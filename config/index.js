@@ -21,7 +21,26 @@ const sequelize = new Sequelize(
   }
 )
 
+// Environment-scoped table isolation. dev / prod / local all point at the SAME
+// physical database, so every table is prefixed with the environment name to keep
+// the datasets from commingling (e.g. dev_MesBlendTankBatches vs prod_MesBlendTankBatches).
+// ENVIRONMENT is already written into .env by the deploy workflows. Default to 'dev'
+// so an unconfigured environment can NEVER write into the prod table set by accident.
+const ENVIRONMENT = (process.env.ENVIRONMENT || 'dev').toLowerCase()
+const TABLE_PREFIX = `${ENVIRONMENT}_`
+
+// Applied via a beforeDefine hook so every sequelize.define() in models/ inherits the
+// prefix automatically — no per-model edits, and any new model is covered for free.
+// Registered here (before models/ is required) so it's in place when the models define.
+sequelize.addHook('beforeDefine', (attributes, options) => {
+  if (options.tableName) {
+    options.tableName = `${TABLE_PREFIX}${options.tableName}`
+  }
+})
+
 module.exports = {
+  ENVIRONMENT,
+  TABLE_PREFIX,
   PORT: process.env.PORT || 4005,
   CORE_API_URL: process.env.CORE_API_URL || 'http://localhost:4000',
   MES_DRY_RUN: process.env.MES_DRY_RUN === 'true',
