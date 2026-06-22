@@ -16,6 +16,10 @@
  * running. Surge tanks are out of scope — UHT/surge production is
  * continuous and doesn't have meaningful at-rest windows.
  *
+ * Separations are guarded too: a silo that is the source or a destination of a
+ * RUNNING separation batch is skipped (separator flow isn't on the milk lines,
+ * and the unbuild posts at close — sweeping mid-run would double-count).
+ *
  * Tanks-at-rest have +/- ~800 lbs of sensor noise, which is why we average
  * across the window instead of using a single instantaneous read.
  */
@@ -77,6 +81,47 @@ function collectActiveRoutes(milkLines) {
 }
 
 /**
+ * Source + destination silos of every RUNNING separation batch. Separator flow
+ * doesn't appear on the milk lines (collectActiveRoutes can't see it), and the
+ * unbuild posts at batch close — so sweeping a silo mid-separation reconciles
+ * against an NS bin the unbuild hasn't touched yet, then the close-time unbuild
+ * adjusts it again (double-count). Skip those silos until the batch closes.
+ */
+async function collectActiveSeparationSilos() {
+  const set = new Set()
+  const add = (name) => {
+    const n = normName(name)
+    if (n) set.add(n)
+    const canonical = itemConfig.normalizeSiloName(n)
+    if (canonical) set.add(canonical)
+  }
+  let running = []
+  try {
+    running = await db.MesSeparationBatch.findAll({
+      where: { status: 'running' },
+      attributes: ['sourceSilo', 'destinations', 'prevDestinationsJson'],
+      raw: true,
+    })
+  } catch (err) {
+    console.warn(`[TankAtRestSweep] active-separation lookup failed: ${err.message.slice(0, 200)}`)
+    return set
+  }
+  for (const b of running) {
+    add(b.sourceSilo)
+    try {
+      const d = b.destinations ? JSON.parse(b.destinations) : null
+      for (const r of (Array.isArray(d?.resolved) ? d.resolved : [])) { add(r?.silo); add(r?.raw) }
+      for (const raw of (Array.isArray(d?.raw) ? d.raw : [])) add(raw)
+    } catch { /* malformed destinations → rely on sourceSilo */ }
+    try {
+      const pd = b.prevDestinationsJson ? JSON.parse(b.prevDestinationsJson) : null
+      for (const raw of (Array.isArray(pd) ? pd : [])) add(raw)
+    } catch { /* ignore */ }
+  }
+  return set
+}
+
+/**
  * Average lbs over the 5-min window via the historian's time-series query.
  * Falls back to liveLbs when the window is empty (e.g. ProcessValues
  * caching delay) so we still have a value to compare against NS.
@@ -111,10 +156,15 @@ async function readAvgLbs(historian, fqn, windowStart, windowEnd, liveLbs) {
   return null
 }
 
-async function sweepSilo({ silo, activeRoutes, historian, windowStart, windowEnd }) {
+async function sweepSilo({ silo, activeRoutes, activeSeparationSilos, historian, windowStart, windowEnd }) {
   const tankName = silo.siloId
   if (activeRoutes.has(tankName)) {
     return { tankName, skipped: 'active-route' }
+  }
+  // Source/destination of a running separation — its unbuild posts at close, so
+  // sweeping now would double-count against it.
+  if (activeSeparationSilos && activeSeparationSilos.has(tankName)) {
+    return { tankName, skipped: 'active-separation' }
   }
 
   const binId = itemConfig.SILO_BIN_MAP[tankName]
@@ -258,10 +308,13 @@ async function tick(historian) {
     }
   }
 
+  // Silos feeding or receiving a running separation — skip until its unbuild posts.
+  const activeSeparationSilos = await collectActiveSeparationSilos()
+
   const siloResults = []
   for (const silo of siloStatus) {
     try {
-      const r = await sweepSilo({ silo, activeRoutes, historian, windowStart, windowEnd })
+      const r = await sweepSilo({ silo, activeRoutes, activeSeparationSilos, historian, windowStart, windowEnd })
       siloResults.push(r)
     } catch (err) {
       console.error(`[TankAtRestSweep] sweepSilo ${silo.siloId} threw: ${err.message}`)

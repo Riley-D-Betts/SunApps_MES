@@ -60,7 +60,12 @@
       "Bash(sed -n '234,250p' services/nsInventoryLookup.js)",
       "Bash(sed 's/.*\"FQN\": \"\\\\\\([^\"]*\\\\\\)\".*/\\\\1/')",
       "Bash(xargs ls -la)",
-      "Bash(grep -iv \"DENSITY_PPG\\\\|//\\\\|SILO_DENSITY\\\\|LINE_DENSITY\")"
+      "Bash(grep -iv \"DENSITY_PPG\\\\|//\\\\|SILO_DENSITY\\\\|LINE_DENSITY\")",
+      "Bash(grep -oE \"\\(services|jobs|controllers\\)[\\\\\\\\\\\\\\\\/][a-zA-Z]+\\\\.js:[0-9]+\")",
+      "Bash(ls src/components/views/mes/)",
+      "Bash(ls -la src/components/views/BatchAdjustmentsView.vue)",
+      "Bash(grep -l \"wasteWithAdjLbs\\\\|Transactions\" src/components/views/mes/BatchAdjustmentsView.vue)",
+      "Bash(grep -l \"wasteWithAdjLbs\" src/components/views/BatchAdjustmentsView.vue)"
     ]
   }
 }
