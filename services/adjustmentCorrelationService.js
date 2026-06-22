@@ -75,6 +75,23 @@ function normTank(s) {
   return String(s || '').trim().toUpperCase()
 }
 
+// Parse a separation batch's destinations JSON into the silos/bins the cream &
+// skim landed in. A cream-silo sweep is correlated to the separation that fed
+// it via these (the batch's own tankId is its SOURCE silo, not the cream dest).
+function parseSeparationDests(b) {
+  const silos = new Set()
+  const bins = new Set()
+  try {
+    const d = b.destinations ? JSON.parse(b.destinations) : null
+    const resolved = Array.isArray(d?.resolved) ? d.resolved : []
+    for (const r of resolved) {
+      if (r?.silo) silos.add(String(r.silo))
+      if (r?.binId != null) bins.add(Number(r.binId))
+    }
+  } catch { /* malformed / legacy row → no dests */ }
+  return { destSilos: [...silos], destBins: [...bins] }
+}
+
 // Project a batch row to the compact shape returned on each correlation.
 function summarizeBatch(kind, b) {
   const item = kind === 'separation'
@@ -82,6 +99,14 @@ function summarizeBatch(kind, b) {
     : (kind === 'surge' ? (b.componentItemId || b.mesItem) : b.mesItem)
   const start = kind === 'separation' ? b.batchStart : b.detectedAt
   const end = kind === 'separation' ? b.batchEnd : b.completedAt
+  // Issued / completed normalized across kinds so waste math is uniform.
+  //   blend/surge: cumulative tick totals.
+  //   separation:  input went in; cream+skim came out (the unbuild's products).
+  const issuedLbs = kind === 'separation' ? n(b.inputVolume) : n(b.cumulativeIssuedLbs)
+  const completedLbs = kind === 'separation'
+    ? (n(b.creamVolume) || 0) + (n(b.skimVolume) || 0)
+    : n(b.cumulativeCompletedLbs)
+  const dests = kind === 'separation' ? parseSeparationDests(b) : { destSilos: [], destBins: [] }
   return {
     kind,
     id: b.id,
@@ -95,10 +120,13 @@ function summarizeBatch(kind, b) {
     status: b.status || null,
     start: start || null,
     end: end || null,
-    issuedLbs: n(b.cumulativeIssuedLbs),
+    issuedLbs,
+    completedLbs,
     outputLbs: n(b.cumulativeOutputLbs),
     wasteLbs: n(b.wasteLbs),
     wastePercent: n(b.wastePercent),
+    destSilos: dests.destSilos,
+    destBins: dests.destBins,
   }
 }
 
@@ -243,16 +271,30 @@ function projectAdjustment(a) {
     createdAt: a.createdAt,
     matchType: c.matchType || null,
     confidence: c.confidence || null,
+    matchedOn: c.matchedOn || (c.matchType && c.matchType.startsWith('exact') ? 'exact' : null),
     via: c.trigger?.via || null,
   }
 }
 
 // Roll a batch's adjustments up into headline numbers for the master row.
+// netLbs is every submitted adjustment, but exactNetLbs (adjustments tied to
+// this batch by WO / separation batchId) is the only one safe to fold into the
+// waste figure — fuzzyNetLbs comes from silo sweeps that reconcile the WHOLE
+// silo across many batches, so attributing them to one batch overstates waste.
 function rollupAdjustments(adjs) {
-  const r = { count: adjs.length, netLbs: 0, shortfallLbs: 0, sweepNetLbs: 0, errorCount: 0, bySource: {} }
+  const r = {
+    count: adjs.length, netLbs: 0, exactNetLbs: 0, fuzzyNetLbs: 0,
+    shortfallLbs: 0, sweepNetLbs: 0, errorCount: 0, exactCount: 0, fuzzyCount: 0, bySource: {},
+  }
   for (const a of adjs) {
     const q = n(a.qtyDelta) || 0
-    if (a.status === 'submitted') r.netLbs += q
+    const isExact = a.matchType && a.matchType.startsWith('exact')
+    if (isExact) r.exactCount++; else r.fuzzyCount++
+    if (a.status === 'submitted') {
+      r.netLbs += q
+      if (isExact) r.exactNetLbs += q
+      else r.fuzzyNetLbs += q
+    }
     if (a.source === 'shortfall' || a.source === 'unbuild_cap') r.shortfallLbs += Math.abs(q)
     if (a.source === 'sweep' && a.status === 'submitted') r.sweepNetLbs += q
     if (a.status === 'error' || a.status === 'skipped') r.errorCount++
@@ -324,7 +366,23 @@ async function getBatchesWithAdjustments(params = {}) {
     // else: the adjustment's batch is outside the requested window/kind — skip.
   }
 
-  let result = [...byKey.values()].map(b => ({ ...b, adjustmentRollup: rollupAdjustments(b.adjustments) }))
+  // Issue / completion / unbuild counts (+ failures) per batch from our NS
+  // transaction log. Lb totals come from the batch's own cumulative fields
+  // (authoritative); the log gives transaction counts and failure flags.
+  const txnByKey = await aggregateTransactions(batches, from, to)
+
+  let result = [...byKey.values()].map(b => {
+    const adjustmentRollup = rollupAdjustments(b.adjustments)
+    const transactions = txnByKey.get(batchKey(b.kind, b.id)) || blankTxns()
+    // (issues − completions), then the same including this batch's EXACT-linked
+    // adjustments (shortfall/unbuild_cap) — NOT fuzzy silo sweeps, which span
+    // many batches and would wildly overstate one batch's waste.
+    const issued = b.issuedLbs || 0
+    const completed = b.completedLbs || 0
+    const issuedMinusCompletedLbs = Math.round((issued - completed) * 100) / 100
+    const wasteWithAdjLbs = Math.round((issued + adjustmentRollup.exactNetLbs - completed) * 100) / 100
+    return { ...b, adjustmentRollup, transactions, issuedMinusCompletedLbs, wasteWithAdjLbs }
+  })
   if (onlyWith) result = result.filter(b => b.adjustmentRollup.count > 0)
   // Newest batch first across all kinds.
   result.sort((a, b) => new Date(b.start || 0) - new Date(a.start || 0))
@@ -338,6 +396,48 @@ async function getBatchesWithAdjustments(params = {}) {
   return { from: from.toISOString(), to: to.toISOString(), batches: result, unattributed, stats }
 }
 
+function blankTxns() {
+  return { issues: { count: 0, errors: 0 }, completions: { count: 0, errors: 0 }, unbuilds: { count: 0, errors: 0 } }
+}
+
+// Aggregate MesProcessingLog NS transactions per batch. Blend/surge events are
+// keyed by sourceId = nsWorkOrderId (tick/backfill/tail issues + completions);
+// separation unbuilds by sourceId = batchId. Returns Map<batchKey, txns>.
+async function aggregateTransactions(batches, from, to) {
+  const woToKey = new Map()
+  const batchIdToKey = new Map()
+  for (const b of batches) {
+    const key = batchKey(b.kind, b.id)
+    if (b.nsWorkOrderId) woToKey.set(String(b.nsWorkOrderId), key)
+    if (b.kind === 'separation' && b.batchId) batchIdToKey.set(String(b.batchId), key)
+  }
+  const sourceIds = [...new Set([...woToKey.keys(), ...batchIdToKey.keys()])]
+  const out = new Map()
+  if (!sourceIds.length) return out
+
+  const lo = new Date(from.getTime() - FUZZY_TOLERANCE_MS)
+  const hi = new Date(to.getTime() + FUZZY_TOLERANCE_MS)
+  const logs = await db.MesProcessingLog.findAll({
+    where: { sourceId: { [Op.in]: sourceIds }, createdAt: { [Op.between]: [lo, hi] } },
+    attributes: ['eventType', 'sourceId', 'success'],
+    raw: true,
+    limit: 50000,
+  })
+  for (const e of logs) {
+    const key = woToKey.get(String(e.sourceId)) || batchIdToKey.get(String(e.sourceId))
+    if (!key) continue
+    const t = out.get(key) || blankTxns()
+    const et = e.eventType || ''
+    const bucket = /unbuild/.test(et) ? t.unbuilds
+      : /complet/.test(et) ? t.completions
+      : /issue/.test(et) ? t.issues
+      : null
+    if (bucket) { bucket.count++; if (!e.success) bucket.errors++ }
+    out.set(key, t)
+  }
+  return out
+}
+
 /**
  * Time/tank/item match for a row with no exact trigger key (sweep, or a
  * shortfall whose memo lost its id). Scores candidates by: same tank, time
@@ -347,6 +447,7 @@ async function getBatchesWithAdjustments(params = {}) {
 function fuzzyMatch(row, pool) {
   const adjTime = new Date(row.createdAt).getTime()
   const tank = normTank(row.tankName)
+  const binId = row.binId != null ? Number(row.binId) : null
   const item = row.itemId != null ? String(row.itemId) : null
 
   // A sweep that fires right as a batch ends still counts as "at the edge" —
@@ -355,7 +456,17 @@ function fuzzyMatch(row, pool) {
   const EDGE_MS = 60 * 60 * 1000 // 1h
   const scored = []
   for (const b of pool) {
-    if (tank && b.tankId && normTank(b.tankId) !== tank) continue
+    // A sweep can tie to a batch by its SOURCE tank, or — for separations — by
+    // a DESTINATION silo/bin the cream or skim landed in (a cream-silo sweep
+    // reconciles product a separation fed it; the batch's own tankId is the
+    // source silo, so source-only matching would miss it).
+    const onSource = !!(tank && b.tankId && normTank(b.tankId) === tank)
+    const onDest = !!(
+      (tank && b.destSilos && b.destSilos.some(s => normTank(s) === tank)) ||
+      (binId != null && b.destBins && b.destBins.includes(binId))
+    )
+    if (tank && !onSource && !onDest) continue
+
     const start = b.start ? new Date(b.start).getTime() : null
     const end = b.end ? new Date(b.end).getTime() : (start != null ? Infinity : null)
     if (start == null) continue
@@ -369,14 +480,15 @@ function fuzzyMatch(row, pool) {
     const nearEdge = edgeDist <= EDGE_MS
 
     let score = 0
-    if (tank && b.tankId) score += 3          // tank matched (we required it above)
+    if (onSource) score += 3            // source tank match is the strongest signal
+    else if (onDest) score += 2         // destination (cream/skim) match is a touch weaker
     if (strictlyInside) score += 3
     else if (nearEdge) score += 1
     if (itemMatch) score += 2
     // Closeness to the batch midpoint breaks ties toward the better-centered batch.
     const center = end === Infinity ? start : (start + end) / 2
     const dist = Math.abs(adjTime - center)
-    scored.push({ b, score, dist, itemMatch, strictlyInside, nearEdge })
+    scored.push({ b, score, dist, itemMatch, strictlyInside, nearEdge, onSource, onDest })
   }
   if (!scored.length) {
     return { matchType: 'none', confidence: null, trigger: null, batch: null, candidates: 0 }
@@ -384,15 +496,20 @@ function fuzzyMatch(row, pool) {
   scored.sort((a, b) => (b.score - a.score) || (a.dist - b.dist))
   const best = scored[0]
   // High = item-matched AND firmly tied in time (inside the window or right at
-  // its edge). Anything looser is a low-confidence positional guess.
-  const confidence = best.itemMatch && (best.strictlyInside || best.nearEdge) ? 'high' : 'low'
+  // its edge). A destination-only match (cream silo aggregates many separations)
+  // is inherently looser, so it never rates high.
+  const confidence = best.itemMatch && (best.strictlyInside || best.nearEdge) && !best.onDest ? 'high' : 'low'
+  const note = best.onDest && !best.onSource
+    ? `matched to separation by destination silo/bin (cream/skim landing), not source`
+    : (best.itemMatch ? undefined : `tank+time match but adjustment item ${item} != batch item ${best.b.item}`)
   return {
     matchType: 'fuzzy-tank-time',
     confidence,
     trigger: null,
     batch: best.b,
     candidates: scored.length,
-    note: best.itemMatch ? undefined : `tank+time match but adjustment item ${item} != batch item ${best.b.item}`,
+    matchedOn: best.onSource ? 'source' : (best.onDest ? 'dest' : 'time'),
+    note,
   }
 }
 
