@@ -729,6 +729,10 @@ async function getBatchNetSuiteTransactions({ kind, id }) {
   // Query NS by id in chunks (createdfrom isn't queryable, so we use the id list).
   const meta = new Map()
   const qty = new Map()
+  // Per-bin / per-lot breakdown: where product was issued FROM, completed TO,
+  // and adjusted, with quantities. Built from inventory-detail assignments.
+  const binAgg = new Map()
+  const lotAgg = new Map()
   for (const grp of chunkIds(ids, 200)) {
     const inList = grp.join(',')
     const metas = await nsQuery(`SELECT id, type, tranid, trandate, BUILTIN.DF(status) AS status FROM transaction WHERE id IN (${inList})`)
@@ -740,6 +744,38 @@ async function getBatchNetSuiteTransactions({ kind, id }) {
       `FROM transactionline tl WHERE tl.transaction IN (${inList}) GROUP BY tl.transaction`
     )
     for (const x of qtys) qty.set(String(x.txn), x)
+
+    // One row per inventory-detail assignment (bin + lot + qty). The bin/qty
+    // joins are proven (see scripts/verifyUnbuildBinsItems.js); the lot table
+    // join is the only unproven part, so if the full query errors we retry
+    // bins-only — a lot-schema hiccup must not cost us the bin breakdown.
+    try {
+      let lines
+      try {
+        lines = await nsQuery(
+          `SELECT tl.transaction AS txn, tl.item AS item, tl.quantity AS qty, ia.quantity AS assignqty, ` +
+          `ia.bin AS bin, b.binnumber AS binnumber, invn.inventorynumber AS lot ` +
+          `FROM transactionline tl ` +
+          `LEFT JOIN inventoryassignment ia ON ia.transaction = tl.transaction AND ia.transactionline = tl.id ` +
+          `LEFT JOIN bin b ON b.id = ia.bin ` +
+          `LEFT JOIN inventorynumber invn ON invn.id = ia.inventorynumber ` +
+          `WHERE tl.transaction IN (${inList}) AND tl.item IS NOT NULL`
+        )
+      } catch (lotErr) {
+        console.warn('[adjustmentCorrelationService] NS lot join failed, retrying bins-only:', lotErr.message)
+        lines = await nsQuery(
+          `SELECT tl.transaction AS txn, tl.item AS item, tl.quantity AS qty, ia.quantity AS assignqty, ` +
+          `ia.bin AS bin, b.binnumber AS binnumber, NULL AS lot ` +
+          `FROM transactionline tl ` +
+          `LEFT JOIN inventoryassignment ia ON ia.transaction = tl.transaction AND ia.transactionline = tl.id ` +
+          `LEFT JOIN bin b ON b.id = ia.bin ` +
+          `WHERE tl.transaction IN (${inList}) AND tl.item IS NOT NULL`
+        )
+      }
+      for (const ln of lines) accumulateBinLot(binAgg, lotAgg, idToCat.get(String(ln.txn)), ln)
+    } catch (err) {
+      console.warn('[adjustmentCorrelationService] NS bin/lot breakdown query failed:', err.message)
+    }
   }
 
   const totals = emptyNsTotals()
@@ -767,7 +803,58 @@ async function getBatchNetSuiteTransactions({ kind, id }) {
   totals.wasteWithAdjLbs = round2(totals.issuedLbs + totals.adjustedNetLbs - totals.completedLbs)
   const missing = transactions.filter(t => !t.inNetSuite).length
 
-  return { kind, id: Number(id), woId, sepBatchId, ids: ids.length, missing, transactions, totals }
+  const bins = [...binAgg.values()].map(finalizeBinLotRow).sort((a, b) => (b.issuedLbs + b.completedLbs) - (a.issuedLbs + a.completedLbs))
+  const lots = [...lotAgg.values()].map(finalizeBinLotRow).sort((a, b) => (b.issuedLbs + b.completedLbs) - (a.issuedLbs + a.completedLbs))
+
+  return { kind, id: Number(id), woId, sepBatchId, ids: ids.length, missing, transactions, totals, bins, lots }
+}
+
+// Fold one inventory-detail assignment into the per-bin and per-lot tallies,
+// bucketing the quantity by transaction category: issues subtract from a bin
+// (issued-from), completions add (completed-to), unbuilds split by line sign
+// (assembly consumed = issued, components produced = completed), adjustments
+// carry their signed net. `assignqty` (the per-bin/lot detail qty) is preferred
+// over the line total so multi-bin lines attribute correctly.
+function accumulateBinLot(binAgg, lotAgg, cat, ln) {
+  if (!cat) return
+  const amount = Number(ln.assignqty != null ? ln.assignqty : ln.qty) || 0
+  if (!amount) return
+  const binId = ln.bin != null ? Number(ln.bin) : null
+  const binNumber = ln.binnumber || null
+  const lot = ln.lot || null
+  const item = ln.item != null ? String(ln.item) : null
+
+  const addQty = obj => {
+    if (cat === 'issue') obj.issuedLbs += Math.abs(amount)
+    else if (cat === 'completion') obj.completedLbs += Math.abs(amount)
+    else if (cat === 'unbuild') { if (amount < 0) obj.issuedLbs += Math.abs(amount); else obj.completedLbs += amount }
+    else if (cat === 'adjustment') obj.adjustedLbs += amount
+  }
+
+  const binKey = binId == null ? 'none' : String(binId)
+  const b = binAgg.get(binKey) || { key: binNumber || (binId != null ? `bin ${binId}` : '—'), binId, binNumber, items: new Set(), lots: new Set(), issuedLbs: 0, completedLbs: 0, adjustedLbs: 0 }
+  if (item) b.items.add(item)
+  if (lot) b.lots.add(lot)
+  addQty(b)
+  binAgg.set(binKey, b)
+
+  if (lot) {
+    const l = lotAgg.get(lot) || { key: lot, lotName: lot, items: new Set(), lots: new Set(), issuedLbs: 0, completedLbs: 0, adjustedLbs: 0 }
+    if (item) l.items.add(item)
+    if (binNumber || binId != null) l.lots.add(binNumber || `bin ${binId}`)
+    addQty(l)
+    lotAgg.set(lot, l)
+  }
+}
+
+// Materialize a bin/lot tally: Sets → arrays, lbs rounded. `lots` on a bin row =
+// the lots seen there; on a lot row the same field carries the bins seen.
+function finalizeBinLotRow(r) {
+  return {
+    binId: r.binId ?? null, binNumber: r.binNumber ?? null, lotName: r.lotName ?? null,
+    items: [...r.items], related: [...r.lots],
+    issuedLbs: round2(r.issuedLbs), completedLbs: round2(r.completedLbs), adjustedLbs: round2(r.adjustedLbs),
+  }
 }
 
 function indexBy(rows, keyFn) {
