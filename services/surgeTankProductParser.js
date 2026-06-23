@@ -24,10 +24,36 @@
 const config = require('../config')
 
 // ── Exact-match table (AVEVA standardized values) ───────────────────────
-// Add entries as the standardized list lands. Keys are case-sensitive and
-// exactly as the historian writes them.
+// Keys are case-sensitive and exactly as the historian writes them.
+// "Kirkland 2% Organic Lactose Free" is the obsolete SKU; redirected to
+// 4501 (Lac Free Milk) — both labels resolve to the same current item.
 const FG_ITEM_MAP = {
-  // (Populate as the standardized list arrives.)
+  'Alexandre Eco Dairy A2/A2 Organic 4% Whole Milk':        3278,
+  'Alexandre Eco Dairy A2/A2 Organic Chocolate 4% Milk':    4899,
+  'American Farmer Whole Milk':                              5510,
+  'Barista Frappe Mix':                                      5314,
+  'DFI Holiday Nog':                                         3395,
+  'DFI Marcels Modern Pantry Heavy Cream':                   3493,
+  'DFI Marcels Modern Pantry UHT Half & Half':               2940,
+  'DFI Marcels 0% Milk':                                     3222,
+  'DFI Marcels 1% Milk':                                     3228,
+  'DFI Marcels 2% Milk':                                     4012,
+  'DFI Marcels 3.25% Milk':                                  3236,
+  'DG Half & Half':                                          2889,
+  'DG Heavy Cream':                                          2790,
+  'ESL Half & Half':                                         3900,
+  'ESL Heavy Whip Cream':                                    3905,
+  'Horizon Organic 2% Milk':                                 5911,
+  'Horizon Organic 3.25% Whole Milk':                        5907,
+  'Kinera Chocolate':                                        5317,
+  'Kinera Strawberry':                                       5003,
+  'Kirkland 1% Organic Milk':                                4495,
+  'Kirkland 2% Organic Lac Free Milk':                       4501,
+  'Kirkland 2% Organic Lactose Free':                        4501, // obsolete label → same item as Lac Free Milk
+  'Kirkland 2% Organic Milk':                                4498,
+  'Kirkland Chocolate 2% Organic Milk - Aseptic':            4548,
+  'Kirkland Organic Whole Milk':                             6420,
+  'Organic Milk 0% Lac Free':                                3926,
 }
 
 // ── Fuzzy catalog (legacy free-text path) ───────────────────────────────
