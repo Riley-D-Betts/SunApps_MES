@@ -514,6 +514,127 @@ function fuzzyMatch(row, pool) {
   }
 }
 
+// Distinct bins & lots touched by a batch's adjustments, with the net submitted
+// lbs per bin/lot — the "where did the product physically sit" view that the
+// dedicated batch page surfaces alongside the adjustment list.
+function aggregateBinsLots(adjustments) {
+  const binMap = new Map()
+  const lotMap = new Map()
+  for (const a of adjustments) {
+    if (a.binId != null) {
+      const b = binMap.get(a.binId) || { binId: a.binId, items: new Set(), lots: new Set(), netLbs: 0, count: 0 }
+      if (a.itemId) b.items.add(a.itemId)
+      if (a.lotName) b.lots.add(a.lotName)
+      if (a.status === 'submitted') b.netLbs += (n(a.qtyDelta) || 0)
+      b.count++
+      binMap.set(a.binId, b)
+    }
+    if (a.lotName) {
+      const key = `${a.lotName}#${a.itemId || ''}`
+      const l = lotMap.get(key) || { lotName: a.lotName, itemId: a.itemId || null, binId: a.binId, netLbs: 0, count: 0 }
+      if (a.status === 'submitted') l.netLbs += (n(a.qtyDelta) || 0)
+      l.count++
+      lotMap.set(key, l)
+    }
+  }
+  const bins = [...binMap.values()].map(b => ({
+    binId: b.binId, items: [...b.items], lots: [...b.lots], netLbs: round2(b.netLbs), count: b.count,
+  }))
+  const lots = [...lotMap.values()].map(l => ({ ...l, netLbs: round2(l.netLbs) }))
+  return { bins, lots }
+}
+
+/**
+ * Everything about ONE batch, for the dedicated batch-detail page: the full
+ * batch record, its correlated inventory adjustments + rollup, NS transaction
+ * counts and the raw processing-log entries behind them, the bins/lots it
+ * touched, blend-tank ingredient inflows, and separation destinations. The live
+ * NetSuite source-of-truth pull stays a separate on-demand call
+ * (getBatchNetSuiteTransactions) so this stays a fast local read.
+ */
+async function getBatchDetail({ kind, id }) {
+  const Model = kind === 'blend' ? db.MesBlendTankBatch
+    : kind === 'surge' ? db.MesSurgeTankBatch
+      : kind === 'separation' ? db.MesSeparationBatch : null
+  if (!Model) throw new Error(`unknown batch kind '${kind}'`)
+  const row = await Model.findByPk(Number(id))
+  if (!row) throw new Error(`${kind} batch ${id} not found`)
+
+  const summary = summarizeBatch(kind, row)
+  const woId = summary.nsWorkOrderId
+  const sepBatchId = kind === 'separation' ? summary.batchId : null
+
+  // ── Adjustments correlated to THIS batch ──────────────────────────────────
+  // Pull exact-linked rows (by WO / separation batchId) plus everything in the
+  // batch's widened time window (catches fuzzy silo sweeps), correlate them the
+  // same way every other view does, then keep only the ones that resolve here.
+  const start = summary.start ? new Date(summary.start) : null
+  const end = summary.end ? new Date(summary.end) : new Date()
+  const lo = new Date((start ? start.getTime() : end.getTime()) - FUZZY_TOLERANCE_MS)
+  const hi = new Date(end.getTime() + FUZZY_TOLERANCE_MS)
+  const exactOr = []
+  if (woId) exactOr.push({ nsWorkOrderId: woId })
+  if (sepBatchId) exactOr.push({ mesBatchId: sepBatchId })
+  const where = exactOr.length
+    ? { [Op.or]: [...exactOr, { createdAt: { [Op.between]: [lo, hi] } }] }
+    : { createdAt: { [Op.between]: [lo, hi] } }
+  const rawAdjs = await db.MesInventoryAdjustment.findAll({
+    where, order: [['createdAt', 'DESC']], limit: 2000,
+  })
+  const correlated = await correlateAdjustmentRows(rawAdjs)
+  const adjustments = correlated
+    .filter(a => a.correlation?.batch && a.correlation.batch.kind === kind && a.correlation.batch.id === row.id)
+    .map(projectAdjustment)
+  const adjustmentRollup = rollupAdjustments(adjustments)
+  const { bins, lots } = aggregateBinsLots(adjustments)
+
+  // ── NS transaction counts + the raw processing-log entries behind them ─────
+  const txnByKey = await aggregateTransactions([summary], start || lo, end)
+  const transactions = txnByKey.get(batchKey(kind, row.id)) || blankTxns()
+  const logSourceIds = [woId, sepBatchId].filter(Boolean)
+  const log = logSourceIds.length
+    ? (await db.MesProcessingLog.findAll({
+      where: { sourceId: { [Op.in]: logSourceIds } },
+      attributes: ['id', 'eventType', 'nsTransactionType', 'nsTransactionId', 'success', 'errorMessage', 'createdAt'],
+      order: [['createdAt', 'DESC']], raw: true, limit: 1000,
+    })).map(l => ({
+      id: l.id, eventType: l.eventType, nsTransactionType: l.nsTransactionType,
+      nsTransactionId: l.nsTransactionId, success: !!l.success,
+      errorMessage: l.errorMessage || null, createdAt: l.createdAt,
+    }))
+    : []
+
+  // ── Blend-tank ingredient inflows (line-by-line) ──────────────────────────
+  const inflows = kind === 'blend'
+    ? (await db.MesBlendTankInflow.findAll({
+      where: { blendTankBatchId: row.id }, order: [['createdAt', 'ASC']], raw: true,
+    })).map(f => ({
+      id: f.id, line: f.line, ingredientType: f.ingredientType, totalLbs: n(f.totalLbs),
+      nsItemId: f.nsItemId || null, nsIssueId: f.nsIssueId || null, status: f.status,
+      destination: f.destination || null, siloName: f.siloName || null,
+      errorMessage: f.errorMessage || null, createdAt: f.createdAt,
+    }))
+    : []
+
+  const issued = summary.issuedLbs || 0
+  const completed = summary.completedLbs || 0
+  const issuedMinusCompletedLbs = round2(issued - completed)
+  const wasteWithAdjLbs = round2(issued + adjustmentRollup.exactNetLbs - completed)
+
+  return {
+    kind, id: row.id,
+    batch: row.get({ plain: true }),
+    summary,
+    issuedMinusCompletedLbs,
+    wasteWithAdjLbs,
+    adjustments, adjustmentRollup,
+    transactions, log,
+    bins, lots,
+    inflows,
+    destSilos: summary.destSilos, destBins: summary.destBins,
+  }
+}
+
 // ── NetSuite pull ───────────────────────────────────────────────────────────
 // Rather than trust only our local MesProcessingLog/batch totals, pull the
 // ACTUAL transactions for a batch's work order from NetSuite by the transaction
@@ -681,6 +802,7 @@ function tallyStats(out) {
 module.exports = {
   getInventoryAdjustmentCorrelations,
   getBatchesWithAdjustments,
+  getBatchDetail,
   getBatchNetSuiteTransactions,
   correlateAdjustmentRows,
   parseMemoTrigger,

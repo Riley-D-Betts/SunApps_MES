@@ -14,6 +14,7 @@ router.get('/inventory-adjustments',             controller.getInventoryAdjustme
 router.get('/inventory-adjustments/correlations', controller.getInventoryAdjustmentCorrelations)
 router.get('/batches-with-adjustments',          controller.getBatchesWithAdjustments)
 router.get('/batches/:kind/:id/netsuite',        controller.getBatchNetSuiteTransactions)
+router.get('/batches/:kind/:id',                 controller.getBatchDetail)
 router.get('/inventory-adjustments-trend',       controller.getInventoryAdjustmentTrend)
 router.post('/inventory-adjustments/:id/retry',  controller.retryInventoryAdjustment)
 router.post('/inventory-adjustments/:id/reject', controller.rejectInventoryAdjustment)

@@ -122,6 +122,21 @@ exports.getBatchesWithAdjustments = async (req, res) => {
   }
 }
 
+// Everything about one batch for the dedicated batch-detail page: full record,
+// correlated adjustments + rollup, transaction counts + processing log, bins,
+// lots, ingredient inflows, and separation destinations (local read).
+exports.getBatchDetail = async (req, res) => {
+  try {
+    const { kind, id } = req.params
+    const result = await adjustmentCorrelationService.getBatchDetail({ kind, id })
+    return res.json({ success: true, ...result })
+  } catch (err) {
+    console.error('[analyticsController] batch detail:', err)
+    const code = /not found|unknown batch kind/.test(err.message) ? 404 : 500
+    return res.status(code).json({ success: false, error: err.message })
+  }
+}
+
 // Pull one batch's ACTUAL transactions from NetSuite (issues/completions/
 // unbuild/adjustments) by the NS ids we recorded — source-of-truth reconciliation.
 exports.getBatchNetSuiteTransactions = async (req, res) => {
