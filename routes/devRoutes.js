@@ -18,6 +18,7 @@ const inventoryAdjustmentJob = require('../jobs/inventoryAdjustmentJob')
 const bulkMilkJob = require('../jobs/bulkMilkJob')
 const separationJob = require('../jobs/separationJob')
 const runtimeConfigService = require('../services/runtimeConfigService')
+const config = require('../config')
 
 // PM2 process name to restart on reset (matches the deploy workflow's
 // `pm2 restart sunapps_mes`). Override with PM2_APP_NAME if it ever differs.
@@ -132,6 +133,7 @@ router.post('/reset', async (req, res) => {
     pollStore.clear()
 
     // 3. Truncate dev tables children-first to satisfy FK constraints.
+    const P = config.TABLE_PREFIX
     const order = [
       'MesBlendTankInflows',
       'MesPipeIssueStates',
@@ -146,9 +148,9 @@ router.post('/reset', async (req, res) => {
     ]
     for (const table of order) {
       try {
-        await db.sequelize.query(`DELETE FROM ${table}`)
+        await db.sequelize.query(`DELETE FROM ${P}${table}`)
       } catch (err) {
-        console.warn(`[DevRoutes] reset: failed to clear ${table}: ${err.message}`)
+        console.warn(`[DevRoutes] reset: failed to clear ${P}${table}: ${err.message}`)
       }
     }
 
