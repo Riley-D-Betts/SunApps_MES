@@ -25,6 +25,7 @@
  */
 const itemConfig = require('./mesItemConfig')
 const inventoryAdjustment = require('./inventoryAdjustmentService')
+const nsInventory = require('./nsInventoryLookup')
 const db = require('../models')
 
 const AT_REST_WINDOW_MS = 5 * 60 * 1000
@@ -185,6 +186,15 @@ async function sweepSilo({ silo, activeRoutes, activeSeparationSilos, historian,
     return { tankName, skipped: 'no-product-index', productIndex: silo.productIndex || 0 }
   }
 
+  // Lot-tracked items that aren't also bin-tracked in NS will land in the
+  // default bin slot — the bin query always returns 0 and every tick posts
+  // a duplicate adjustment. Enable bin tracking on the NS item first.
+  const siloTracking = await nsInventory.getItemTracking(item.id)
+  if (siloTracking.isLot && !siloTracking.useBins) {
+    console.warn(`[TankAtRestSweep] ${tankName}: item ${item.id} is lot-tracked but not bin-tracked in NS — enable bin tracking before sweeping`)
+    return { tankName, skipped: 'lot-not-bin-tracked', itemId: item.id }
+  }
+
   const reading = await readAvgLbs(historian, siloLbsFqn(tankName), windowStart, windowEnd, silo.lbs)
   if (!reading) return { tankName, skipped: 'no-level-samples' }
   if (reading.rangeLbs > AT_REST_RANGE_LBS) {
@@ -240,6 +250,15 @@ async function sweepBlendTank({ tank, activeRoutes, historian, windowStart, wind
 
   const itemId = lastBatch.mesItem
   const lastWoNumber = lastBatch.nsWorkOrderNumber || null
+
+  // Lot-tracked items that aren't also bin-tracked in NS will land in the
+  // default bin slot — the bin query always returns 0 and every tick posts
+  // a duplicate adjustment. Enable bin tracking on the NS item first.
+  const blendTracking = await nsInventory.getItemTracking(itemId)
+  if (blendTracking.isLot && !blendTracking.useBins) {
+    console.warn(`[TankAtRestSweep] ${tankName}: item ${itemId} is lot-tracked but not bin-tracked in NS — enable bin tracking before sweeping`)
+    return { tankName, skipped: 'lot-not-bin-tracked', itemId }
+  }
 
   const reading = await readAvgLbs(historian, blendTankLbsFqn(tankName), windowStart, windowEnd, tank.weightLbs)
   if (!reading) return { tankName, skipped: 'no-level-samples' }
