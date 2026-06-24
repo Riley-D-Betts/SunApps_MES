@@ -261,7 +261,7 @@ const RAW_FG_TO_FG_MAP = {
   8815: 8401,  // Raw Aldi 2% Organic Milk → Aldi 2% Organic Milk
   8816: 8406,  // Raw Aldi 3.25% Organic Whole Milk → Aldi 3.25% Organic Whole Milk
   8817: 8409,  // Raw Aldi 3.25% Organic Whole Milk w/ DHA → Aldi 3.25% Organic Whole Milk w/ DHA
-  8812: 7477,  // Raw Horizon Organic Half & Half → Horizon Organic Half & Half
+  8464: 7477,  // Raw Horizon Organic Half & Half → Horizon Organic Half & Half (prod id 8464; sandbox was 8812)
   8918: 8271,  // Raw DFI Marcels Chocolate 1% Milk → DFI Marcels Chocolate 1% Milk
 }
 

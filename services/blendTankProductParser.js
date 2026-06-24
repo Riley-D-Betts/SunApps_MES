@@ -22,32 +22,32 @@ const RAW_FG_ITEM_MAP = {
   // Type-2 fat-level milks → LOT-TRACKED batch twins (was the non-lot
   // standardization item, shown in trailing comment). Non-lot ids remain the
   // bin-only INPUTS in lineIngredientMapper. See lot_tracked_batch_twin_architecture.
-  'Raw conventional 1%':                                     8929, // was 5415
-  'Raw conventional 2%':                                     8930, // was 5412
-  'Raw conventional 3.25%':                                  8931, // was 5413
-  'Raw conventional 3.5%':                                   8932, // was 5416
+  'Raw conventional 1%':                                     8564, // prod twin (src 5415; sandbox 8929)
+  'Raw conventional 2%':                                     8664, // prod twin (src 5412; sandbox 8930)
+  'Raw conventional 3.25%':                                  8465, // prod twin (src 5413; sandbox 8931)
+  'Raw conventional 3.5%':                                   8466, // prod twin (src 5416; sandbox 8932)
   'Raw conventional cream (40%)':                            5480,
   'Raw Con Cream 40%':                                       5480, // pre-AVEVA free-text alias
 
   // ── Type-2: Organic ───────────────────────────────────────────────────
   'Raw organic 0% (skim)':                                   5482,
-  'Raw organic 1%':                                          8933, // was 5409
-  'Raw organic 2%':                                          8934, // was 5410
-  'Raw organic 3.25%':                                       8935, // was 5411
-  'Raw organic 3.5%':                                        8936, // was 5401
+  'Raw organic 1%':                                          8467, // prod twin (src 5409; sandbox 8933)
+  'Raw organic 2%':                                          8468, // prod twin (src 5410; sandbox 8934)
+  'Raw organic 3.25%':                                       8469, // prod twin (src 5411; sandbox 8935)
+  'Raw organic 3.5%':                                        8470, // prod twin (src 5401; sandbox 8936)
   'Raw organic cream (40%)':                                 5483,
 
   // ── Type-2: Organic A2 ───────────────────────────────────────────────
   'Raw organic A2 0% (skim)':                                5484,
-  'Raw organic A2 1%':                                       8937, // was 8366
-  'Raw organic A2 2%':                                       8938, // was 8367
-  'Raw organic A2 3.25%':                                    8939, // was 8368
-  'Raw organic A2 3.5%':                                     8940, // was 8369
-  // Batch-tank product resolves to the LOT-TRACKED twin (8928), not the non-lot
+  'Raw organic A2 1%':                                       8471, // prod twin (src 8366; sandbox 8937)
+  'Raw organic A2 2%':                                       8472, // prod twin (src 8367; sandbox 8938)
+  'Raw organic A2 3.25%':                                    8473, // prod twin (src 8368; sandbox 8939)
+  'Raw organic A2 3.5%':                                     8565, // prod twin (src 8369; sandbox 8940)
+  // Batch-tank product resolves to the LOT-TRACKED twin (prod 8764), not the non-lot
   // standardization milk (8370). 8370 stays the bin-only INPUT (lineIngredientMapper);
-  // the blend-tank WO builds/completes into 8928. See BATCH_LIFECYCLE_PLAN — lot vs
-  // non-lot must be separate NS items. (Pilot for the type-2 standardized rollout.)
-  'Raw organic A2 4%':                                       8928,
+  // the blend-tank WO builds/completes into 8764. See BATCH_LIFECYCLE_PLAN — lot vs
+  // non-lot must be separate NS items. (sandbox twin id was 8928.)
+  'Raw organic A2 4%':                                       8764, // prod twin (src 8370; sandbox 8928)
   'Raw organic A2 cream (40%)':                              8365,
 
   // ── Type-3: Brand-specific ────────────────────────────────────────────
@@ -163,25 +163,25 @@ const PRODUCT_CATALOG = [
   // Listed AFTER type-3 so brand-specific type-3 entries win catalog-order
   // ties. Item IDs match mesItemConfig.RAW_ITEMS.
   { nsId: 8163, name: 'Raw Conventional 0% - Skim',  brand: 'conventional', fatPct: 0,    modifiers: ['skim'] },
-  { nsId: 8929, name: 'Raw Conventional 1% (Batch)',  brand: 'conventional', fatPct: 1,    modifiers: [] }, // lot twin of 5415
-  { nsId: 8930, name: 'Raw Conventional 2% (Batch)',  brand: 'conventional', fatPct: 2,    modifiers: [] }, // lot twin of 5412
-  { nsId: 8931, name: 'Raw Conventional 3.25% (Batch)', brand: 'conventional', fatPct: 3.25, modifiers: [] }, // lot twin of 5413
-  { nsId: 8932, name: 'Raw Conventional 3.5% (Batch)', brand: 'conventional', fatPct: 3.5,  modifiers: [] }, // lot twin of 5416
+  { nsId: 8564, name: 'Raw Conventional 1% (Batch)',  brand: 'conventional', fatPct: 1,    modifiers: [] }, // lot twin of 5415
+  { nsId: 8664, name: 'Raw Conventional 2% (Batch)',  brand: 'conventional', fatPct: 2,    modifiers: [] }, // lot twin of 5412
+  { nsId: 8465, name: 'Raw Conventional 3.25% (Batch)', brand: 'conventional', fatPct: 3.25, modifiers: [] }, // lot twin of 5413
+  { nsId: 8466, name: 'Raw Conventional 3.5% (Batch)', brand: 'conventional', fatPct: 3.5,  modifiers: [] }, // lot twin of 5416
   { nsId: 5480, name: 'Raw Conventional Cream',       brand: 'conventional', fatPct: 40,   modifiers: ['cream'] },
   { nsId: 5405, name: 'Raw Conventional UF Milk',     brand: 'conventional', fatPct: null, modifiers: ['uf'] },
   { nsId: 5482, name: 'Raw Organic 0%',               brand: 'organic',      fatPct: 0,    modifiers: ['organic', 'skim'] },
-  { nsId: 8933, name: 'Raw Organic 1% (Batch)',       brand: 'organic',      fatPct: 1,    modifiers: ['organic'] }, // lot twin of 5409
-  { nsId: 8934, name: 'Raw Organic 2% (Batch)',       brand: 'organic',      fatPct: 2,    modifiers: ['organic'] }, // lot twin of 5410
-  { nsId: 8935, name: 'Raw Organic 3.25% (Batch)',    brand: 'organic',      fatPct: 3.25, modifiers: ['organic'] }, // lot twin of 5411
-  { nsId: 8936, name: 'Raw Organic 3.5% (Batch)',     brand: 'organic',      fatPct: 3.5,  modifiers: ['organic'] }, // lot twin of 5401
+  { nsId: 8467, name: 'Raw Organic 1% (Batch)',       brand: 'organic',      fatPct: 1,    modifiers: ['organic'] }, // lot twin of 5409
+  { nsId: 8468, name: 'Raw Organic 2% (Batch)',       brand: 'organic',      fatPct: 2,    modifiers: ['organic'] }, // lot twin of 5410
+  { nsId: 8469, name: 'Raw Organic 3.25% (Batch)',    brand: 'organic',      fatPct: 3.25, modifiers: ['organic'] }, // lot twin of 5411
+  { nsId: 8470, name: 'Raw Organic 3.5% (Batch)',     brand: 'organic',      fatPct: 3.5,  modifiers: ['organic'] }, // lot twin of 5401
   { nsId: 5483, name: 'Raw Organic Cream',            brand: 'organic',      fatPct: 40,   modifiers: ['organic', 'cream'] },
   { nsId: 5402, name: 'Raw Organic UF Milk',          brand: 'organic',      fatPct: null, modifiers: ['organic', 'uf'] },
   { nsId: 5484, name: 'Raw Organic A2 0%',            brand: 'a2',           fatPct: 0,    modifiers: ['organic', 'a2', 'skim'] },
-  { nsId: 8937, name: 'Raw Organic A2 1% (Batch)',    brand: 'a2',           fatPct: 1,    modifiers: ['organic', 'a2'] }, // lot twin of 8366
-  { nsId: 8938, name: 'Raw Organic A2 2% (Batch)',    brand: 'a2',           fatPct: 2,    modifiers: ['organic', 'a2'] }, // lot twin of 8367
-  { nsId: 8939, name: 'Raw Organic A2 3.25% (Batch)', brand: 'a2',           fatPct: 3.25, modifiers: ['organic', 'a2'] }, // lot twin of 8368
-  { nsId: 8940, name: 'Raw Organic A2 3.5% (Batch)',  brand: 'a2',           fatPct: 3.5,  modifiers: ['organic', 'a2'] }, // lot twin of 8369
-  { nsId: 8928, name: 'Raw Organic A2 4% (Batch)',    brand: 'a2',           fatPct: 4,    modifiers: ['organic', 'a2'] }, // lot-tracked batch twin of 8370
+  { nsId: 8471, name: 'Raw Organic A2 1% (Batch)',    brand: 'a2',           fatPct: 1,    modifiers: ['organic', 'a2'] }, // lot twin of 8366
+  { nsId: 8472, name: 'Raw Organic A2 2% (Batch)',    brand: 'a2',           fatPct: 2,    modifiers: ['organic', 'a2'] }, // lot twin of 8367
+  { nsId: 8473, name: 'Raw Organic A2 3.25% (Batch)', brand: 'a2',           fatPct: 3.25, modifiers: ['organic', 'a2'] }, // lot twin of 8368
+  { nsId: 8565, name: 'Raw Organic A2 3.5% (Batch)',  brand: 'a2',           fatPct: 3.5,  modifiers: ['organic', 'a2'] }, // lot twin of 8369
+  { nsId: 8764, name: 'Raw Organic A2 4% (Batch)',    brand: 'a2',           fatPct: 4,    modifiers: ['organic', 'a2'] }, // lot-tracked batch twin of 8370
   { nsId: 8365, name: 'Raw Organic A2 Cream',         brand: 'a2',           fatPct: 40,   modifiers: ['organic', 'a2', 'cream'] },
 ]
 

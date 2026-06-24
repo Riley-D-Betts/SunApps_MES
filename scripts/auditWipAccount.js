@@ -6,16 +6,18 @@
 //   COMMIT=1 node scripts/auditWipAccount.js   # patch items missing wipAcct → WIP_ACCT
 const core = require('../clients/coreClient')
 const { RAW_FG_TO_FG_MAP } = require('../services/mesItemConfig')
+const { RAW_FG_ITEM_MAP } = require('../services/blendTankProductParser')
 
 const WIP_ACCT = 805 // Work in Progress (account number 12021, internal id 805)
 const COMMIT = process.env.COMMIT === '1'
 
 // Every assembly item that gets a WIP work order:
-//  - blend-tank builds the raw FGs  (keys)
-//  - surge-tank builds the FGs       (values)
+//  - blend-tank builds the type-2 twins + type-3 raw FGs (RAW_FG_ITEM_MAP values)
+//  - raw FG → FG mapping (RAW_FG_TO_FG_MAP keys = raw FGs, values = surge FGs)
 //  - separation assemblies (built via unbuild, but assembly items nonetheless)
 const SEPARATION_ASSEMBLIES = [5417, 5404, 5403, 5406]
 const ids = Array.from(new Set([
+  ...Object.values(RAW_FG_ITEM_MAP).map(Number),
   ...Object.keys(RAW_FG_TO_FG_MAP).map(Number),
   ...Object.values(RAW_FG_TO_FG_MAP).map(Number),
   ...SEPARATION_ASSEMBLIES,
