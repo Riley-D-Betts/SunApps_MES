@@ -16,11 +16,13 @@ const reval = require('../services/costRevaluationService')
 
 const COMMIT = process.argv.includes('--commit')
 
-// [sourceItemId, RAW_FG_ITEM_MAP key]. A2 4% (8370) already piloted → 8928.
+// [sourceItemId, RAW_FG_ITEM_MAP key]. A2 4% (8370) piloted in SANDBOX only —
+// prod has no twin yet, so it's included here for the prod rollout (idempotent).
 const SOURCES = [
   [5415, 'Raw conventional 1%'], [5412, 'Raw conventional 2%'], [5413, 'Raw conventional 3.25%'], [5416, 'Raw conventional 3.5%'],
   [5409, 'Raw organic 1%'], [5410, 'Raw organic 2%'], [5411, 'Raw organic 3.25%'], [5401, 'Raw organic 3.5%'],
   [8366, 'Raw organic A2 1%'], [8367, 'Raw organic A2 2%'], [8368, 'Raw organic A2 3.25%'], [8369, 'Raw organic A2 3.5%'],
+  [8370, 'Raw organic A2 4%'],
 ]
 
 async function sql(q) { const r = await core.netsuitePost('/query/v1/suiteql', { q }); return r?.items || r?.body?.items || [] }

@@ -1,0 +1,744 @@
+[
+  {
+    "sandboxId": 5401,
+    "type": "assemblyItem",
+    "itemId": "Raw Organic 3.5%",
+    "displayName": "300006",
+    "description": "Raw Organic 3.5%",
+    "costingMethod": {
+      "id": "STANDARD"
+    },
+    "fields": {
+      "assetAccount": {
+        "id": "722"
+      },
+      "cogsAccount": {
+        "id": "779"
+      },
+      "incomeAccount": {
+        "id": "457"
+      },
+      "wipAcct": {
+        "id": "805"
+      },
+      "scrapAcct": {
+        "id": "466"
+      },
+      "billPriceVarianceAcct": {
+        "id": "464"
+      },
+      "billQtyVarianceAcct": {
+        "id": "807"
+      },
+      "prodPriceVarianceAcct": {
+        "id": "791"
+      },
+      "prodQtyVarianceAcct": {
+        "id": "475"
+      },
+      "purchasePriceVarianceAcct": {
+        "id": "464"
+      },
+      "custReturnVarianceAccount": {
+        "id": "459"
+      },
+      "unbuildVarianceAccount": {
+        "id": "793"
+      },
+      "taxSchedule": {
+        "id": "1"
+      },
+      "costCategory": {
+        "id": "1"
+      },
+      "currency": {
+        "id": "1"
+      },
+      "unitsType": {
+        "id": "5"
+      },
+      "costEstimateType": {
+        "id": "AVGCOST"
+      },
+      "atpMethod": {
+        "id": "CUMULATIVE_ATP_WITH_LOOK_AHEAD"
+      },
+      "supplyReplenishmentMethod": {
+        "id": "MPS"
+      },
+      "customForm": {
+        "id": "414"
+      },
+      "custitem_sun_mesclass": {
+        "id": "16"
+      },
+      "custitem6": {
+        "id": "7"
+      }
+    },
+    "scalars": {
+      "baseUnit": "9",
+      "stockUnit": "9",
+      "purchaseUnit": "9",
+      "saleUnit": "9",
+      "consumptionUnit": "9",
+      "costEstimateUnits": "per lb",
+      "transferPriceUnits": "per lb",
+      "weightUnits": "per lb",
+      "includeChildren": true,
+      "useBins": true,
+      "isLotItem": false
+    },
+    "recipe": [
+      {
+        "item": 5482,
+        "quantity": 0.28281,
+        "bomQuantity": 0.28281,
+        "componentYield": 1
+      },
+      {
+        "item": 5483,
+        "quantity": 0.71719,
+        "bomQuantity": 0.71719,
+        "componentYield": 1
+      }
+    ]
+  },
+  {
+    "sandboxId": 8366,
+    "type": "assemblyItem",
+    "itemId": "Raw Organic A2 1%",
+    "displayName": null,
+    "description": "Raw Organic A2 1%",
+    "costingMethod": {
+      "id": "STANDARD"
+    },
+    "fields": {
+      "assetAccount": {
+        "id": "722"
+      },
+      "cogsAccount": {
+        "id": "779"
+      },
+      "incomeAccount": {
+        "id": "457"
+      },
+      "wipAcct": {
+        "id": "805"
+      },
+      "scrapAcct": {
+        "id": "466"
+      },
+      "billPriceVarianceAcct": {
+        "id": "464"
+      },
+      "billQtyVarianceAcct": {
+        "id": "807"
+      },
+      "prodPriceVarianceAcct": {
+        "id": "791"
+      },
+      "prodQtyVarianceAcct": {
+        "id": "475"
+      },
+      "purchasePriceVarianceAcct": {
+        "id": "464"
+      },
+      "custReturnVarianceAccount": {
+        "id": "459"
+      },
+      "unbuildVarianceAccount": {
+        "id": "793"
+      },
+      "taxSchedule": {
+        "id": "1"
+      },
+      "costCategory": {
+        "id": "1"
+      },
+      "currency": {
+        "id": "1"
+      },
+      "unitsType": {
+        "id": "5"
+      },
+      "costEstimateType": {
+        "id": "AVGCOST"
+      },
+      "atpMethod": {
+        "id": "CUMULATIVE_ATP_WITH_LOOK_AHEAD"
+      },
+      "supplyReplenishmentMethod": {
+        "id": "MPS"
+      },
+      "customForm": {
+        "id": "414"
+      },
+      "custitem_sun_mesclass": {
+        "id": "16"
+      },
+      "custitem6": {
+        "id": "7"
+      }
+    },
+    "scalars": {
+      "baseUnit": "9",
+      "stockUnit": "9",
+      "purchaseUnit": "9",
+      "saleUnit": "9",
+      "consumptionUnit": "9",
+      "costEstimateUnits": "per lb",
+      "transferPriceUnits": "per lb",
+      "weightUnits": "per lb",
+      "includeChildren": true,
+      "useBins": true,
+      "isLotItem": false
+    },
+    "recipe": [
+      {
+        "item": 5484,
+        "quantity": 0.9,
+        "bomQuantity": 0.9,
+        "componentYield": 1
+      },
+      {
+        "item": 8365,
+        "quantity": 0.1,
+        "bomQuantity": 0.1,
+        "componentYield": 1
+      }
+    ]
+  },
+  {
+    "sandboxId": 8367,
+    "type": "assemblyItem",
+    "itemId": "Raw Organic A2 2%",
+    "displayName": null,
+    "description": "Raw Organic A2 2%",
+    "costingMethod": {
+      "id": "STANDARD"
+    },
+    "fields": {
+      "assetAccount": {
+        "id": "722"
+      },
+      "cogsAccount": {
+        "id": "779"
+      },
+      "incomeAccount": {
+        "id": "457"
+      },
+      "wipAcct": {
+        "id": "805"
+      },
+      "scrapAcct": {
+        "id": "466"
+      },
+      "billPriceVarianceAcct": {
+        "id": "464"
+      },
+      "billQtyVarianceAcct": {
+        "id": "807"
+      },
+      "prodPriceVarianceAcct": {
+        "id": "791"
+      },
+      "prodQtyVarianceAcct": {
+        "id": "475"
+      },
+      "purchasePriceVarianceAcct": {
+        "id": "464"
+      },
+      "custReturnVarianceAccount": {
+        "id": "459"
+      },
+      "unbuildVarianceAccount": {
+        "id": "793"
+      },
+      "taxSchedule": {
+        "id": "1"
+      },
+      "costCategory": {
+        "id": "1"
+      },
+      "currency": {
+        "id": "1"
+      },
+      "unitsType": {
+        "id": "5"
+      },
+      "costEstimateType": {
+        "id": "AVGCOST"
+      },
+      "atpMethod": {
+        "id": "CUMULATIVE_ATP_WITH_LOOK_AHEAD"
+      },
+      "supplyReplenishmentMethod": {
+        "id": "MPS"
+      },
+      "customForm": {
+        "id": "414"
+      },
+      "custitem_sun_mesclass": {
+        "id": "16"
+      },
+      "custitem6": {
+        "id": "7"
+      }
+    },
+    "scalars": {
+      "baseUnit": "9",
+      "stockUnit": "9",
+      "purchaseUnit": "9",
+      "saleUnit": "9",
+      "consumptionUnit": "9",
+      "costEstimateUnits": "per lb",
+      "transferPriceUnits": "per lb",
+      "weightUnits": "per lb",
+      "includeChildren": true,
+      "useBins": true,
+      "isLotItem": false
+    },
+    "recipe": [
+      {
+        "item": 5484,
+        "quantity": 0.9,
+        "bomQuantity": 0.9,
+        "componentYield": 1
+      },
+      {
+        "item": 8365,
+        "quantity": 0.1,
+        "bomQuantity": 0.1,
+        "componentYield": 1
+      }
+    ]
+  },
+  {
+    "sandboxId": 8368,
+    "type": "assemblyItem",
+    "itemId": "Raw Organic A2 3.25%",
+    "displayName": null,
+    "description": "Raw Organic A2 3.25%",
+    "costingMethod": {
+      "id": "STANDARD"
+    },
+    "fields": {
+      "assetAccount": {
+        "id": "722"
+      },
+      "cogsAccount": {
+        "id": "779"
+      },
+      "incomeAccount": {
+        "id": "457"
+      },
+      "wipAcct": {
+        "id": "805"
+      },
+      "scrapAcct": {
+        "id": "466"
+      },
+      "billPriceVarianceAcct": {
+        "id": "464"
+      },
+      "billQtyVarianceAcct": {
+        "id": "807"
+      },
+      "prodPriceVarianceAcct": {
+        "id": "791"
+      },
+      "prodQtyVarianceAcct": {
+        "id": "475"
+      },
+      "purchasePriceVarianceAcct": {
+        "id": "464"
+      },
+      "custReturnVarianceAccount": {
+        "id": "459"
+      },
+      "unbuildVarianceAccount": {
+        "id": "793"
+      },
+      "taxSchedule": {
+        "id": "1"
+      },
+      "costCategory": {
+        "id": "1"
+      },
+      "currency": {
+        "id": "1"
+      },
+      "unitsType": {
+        "id": "5"
+      },
+      "costEstimateType": {
+        "id": "AVGCOST"
+      },
+      "atpMethod": {
+        "id": "CUMULATIVE_ATP_WITH_LOOK_AHEAD"
+      },
+      "supplyReplenishmentMethod": {
+        "id": "MPS"
+      },
+      "customForm": {
+        "id": "414"
+      },
+      "custitem_sun_mesclass": {
+        "id": "16"
+      },
+      "custitem6": {
+        "id": "7"
+      }
+    },
+    "scalars": {
+      "baseUnit": "9",
+      "stockUnit": "9",
+      "purchaseUnit": "9",
+      "saleUnit": "9",
+      "consumptionUnit": "9",
+      "costEstimateUnits": "per lb",
+      "transferPriceUnits": "per lb",
+      "weightUnits": "per lb",
+      "includeChildren": false,
+      "useBins": true,
+      "isLotItem": false
+    },
+    "recipe": [
+      {
+        "item": 5484,
+        "quantity": 0.9,
+        "bomQuantity": 0.9,
+        "componentYield": 1
+      },
+      {
+        "item": 8365,
+        "quantity": 0.1,
+        "bomQuantity": 0.1,
+        "componentYield": 1
+      }
+    ]
+  },
+  {
+    "sandboxId": 8369,
+    "type": "assemblyItem",
+    "itemId": "Raw Organic A2 3.5%",
+    "displayName": null,
+    "description": "Raw Organic A2 3.5%",
+    "costingMethod": {
+      "id": "STANDARD"
+    },
+    "fields": {
+      "assetAccount": {
+        "id": "722"
+      },
+      "cogsAccount": {
+        "id": "779"
+      },
+      "incomeAccount": {
+        "id": "457"
+      },
+      "wipAcct": {
+        "id": "805"
+      },
+      "scrapAcct": {
+        "id": "466"
+      },
+      "billPriceVarianceAcct": {
+        "id": "464"
+      },
+      "billQtyVarianceAcct": {
+        "id": "807"
+      },
+      "prodPriceVarianceAcct": {
+        "id": "791"
+      },
+      "prodQtyVarianceAcct": {
+        "id": "475"
+      },
+      "purchasePriceVarianceAcct": {
+        "id": "464"
+      },
+      "custReturnVarianceAccount": {
+        "id": "459"
+      },
+      "unbuildVarianceAccount": {
+        "id": "793"
+      },
+      "taxSchedule": {
+        "id": "1"
+      },
+      "costCategory": {
+        "id": "1"
+      },
+      "currency": {
+        "id": "1"
+      },
+      "unitsType": {
+        "id": "5"
+      },
+      "costEstimateType": {
+        "id": "AVGCOST"
+      },
+      "atpMethod": {
+        "id": "CUMULATIVE_ATP_WITH_LOOK_AHEAD"
+      },
+      "supplyReplenishmentMethod": {
+        "id": "MPS"
+      },
+      "customForm": {
+        "id": "414"
+      },
+      "custitem_sun_mesclass": {
+        "id": "16"
+      },
+      "custitem6": {
+        "id": "7"
+      }
+    },
+    "scalars": {
+      "baseUnit": "9",
+      "stockUnit": "9",
+      "purchaseUnit": "9",
+      "saleUnit": "9",
+      "consumptionUnit": "9",
+      "costEstimateUnits": "per lb",
+      "transferPriceUnits": "per lb",
+      "weightUnits": "per lb",
+      "includeChildren": false,
+      "useBins": true,
+      "isLotItem": false
+    },
+    "recipe": [
+      {
+        "item": 5484,
+        "quantity": 0.9,
+        "bomQuantity": 0.9,
+        "componentYield": 1
+      },
+      {
+        "item": 8365,
+        "quantity": 0.1,
+        "bomQuantity": 0.1,
+        "componentYield": 1
+      }
+    ]
+  },
+  {
+    "sandboxId": 8370,
+    "type": "assemblyItem",
+    "itemId": "Raw Organic A2 4%",
+    "displayName": null,
+    "description": "Raw Organic A2 4%",
+    "costingMethod": {
+      "id": "STANDARD"
+    },
+    "fields": {
+      "assetAccount": {
+        "id": "722"
+      },
+      "cogsAccount": {
+        "id": "779"
+      },
+      "incomeAccount": {
+        "id": "457"
+      },
+      "wipAcct": {
+        "id": "805"
+      },
+      "scrapAcct": {
+        "id": "466"
+      },
+      "billPriceVarianceAcct": {
+        "id": "464"
+      },
+      "billQtyVarianceAcct": {
+        "id": "807"
+      },
+      "prodPriceVarianceAcct": {
+        "id": "791"
+      },
+      "prodQtyVarianceAcct": {
+        "id": "475"
+      },
+      "purchasePriceVarianceAcct": {
+        "id": "464"
+      },
+      "custReturnVarianceAccount": {
+        "id": "459"
+      },
+      "unbuildVarianceAccount": {
+        "id": "793"
+      },
+      "taxSchedule": {
+        "id": "1"
+      },
+      "costCategory": {
+        "id": "1"
+      },
+      "currency": {
+        "id": "1"
+      },
+      "unitsType": {
+        "id": "5"
+      },
+      "costEstimateType": {
+        "id": "AVGCOST"
+      },
+      "atpMethod": {
+        "id": "CUMULATIVE_ATP_WITH_LOOK_AHEAD"
+      },
+      "supplyReplenishmentMethod": {
+        "id": "MPS"
+      },
+      "customForm": {
+        "id": "414"
+      },
+      "custitem_sun_mesclass": {
+        "id": "16"
+      },
+      "custitem6": {
+        "id": "7"
+      }
+    },
+    "scalars": {
+      "baseUnit": "9",
+      "stockUnit": "9",
+      "purchaseUnit": "9",
+      "saleUnit": "9",
+      "consumptionUnit": "9",
+      "costEstimateUnits": "per lb",
+      "transferPriceUnits": "per lb",
+      "weightUnits": "per lb",
+      "includeChildren": true,
+      "useBins": true,
+      "isLotItem": false
+    },
+    "recipe": [
+      {
+        "item": 5484,
+        "quantity": 0.9,
+        "bomQuantity": 0.9,
+        "componentYield": 1
+      },
+      {
+        "item": 8365,
+        "quantity": 0.1,
+        "bomQuantity": 0.1,
+        "componentYield": 1
+      }
+    ]
+  },
+  {
+    "sandboxId": 8812,
+    "type": "assemblyItem",
+    "itemId": "Raw Horizon Organic Half & Half",
+    "displayName": null,
+    "description": "Raw Horizon Organic Half and Half (batch tank milk)",
+    "costingMethod": {
+      "id": "STANDARD"
+    },
+    "fields": {
+      "assetAccount": {
+        "id": "722"
+      },
+      "cogsAccount": {
+        "id": "779"
+      },
+      "incomeAccount": {
+        "id": "457"
+      },
+      "wipAcct": {
+        "id": "805"
+      },
+      "scrapAcct": {
+        "id": "466"
+      },
+      "billPriceVarianceAcct": {
+        "id": "464"
+      },
+      "billQtyVarianceAcct": {
+        "id": "792"
+      },
+      "prodPriceVarianceAcct": {
+        "id": "791"
+      },
+      "prodQtyVarianceAcct": {
+        "id": "792"
+      },
+      "purchasePriceVarianceAcct": {
+        "id": "464"
+      },
+      "custReturnVarianceAccount": {
+        "id": "473"
+      },
+      "unbuildVarianceAccount": {
+        "id": "793"
+      },
+      "vendReturnVarianceAccount": {
+        "id": "459"
+      },
+      "taxSchedule": {
+        "id": "1"
+      },
+      "costCategory": {
+        "id": "1"
+      },
+      "currency": {
+        "id": "1"
+      },
+      "unitsType": {
+        "id": "5"
+      },
+      "costEstimateType": {
+        "id": "AVGCOST"
+      },
+      "atpMethod": {
+        "id": "CUMULATIVE_ATP_WITH_LOOK_AHEAD"
+      },
+      "supplyReplenishmentMethod": {
+        "id": "MPS"
+      },
+      "weightUnit": {
+        "id": "1"
+      },
+      "customForm": {
+        "id": "414"
+      },
+      "custitem6": {
+        "id": "5"
+      },
+      "custitem_sun_mesclass": {
+        "id": "1"
+      }
+    },
+    "scalars": {
+      "baseUnit": "9",
+      "stockUnit": "9",
+      "purchaseUnit": "9",
+      "saleUnit": "9",
+      "consumptionUnit": "9",
+      "costEstimateUnits": "per lb",
+      "transferPriceUnits": "per lb",
+      "weightUnits": "per lb",
+      "weight": 1,
+      "includeChildren": true,
+      "useBins": false,
+      "isLotItem": true
+    },
+    "recipe": [
+      {
+        "item": 5404,
+        "quantity": 0.7789473684210526,
+        "bomQuantity": 0.74,
+        "componentYield": 0.95
+      },
+      {
+        "item": 5483,
+        "quantity": 0.2736842105263158,
+        "bomQuantity": 0.26,
+        "componentYield": 0.95
+      }
+    ]
+  }
+]

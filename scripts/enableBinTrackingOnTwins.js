@@ -17,12 +17,13 @@ const core = require('../clients/coreClient')
 const COMMIT = process.argv.includes('--commit')
 
 // All 13 batch twins from the 2026-06-22 rollout. Source → twin:
-//   A2 4%:       8370 → 8928    Conv 1%:   5415 → 8929    Conv 2%:   5412 → 8930
-//   Conv 3.25%:  5413 → 8931    Conv 3.5%: 5416 → 8932    Org 1%:    5409 → 8933
-//   Org 2%:      5410 → 8934    Org 3.25%: 5411 → 8935    Org 3.5%:  5401 → 8936
-//   A2 1%:       8366 → 8937    A2 2%:     8367 → 8938    A2 3.25%:  8368 → 8939
-//   A2 3.5%:     8369 → 8940
-const TWIN_IDS = [8928, 8929, 8930, 8931, 8932, 8933, 8934, 8935, 8936, 8937, 8938, 8939, 8940]
+// PROD twin ids (sandbox ids in parens). Source → prod twin:
+//   A2 4%:       8370 → 8764    Conv 1%:   5415 → 8564    Conv 2%:   5412 → 8664
+//   Conv 3.25%:  5413 → 8465    Conv 3.5%: 5416 → 8466    Org 1%:    5409 → 8467
+//   Org 2%:      5410 → 8468    Org 3.25%: 5411 → 8469    Org 3.5%:  5401 → 8470
+//   A2 1%:       8366 → 8471    A2 2%:     8367 → 8472    A2 3.25%:  8368 → 8473
+//   A2 3.5%:     8369 → 8565
+const TWIN_IDS = [8764, 8564, 8664, 8465, 8466, 8467, 8468, 8469, 8470, 8471, 8472, 8473, 8565]
 
 async function main() {
   console.log(`Mode: ${COMMIT ? 'COMMIT (will patch NS)' : 'DRY RUN (read-only)'}\n`)
