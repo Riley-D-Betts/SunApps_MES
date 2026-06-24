@@ -75,7 +75,7 @@ async function issueBulkMilkComponents(workOrderId, data) {
 
   const result = await core.netsuitePost(
     `/record/v1/workOrder/${workOrderId}/!transform/workOrderIssue`,
-    { component: { items: componentItems } }
+    { custbody_liquid_milk_wo: true, component: { items: componentItems } }
   )
   return { success: true, issueId: result?.id || null, response: result }
 }

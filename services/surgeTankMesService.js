@@ -208,7 +208,7 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
   if (detail) Object.assign(componentEntry, detail)
 
   return {
-    body: { component: { items: [componentEntry] } },
+    body: { custbody_liquid_milk_wo: true, component: { items: [componentEntry] } },
     allocations,
     tracking,
     resolvedBinId,
@@ -877,6 +877,7 @@ async function processWOStart(data, historian) {
       // isWip=false ("the work order does not use WIP, or the work order is
       // already closed").
       isWip: true,
+      custbody_liquid_milk_wo: true,
       custbody_mes_tank_id: tankId,
       custbody_mes_product_name: productName,
       custbody_mes_source_entity: sourceEntity,
@@ -1397,6 +1398,7 @@ async function tickCompletionForBatch(batch) {
 
     const body = {
       quantity: roundedTarget,
+      custbody_liquid_milk_wo: true,
       inventorydetail: {
         inventoryassignment: { items: [assignmentEntry] },
       },
@@ -1671,6 +1673,7 @@ async function retrySurgeBatch(id, { nsItemId, decidedBy } = {}) {
     location: { id: 30 },
     subsidiary: { id: 3 },
     isWip: true,
+    custbody_liquid_milk_wo: true,
     custbody_mes_tank_id: batch.tankId,
     custbody_mes_product_name: batch.productName,
     custbody_mes_source_entity: sourceEntity,

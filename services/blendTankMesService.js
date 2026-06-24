@@ -271,7 +271,7 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
   if (detail) Object.assign(componentEntry, detail)
 
   return {
-    body: { component: { items: [componentEntry] } },
+    body: { custbody_liquid_milk_wo: true, component: { items: [componentEntry] } },
     allocations,
     tracking,
   }
@@ -501,6 +501,7 @@ async function processWOStart(data, historian) {
       // order is already closed". Discovered 2026-05-19 via WO1364 (isWip
       // false, every issue 400'd) vs WO1365 (isWip true, issues working).
       isWip: true,
+      custbody_liquid_milk_wo: true,
       custbody_mes_tank_id: tankId,
       custbody_mes_product_name: productName,
       custbody_mes_source_entity: fromEntName || null,
@@ -1811,6 +1812,7 @@ async function tickCompletionForBatch(batch) {
 
     const body = {
       quantity: roundedTarget,
+      custbody_liquid_milk_wo: true,
       inventorydetail: {
         inventoryassignment: {
           items: [assignmentEntry],
@@ -1952,6 +1954,7 @@ async function retryBlendBatch(id, { nsItemId, decidedBy } = {}) {
     location: { id: 30 },
     subsidiary: { id: 3 },
     isWip: true,
+    custbody_liquid_milk_wo: true,
     custbody_mes_tank_id: batch.tankId,
     custbody_mes_product_name: batch.productName,
     custbody_mes_source_entity: batch.fromEntName || null,

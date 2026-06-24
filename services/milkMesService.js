@@ -532,7 +532,7 @@ async function processBulkMilkFlow(data) {
 
       const nsResult = await core.netsuitePost(
         `/record/v1/workOrder/${run.workOrderId}/!transform/workOrderIssue`,
-        { component: { items: componentItems } }
+        { custbody_liquid_milk_wo: true, component: { items: componentItems } }
       )
 
       await run.update({
