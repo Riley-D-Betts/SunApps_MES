@@ -65,7 +65,9 @@
       "Bash(ls src/components/views/mes/)",
       "Bash(ls -la src/components/views/BatchAdjustmentsView.vue)",
       "Bash(grep -l \"wasteWithAdjLbs\\\\|Transactions\" src/components/views/mes/BatchAdjustmentsView.vue)",
-      "Bash(grep -l \"wasteWithAdjLbs\" src/components/views/BatchAdjustmentsView.vue)"
+      "Bash(grep -l \"wasteWithAdjLbs\" src/components/views/BatchAdjustmentsView.vue)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\BryceChesley\\\\Workspace\\\\SunApps_MES\" -Directory)",
+      "Bash(Select-Object Name)"
     ]
   }
 }
