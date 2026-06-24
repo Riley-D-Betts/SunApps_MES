@@ -1,0 +1,68 @@
+name: Deploy to Dev Server
+
+on:
+  push:
+    branches:
+      - development
+
+jobs:
+  deploy:
+    name: Deploy to Windows Server
+    runs-on: [self-hosted, dev-server]
+    environment: dev
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Create .env
+        shell: powershell
+        run: |
+          $envPath = "./.env"
+          $envVars = @(
+            "ENVIRONMENT=dev"
+            "PORT=${{ secrets.PORT }}"
+            "CORE_API_URL=${{ secrets.CORE_API_URL }}"
+            "HISTORIAN_PROVIDER=${{ secrets.HISTORIAN_PROVIDER }}"
+            "HISTORIAN_BASE_URL=${{ secrets.HISTORIAN_BASE_URL }}"
+            "HISTORIAN_DOMAIN=${{ secrets.HISTORIAN_DOMAIN }}"
+            "HISTORIAN_USERNAME=${{ secrets.HISTORIAN_USERNAME }}"
+            "HISTORIAN_PASSWORD=${{ secrets.HISTORIAN_PASSWORD }}"
+            "SEPARATION_CRON=${{ secrets.SEPARATION_CRON }}"
+            "BULK_MILK_CRON=${{ secrets.BULK_MILK_CRON }}"
+            "BLEND_TANK_CRON=${{ secrets.BLEND_TANK_CRON }}"
+            "EQUIPMENT_CRON=${{ secrets.EQUIPMENT_CRON }}"
+            "SQL_USER=${{ secrets.SQL_USER }}"
+            "SQL_PASSWORD=${{ secrets.SQL_PASSWORD }}"
+            "SQL_DATABASE=${{ secrets.SQL_DATABASE }}"
+            "SQL_SERVER=${{ secrets.SQL_SERVER }}"
+            "TEAMS_WEBHOOK_URL=${{ secrets.TEAMS_WEBHOOK_URL }}"
+            "MES_DRY_RUN=${{ secrets.MES_DRY_RUN }}"
+          )
+          $utf8NoBomEncoding = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::WriteAllLines($envPath, $envVars, $utf8NoBomEncoding)
+
+      - name: Deploy files to app directory
+        shell: powershell
+        run: |
+          $deployPath = "C:\Apps\SunApps_MES"
+          if (!(Test-Path $deployPath)) { New-Item -Path $deployPath -ItemType Directory -Force }
+          Copy-Item -Path .\* -Destination "$deployPath" -Recurse -Force
+
+      - name: Install dependencies
+        run: |
+          cd C:\Apps\SunApps_MES
+          npm ci
+
+      - name: Add npm global bin to PATH, restart PM2 app
+        shell: powershell
+        run: |
+          $npmPath = npm config get prefix
+          $env:Path += ";$npmPath"
+          $env:Path += ";$npmPath\node_modules\pm2\bin"
+          pm2 restart sunapps_mes

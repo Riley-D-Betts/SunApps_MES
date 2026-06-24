@@ -41,6 +41,18 @@ class BaseProvider {
   }
 
   /**
+   * Single-tick snapshot for the state machine. Returns every signal the
+   * machine evaluates per tick: feedPermit, motorRpm, cipChemReq, cipRinseReq,
+   * feedTotalLbs, creamTotalGal, skimTotalGal, xfrSource, xfrItemId,
+   * xfrTransferName, xfrDestinations[4], xfrTransferCompleteRising (rising
+   * edge this tick), siloProductConfig (per-silo index/name). See
+   * BATCH_LIFECYCLE_PLAN.md §2 and services/separatorStateMachine.js.
+   */
+  async getSeparatorTickSnapshot() {
+    throw new Error('getSeparatorTickSnapshot() not implemented')
+  }
+
+  /**
    * Get bulk milk flow data since the given timestamp.
    * @param {Date} since - Only return readings after this time
    * @returns {Promise<Array<{
@@ -55,14 +67,17 @@ class BaseProvider {
 
   /**
    * Get blend tank status for all 4 tanks.
-   * Uses NOTE_STRING (product name from Atlas) for batch detection.
+   * NOTE_STRING is the Atlas product name; currentWOState is the Atlas WO
+   * lifecycle state ("Running" while production WO is active, "Complete"
+   * between batches).
    * @returns {Promise<Array<{
    *   tankId: string,
    *   productName: string,
    *   weightLbs: number,
    *   batchSize: number,
    *   fromEntName: string,
-   *   toEntName: string
+   *   toEntName: string,
+   *   currentWOState: string
    * }>>}
    */
   async getBlendTankStatus() {
@@ -83,11 +98,135 @@ class BaseProvider {
    *   stepName: string,
    *   active: boolean,
    *   targetComplete: boolean,
-   *   density: number
+   *   density: number,
+   *   memRequestedBy: string,
+   *   memSiloName: string,
+   *   memProductName: string,
+   *   memTotalizerLbs: number
    * }>>}
    */
   async getMilkLineStatus() {
     throw new Error('getMilkLineStatus() not implemented')
+  }
+
+  /**
+   * Get current gallons, lbs, and product info for every silo (5 raw milk
+   * + 3 cream). Level % is derived from gallons/capacity since the
+   * canonical LevelValue tag has bad OPC quality.
+   * @returns {Promise<Array<{
+   *   siloId: string,
+   *   kind: 'milk' | 'cream',
+   *   gallons: number,
+   *   lbs: number,
+   *   capacityGal: number,
+   *   levelPct: number,
+   *   tempF: number,
+   *   productName: string,
+   *   density: number
+   * }>>}
+   */
+  async getSiloStatus() {
+    throw new Error('getSiloStatus() not implemented')
+  }
+
+  /**
+   * Get live status for both UHT pasteurizers.
+   * @returns {Promise<Array<{
+   *   uhtId: string,
+   *   active: boolean,
+   *   jobRunning: boolean,
+   *   currentWO: string,
+   *   currentItem: string,
+   *   galActual: number,
+   *   flowGpm: number,
+   *   stepNum: number,
+   *   stepName: string,
+   *   mode: 'PROCESS' | 'CIP' | 'DD_INH' | 'IDLE',
+   *   recipeText: string,
+   *   woState: string,
+   *   fromEntName: string,
+   *   toEntName: string
+   * }>>}
+   */
+  async getUhtStatus() {
+    throw new Error('getUhtStatus() not implemented')
+  }
+
+  /**
+   * Resolve which surge tanks each UHT is plumbed to (Connection_Code === 1).
+   * UHT1 connects to ST81+ST82; UHT2 to ST83+ST84. Returns null per UHT if
+   * no tanks are connected. The caller determines the actively filling tank
+   * via level-delta from getSurgeTankStatus pollDeltaGal.
+   * @returns {Promise<{ UHT1: string[] | null, UHT2: string[] | null }>}
+   */
+  async getUhtSurgeTankRouting() {
+    throw new Error('getUhtSurgeTankRouting() not implemented')
+  }
+
+  /**
+   * Get live status for the four aseptic surge tanks (ST81-84).
+   * `pollDeltaGal` is the signed change in mainGallons since the previous
+   * poll (positive = inflow from UHT, negative = outflow to filler). Null
+   * on the first poll after process start.
+   * @returns {Promise<Array<{
+   *   tankId: string,
+   *   mainLevelPct: number,
+   *   mainGallons: number,
+   *   pollDeltaGal: number | null,
+   *   productDesc: string,
+   *   state: number,
+   *   empty: boolean,
+   *   connected: boolean,
+   *   sterProdBarrOK: boolean,
+   *   fillingOK: boolean,
+   *   activeFill: boolean,
+   *   connectedUht: string | null
+   * }>>}
+   */
+  async getSurgeTankStatus() {
+    throw new Error('getSurgeTankStatus() not implemented')
+  }
+
+  /**
+   * Resolve which surge tank a given UHT is currently routed to. Used at the
+   * start of a UHT-direct run to figure out which ST{NN} will receive the FG,
+   * so the WO can be created with the correct pasteurized assembly item.
+   * @param {string} uhtId - 'UHT1' or 'UHT2'
+   * @returns {Promise<{
+   *   surgeTankId: string,
+   *   connectionCode: number,
+   *   productDesc: string,
+   *   mainLevelPct: number
+   * } | null>}
+   */
+  async getUhtDestinationSurgeTank(uhtId) {
+    throw new Error('getUhtDestinationSurgeTank() not implemented')
+  }
+
+  /**
+   * Read the current value of the per-UHT software milk-flow totalizer (in
+   * gallons). The hardware lacks a real totalizer on FT1102, so the rest
+   * provider integrates the live GPM over time while the UHT is in PROCESS
+   * mode. Value resets on each IDLE→PROCESS transition.
+   *
+   * Used by the surge tank tick as the inflow source (UHT → ST is 1:1 during
+   * a run). When/if a hardware ST inflow tag ships, swap this read.
+   * @param {string} uhtId - 'UHT1' or 'UHT2'
+   * @returns {Promise<number>} gallons; 0 if the UHT is idle or unknown
+   */
+  async getUhtMilkTotalizer(uhtId) {
+    throw new Error('getUhtMilkTotalizer() not implemented')
+  }
+
+  /**
+   * Read the current FromEntName tag for a UHT — the source entity the UHT
+   * is currently pulling from. Either a silo (MSiloN or CSiloN) or a blend
+   * tank (BlendTankNA/B). Drives surge-tank-batch component resolution.
+   * @param {string} uhtId - 'UHT1' or 'UHT2'
+   * @returns {Promise<string>} '' when the UHT is idle or tag is empty
+   */
+  async getUhtFromEntName(uhtId) {
+    throw new Error('getUhtFromEntName() not implemented')
   }
 }
 

@@ -1,317 +1,394 @@
-const apiClient = require('../services/apiClient')
+const blendTankMesService = require('../services/blendTankMesService')
 const notifyService = require('../services/notifyService')
+const statusStore = require('../services/statusStore')
+const productParser = require('../services/blendTankProductParser')
+const db = require('../models')
+const clock = require('../sim/clock')
 
-/**
- * In-memory state per blend tank.
- * Tracks NOTE_STRING (product name from Atlas) to detect batch transitions.
- * MES WO tags (CurrentWO, JobRunning) are stale — plant uses Atlas, not MES.
- *
- * On first poll after service start, we "seed" the state without creating batches.
- * This prevents false batch creation from stale NOTE_STRING values (e.g. a tank
- * in CIP that still has a product name from its last batch).
- */
-const WEIGHT_THRESHOLD_LBS = 500
-const EMPTY_THRESHOLD_LBS = 100
+// All-lines-stopped idle window. Once every feeding line has been quiet
+// (inactive or no totalizer advance) for this long, the batch closes with
+// reason='all_lines_stopped'. Matches the BATCH_LIFECYCLE_PLAN.md spec.
+const ALL_LINES_STOPPED_IDLE_MS = 5 * 60 * 1000
+
+// Minimum batch lifetime before a note_cleared or product_change END can fire.
+// Phantom batches (< 60 s) are created when the NOTE_STRING is written briefly
+// during changeover then immediately corrected or cleared — the batch opens on
+// one poll, closes on the next. Suppressing early closes eliminates these
+// phantom NS WOs (which have 0 lbs and pollute blend-tank-recent resolution).
+// all_lines_stopped is NOT subject to this guard since it only arms after
+// real flow has occurred.
+const MIN_BATCH_AGE_MS = 2 * 60 * 1000
+
 const LINE_RESET_THRESHOLD_LBS = 100
 
+// Atlas WO lifecycle tags (CurrentWOState, JobRunning, CurrentWO, CurrentItem)
+// were observed frozen in the historian for 24+ hours across all four blend
+// tanks — Atlas is no longer maintaining that namespace. We still pass the
+// value through to dashboard/logging as advisory, but it does NOT drive batch
+// open/close. NOTE_STRING + actual line flow are the only signals trusted to
+// decide when a batch is running.
+
+// Sentinel NOTE_STRING values that look like real strings but indicate
+// "not in production." Operators (and the PLC defaults) write things like
+// "Empty" or "CIP" — treating those as a product false-starts a WO. The
+// match is case-insensitive against the trimmed value.
+const PRODUCT_SENTINELS = new Set(['', 'none', 'empty', 'cip', 'water', 'sterile', 'n/a', '-', '--'])
+
+function validStr(val) {
+  if (val == null) return null
+  const trimmed = String(val).trim()
+  if (!trimmed) return null
+  if (PRODUCT_SENTINELS.has(trimmed.toLowerCase())) return null
+  return val
+}
+
+// Per-tank in-memory state. `hasSeenFlow` gates the 5-min all-lines-stopped
+// idle close — a batch that opens because WOState went Running but never
+// sees line flow (a sitting tank between fill and drain) must NOT auto-close.
+// The idle timer only arms once at least one line tick has fed the tank.
 const tankState = {
-  BlendTank1A: { productName: null, batchActive: false, seeded: false },
-  BlendTank1B: { productName: null, batchActive: false, seeded: false },
-  BlendTank2A: { productName: null, batchActive: false, seeded: false },
-  BlendTank2B: { productName: null, batchActive: false, seeded: false },
+  BlendTank1A: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false },
+  BlendTank1B: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false },
+  BlendTank2A: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false },
+  BlendTank2B: { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false },
 }
 
-
-/**
- * In-memory state per milk/cream line.
- * Tracks totalizer to detect batch completion via totalizer reset.
- * Product name tags (CURRENTSILOPRODUCTNAME) are "sticky" — they retain
- * their last value after the line goes idle, so we detect on totalizer
- * reset rather than product name clearing.
- */
 const lineState = {
-  ML1: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtActive: false },
-  ML2: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtActive: false },
-  ML3: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtActive: false },
-  ML4: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtActive: false },
-  CL1: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtActive: false },
-  CL2: { prevValue: null, productName: '', siloName: '', requestedBy: '', uhtActive: false },
+  ML1: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  ML2: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  ML3: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  ML4: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  CL1: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  CL2: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
 }
 
-// Destinations that indicate direct silo-to-UHT (skipping blend tanks)
-const UHT_DESTINATIONS = ['UHT1', 'UHT2', 'TSTAT1', 'TSTAT2']
-
-function isUhtDirect(requestedBy) {
-  return UHT_DESTINATIONS.some(d => requestedBy?.toUpperCase().includes(d))
-}
-
-/**
- * Pending API forwards that failed and need retry.
- * Each entry: { endpoint, payload, description, attempts }
- */
-const pendingQueue = []
-
-/**
- * Forward a payload to SunApps_API. On failure, queue for retry.
- */
-async function forward(endpoint, payload, description) {
-  try {
-    const result = await apiClient.post(endpoint, payload)
-    console.log(`[BlendTankJob] Forwarded ${description}: ${result.success ? 'OK' : 'FAIL'}`)
-    return true
-  } catch (err) {
-    console.error(`[BlendTankJob] Failed to forward ${description}:`, err.message)
-    pendingQueue.push({ endpoint, payload, description, attempts: 1 })
-    console.log(`[BlendTankJob] Queued for retry: ${description} (${pendingQueue.length} pending)`)
-    return false
-  }
-}
-
-/**
- * Retry all pending forwards. Remove on success, keep on failure.
- */
-async function retryPending() {
-  if (pendingQueue.length === 0) return
-
-  const retrying = [...pendingQueue]
-  pendingQueue.length = 0
-
-  for (const item of retrying) {
-    try {
-      const result = await apiClient.post(item.endpoint, item.payload)
-      console.log(`[BlendTankJob] Retry OK: ${item.description} (attempt ${item.attempts + 1})`)
-    } catch (err) {
-      item.attempts++
-      pendingQueue.push(item)
-      if (item.attempts % 30 === 0) {
-        // Alert every ~5 minutes (30 polls * 10s) if still failing
-        await notifyService.sendAlert(
-          'MES_Service: Persistent Forward Failure',
-          `${item.description} has failed ${item.attempts} times: ${err.message}`
-        )
-      }
-    }
-  }
-
-  if (pendingQueue.length > 0) {
-    console.log(`[BlendTankJob] ${pendingQueue.length} pending forward(s) still queued`)
-  }
-}
+// A source product-type code is "real" (issuable) only when present and non-zero
+// — 0 = None and the idle/reset default. Used to pick the live vs latched code.
+const validCode = c => c != null && String(c).trim() !== '' && String(c).trim() !== '0'
 
 let lastPollTime = new Date()
 
 /**
- * Poll Historian for blend tank status and milk/cream line totalizers.
- * Detects product changes via NOTE_STRING and totalizer resets, forwards events to SunApps_API.
+ * Restore in-memory tankState from any 'active' MesBlendTankBatch rows so a
+ * service restart picks up where it left off. lastFlowAt seeds to now so the
+ * 5-min all-lines-stopped timer effectively restarts on boot rather than
+ * closing immediately.
  */
-async function run(historian) {
+async function hydrateFromDb(MesBlendTankBatch) {
   try {
-    // 0. Retry any pending forwards from previous polls
-    await retryPending()
+    const rows = await MesBlendTankBatch.findAll({
+      where: { status: 'active' },
+      order: [['detectedAt', 'DESC']],
+    })
+    const newestByTank = {}
+    for (const r of rows) {
+      if (!newestByTank[r.tankId]) newestByTank[r.tankId] = r
+    }
+    const now = clock.now()
+    for (const tankId of Object.keys(tankState)) {
+      const row = newestByTank[tankId]
+      if (!row) continue
+      tankState[tankId].productName = row.productName
+      tankState[tankId].batchActive = true
+      tankState[tankId].seeded = true
+      tankState[tankId].batchStartedAt = row.detectedAt ? new Date(row.detectedAt).getTime() : now
+      tankState[tankId].lastFlowAt = now
+      // Conservatively assume past-life flow happened. Without this, the
+      // 5-min idle timer would never arm post-restart even for batches that
+      // had been actively filled before. If no flow arrives within 5 min,
+      // batch closes; if flow does arrive, lastFlowAt advances normally.
+      tankState[tankId].hasSeenFlow = true
+      console.log(`[BlendTankJob] Hydrated ${tankId} from DB: "${row.productName}" (active since ${row.detectedAt})`)
+    }
+    console.log(`[BlendTankJob] Hydrated tankState from ${rows.length} active row(s)`)
+    return rows.length
+  } catch (err) {
+    console.error('[BlendTankJob] Hydration failed:', err.message)
+    return 0
+  }
+}
 
-    // 1. Poll blend tank status for all 4 tanks
+// Match line.requestedBy to the tank using the same canonical normalizer the
+// flow-consumer paths use (BT2A ↔ BlendTank2A). Without this, SCADA writing
+// the short form would silently fail the exact-string check and the tank
+// would never see a feeding line, blocking the line-flow batch-open path.
+function linesFeedingTank(lineReadings, tankId) {
+  const tankCanonical = blendTankMesService.normalizeTankRef(tankId)
+  return lineReadings.filter(r => {
+    if (!r.active) return false
+    const reqCanonical = blendTankMesService.normalizeTankRef(r.requestedBy)
+    if (!reqCanonical || !tankCanonical || reqCanonical !== tankCanonical) return false
+    const prev = lineState[r.line]
+    if (!prev || prev.prevValue === null) return false
+    return r.totalizerLbs > prev.prevValue
+  })
+}
+
+async function startBatch(tankId, prev, status, reason, historian) {
+  const { productName, batchSize, fromEntName, toEntName } = status
+  console.log(`[BlendTankJob] BATCH START on ${tankId}: "${productName}" (${reason})`)
+  statusStore.pushEvent('blendTank.batchStart', `${tankId}: "${productName}" started`, { tankId, productName, batchSize, fromEntName, toEntName, reason })
+  prev.batchActive = true
+  prev.batchStartedAt = clock.now()
+  prev.lastFlowAt = null
+  prev.hasSeenFlow = false
+  try {
+    await blendTankMesService.processWOStart({ tankId, productName, batchSize, fromEntName, toEntName, detectedAt: new Date(clock.now()).toISOString() }, historian)
+  } catch (err) {
+    console.error(`[BlendTankJob] processWOStart failed for ${tankId}:`, err.message)
+  }
+}
+
+async function endBatch(tankId, prev, reason) {
+  console.log(`[BlendTankJob] BATCH END (${reason}) on ${tankId}: "${prev.productName}"`)
+  statusStore.pushEvent('blendTank.batchEnd', `${tankId}: batch ended (${reason})`, { tankId, productName: prev.productName, reason })
+  const productName = prev.productName
+  prev.batchActive = false
+  prev.batchStartedAt = null
+  prev.lastFlowAt = null
+  prev.hasSeenFlow = false
+  try {
+    await blendTankMesService.processWOEnd({ tankId, productName, detectedAt: new Date(clock.now()).toISOString() })
+  } catch (err) {
+    console.error(`[BlendTankJob] processWOEnd failed for ${tankId}:`, err.message)
+  }
+}
+
+async function run(historian) {
+  const pollStart = Date.now()
+  try {
     const statuses = await historian.getBlendTankStatus()
+    const lineReadings = await historian.getMilkLineStatus()
+    const now = clock.now()
+
+    // Pre-statuses tail-catcher pass: fire processLineFlow for any line resets
+    // BEFORE the statuses loop can close batches. Without this ordering, a poll
+    // where NOTE_STRING clears at the same time as a line reset causes endBatch
+    // to mark the batch 'completed' first, leaving processLineFlow with no active
+    // batch to match — the flow lands as 'unmatched' and the NS WO gets no issues
+    // or completions (WO1383 root cause).
+    for (const reading of lineReadings) {
+      const {
+        line, totalizerLbs, productName, siloName, requestedBy, requestedTargetLbs,
+        memRequestedBy, memSiloName, memProductName, memTotalizerLbs, memProductCode,
+      } = reading
+      const prev = lineState[line]
+      if (!prev || prev.prevValue === null) continue
+
+      const hadProduct = !!prev.productName
+      const hasProduct = !!validStr(productName)
+      const totalizerReset = prev.prevValue > LINE_RESET_THRESHOLD_LBS && totalizerLbs < LINE_RESET_THRESHOLD_LBS
+      const productCleared = hadProduct && !hasProduct && prev.prevValue > 10
+      // The MEM-advanced branch was originally a tail-catcher for missed
+      // resets, but in practice MEM creeps up on idle lines (observed on
+      // ML2 with live totalizer pinned at ~1 lb while MEM climbed ~132 lb
+      // per tick — a replay artifact). Each MEM bump triggered a bogus
+      // line.flowComplete. Drop the branch; a real missed reset gets caught
+      // the next poll when totalizerLbs comes back up and crosses the
+      // threshold again.
+
+      if ((totalizerReset || productCleared) && (hadProduct || validStr(memProductName))) {
+        const flowProduct = validStr(memProductName) || prev.productName
+        // Live code reset to 0 on flow-end → prefer the latched MEM code, else
+        // the code captured during flow. Lets processLineFlow resolve the
+        // component by exact product-type code instead of the free-text name.
+        const flowProductCode = validCode(memProductCode) ? memProductCode : prev.productCode
+        const flowSilo = validStr(memSiloName) || prev.siloName || ''
+        const flowDest = validStr(memRequestedBy) || prev.requestedBy || ''
+        const batchTotalLbs = memTotalizerLbs > 0
+          ? memTotalizerLbs
+          : (totalizerReset ? prev.prevValue : (totalizerLbs > 10 ? totalizerLbs : prev.prevValue))
+
+        console.log(`[BlendTankJob] Line ${line} batch complete: ${batchTotalLbs.toFixed(1)} LBS of "${flowProduct}" (${flowSilo} → ${flowDest})`)
+        statusStore.pushEvent('line.flowComplete', `${line}: ${batchTotalLbs.toFixed(0)} LBS "${flowProduct}" (${flowSilo || '?'} → ${flowDest || '?'})`, { line, totalLbs: batchTotalLbs, productName: flowProduct, siloName: flowSilo, destination: flowDest })
+        try {
+          await blendTankMesService.processLineFlow({
+            line, totalLbs: batchTotalLbs, lineProductName: flowProduct, productCode: flowProductCode,
+            siloName: flowSilo, destination: flowDest,
+            requestedTargetLbs: prev.requestedTargetLbs || 0, resetTime: new Date(clock.now()).toISOString(),
+          })
+        } catch (err) {
+          console.error(`[BlendTankJob] processLineFlow failed for ${line}:`, err.message)
+        }
+      }
+    }
 
     for (const status of statuses) {
-      const { tankId, productName, weightLbs, batchSize, fromEntName, toEntName } = status
+      const { tankId, productName, currentWOState } = status
       const prev = tankState[tankId]
       if (!prev) continue
 
-      // First poll — seed state without creating batches.
-      // Stale NOTE_STRING values (from tanks in CIP) would otherwise trigger false batch starts.
+      const hasProduct = !!validStr(productName)
+      const hadProduct = !!prev.productName
+      const feedingLines = linesFeedingTank(lineReadings, tankId)
+      if (feedingLines.length > 0) {
+        prev.lastFlowAt = now
+        prev.hasSeenFlow = true
+      }
+
       if (!prev.seeded) {
+        // First poll: snapshot the current state without firing events. If a
+        // batch was active in DB when we booted, hydrateFromDb has already
+        // re-opened it; we just record observed values.
+        if (!productName && !currentWOState) continue
         prev.productName = productName
+        prev.currentWOState = currentWOState
         prev.seeded = true
-        console.log(`[BlendTankJob] Seeding ${tankId}: product="${productName || ''}"`)
+        console.log(`[BlendTankJob] Seeding ${tankId}: product="${productName}" WOState="${currentWOState}" (advisory only)`)
         continue
       }
 
-      const hadProduct = !!prev.productName
-      const hasProduct = !!productName
-
-      // Detect batch end by weight: tank emptied while product name still set (same-product back-to-back batches)
-      if (prev.batchActive && hasProduct && weightLbs < EMPTY_THRESHOLD_LBS) {
-        console.log(`[BlendTankJob] BATCH END (tank emptied) on ${tankId}: "${prev.productName}" (${Math.round(weightLbs)} lb)`)
-        prev.batchActive = false
-        await forward('/api/mes/milk/blend-tank/wo-end', {
-          tankId,
-          productName: prev.productName,
-          detectedAt: new Date().toISOString(),
-        }, `batch end (emptied) ${tankId} "${prev.productName}"`)
+      // ── END pass ──────────────────────────────────────────────────────
+      // Atlas's CurrentWOState is frozen on these tanks and can't be trusted,
+      // so close decisions come from NOTE_STRING activity and the line-flow
+      // idle timer. all_lines_stopped only arms once we've actually seen flow
+      // on this batch — opening a batch from a stale product name and then
+      // sitting idle would otherwise close prematurely.
+      let endReason = null
+      if (prev.batchActive) {
+        if (hadProduct && !hasProduct) endReason = 'note_cleared'
+        else if (hasProduct && productName !== prev.productName) endReason = 'product_change'
+        else if (prev.hasSeenFlow && prev.lastFlowAt && (now - prev.lastFlowAt) > ALL_LINES_STOPPED_IDLE_MS) endReason = 'all_lines_stopped'
       }
-
-      // Detect new batch: NOTE_STRING changed to a new non-empty value
-      if (hasProduct && productName !== prev.productName) {
-        // If previous batch was active, end it first
-        if (prev.batchActive && prev.productName) {
-          console.log(`[BlendTankJob] BATCH END (product change) on ${tankId}: "${prev.productName}"`)
-          prev.batchActive = false
-          await forward('/api/mes/milk/blend-tank/wo-end', {
-            tankId,
-            productName: prev.productName,
-            detectedAt: new Date().toISOString(),
-          }, `batch end (product change) ${tankId} "${prev.productName}"`)
+      // Suppress premature note_cleared / product_change closes on very young
+      // batches. These are phantom runs where NOTE_STRING was written briefly
+      // during changeover and then corrected or cleared on the very next poll.
+      // all_lines_stopped is exempt — it only arms after real sustained flow.
+      if (endReason && endReason !== 'all_lines_stopped') {
+        const batchAgeMs = prev.batchStartedAt ? now - prev.batchStartedAt : Infinity
+        if (batchAgeMs < MIN_BATCH_AGE_MS) {
+          console.log(`[BlendTankJob] Suppressing premature ${endReason} on ${tankId} (batch ${Math.round(batchAgeMs / 1000)}s old, min ${MIN_BATCH_AGE_MS / 1000}s)`)
+          endReason = null
         }
-
-        console.log(`[BlendTankJob] BATCH START detected on ${tankId}: "${productName}"`)
-        prev.batchActive = true
-        await forward('/api/mes/milk/blend-tank/wo-start', {
-          tankId,
-          productName,
-          batchSize,
-          fromEntName,
-          toEntName,
-          detectedAt: new Date().toISOString(),
-        }, `batch start ${tankId} "${productName}"`)
+      }
+      if (endReason) {
+        await endBatch(tankId, prev, endReason)
       }
 
-      // Detect batch start from seeded state: product was already set when service started,
-      // but weight crossing threshold confirms it's a real active batch (not stale CIP NOTE_STRING).
-      if (hasProduct && !prev.batchActive && productName === prev.productName && weightLbs >= WEIGHT_THRESHOLD_LBS) {
-        console.log(`[BlendTankJob] BATCH START (weight confirmed) on ${tankId}: "${productName}" (${Math.round(weightLbs).toLocaleString()} lb)`)
-        prev.batchActive = true
-        await forward('/api/mes/milk/blend-tank/wo-start', {
-          tankId,
-          productName,
-          batchSize,
-          fromEntName,
-          toEntName,
-          detectedAt: new Date().toISOString(),
-        }, `batch start (weight) ${tankId} "${productName}"`)
+      // ── START pass ────────────────────────────────────────────────────
+      // Open a batch only when an actual line is currently feeding this tank
+      // AND NOTE_STRING names a real product. CurrentWOState=Running is no
+      // longer a trigger — Atlas's tag is stale (stuck Running for ~26 days
+      // on BT1A, "Complete" forever on BT1B/2A/2B), so trusting it caused
+      // continuous flap-open after every idle close.
+      if (!prev.batchActive && hasProduct && feedingLines.length > 0) {
+        const reason = `line flow (${feedingLines.map(l => l.line).join(',')})`
+        await startBatch(tankId, prev, status, reason, historian)
+      } else if (!prev.batchActive && hasProduct) {
+        // Named-late path: no line is feeding right now, but the tank may have
+        // been filled BEFORE the operator set the product name. The fill's
+        // line.flowComplete fired with no active batch to match and landed as
+        // status='unmatched'. Opening the batch here lets processWOStart create
+        // the WO and backfillUnmatchedInflows issue + complete the pending fill.
+        // Gated on the presence of recent unmatched inflows for this tank so a
+        // stale name sitting on an empty/idle tank does NOT open an empty batch
+        // (the original feedingLines>0 gate exists precisely to avoid that).
+        let pending = []
+        try {
+          pending = await blendTankMesService.findMatchableUnmatchedInflows(tankId, status.fromEntName)
+        } catch (err) {
+          console.error(`[BlendTankJob] findMatchableUnmatchedInflows failed for ${tankId}:`, err.message)
+        }
+        if (pending.length > 0) {
+          const lbs = pending.reduce((s, p) => s + (parseFloat(p.totalLbs) || 0), 0)
+          await startBatch(tankId, prev, status, `named after fill (${pending.length} pending inflow${pending.length === 1 ? '' : 's'}, ${lbs.toFixed(0)} lb)`, historian)
+        }
       }
 
-      // Detect batch end: NOTE_STRING cleared after having a product
-      if (hadProduct && !hasProduct && prev.batchActive) {
-        console.log(`[BlendTankJob] BATCH END (NOTE_STRING cleared) on ${tankId}: "${prev.productName}"`)
-        prev.batchActive = false
-        await forward('/api/mes/milk/blend-tank/wo-end', {
-          tankId,
-          productName: prev.productName,
-          detectedAt: new Date().toISOString(),
-        }, `batch end (cleared) ${tankId} "${prev.productName}"`)
-      }
-
-      // Update tracked state
       prev.productName = productName
+      prev.currentWOState = currentWOState
     }
 
-    // 2. Poll milk/cream line totalizers
-    const lineReadings = await historian.getMilkLineStatus()
-
+    // State-update pass: advance prevValue and other line state now that
+    // the tail-catcher (pre-statuses pass above) and endBatch have both run.
+    // MEM* routing tags come from the pre-pass; live tags update here.
     for (const reading of lineReadings) {
-      const { line, totalizerLbs, productName, siloName, requestedBy, requestedTargetLbs, active } = reading
+      const {
+        line, totalizerLbs, productName, productCode, siloName, requestedBy, requestedTargetLbs,
+        memTotalizerLbs,
+      } = reading
       const prev = lineState[line]
       if (!prev) continue
 
-      // First poll — seed baseline
       if (prev.prevValue === null) {
         prev.prevValue = totalizerLbs
-        if (productName) prev.productName = productName
-        if (siloName) prev.siloName = siloName
-        if (requestedBy) prev.requestedBy = requestedBy
+        if (validStr(productName)) prev.productName = productName
+        if (validCode(productCode)) prev.productCode = productCode
+        if (validStr(siloName)) prev.siloName = siloName
+        if (validStr(requestedBy)) prev.requestedBy = requestedBy
+        prev.prevMemTotalizer = memTotalizerLbs || 0
         continue
       }
 
-      const hadProduct = !!prev.productName
-      const hasProduct = !!productName
-
-      // Totalizer reset detection: line completed a batch when totalizer drops from
-      // a significant value to near-zero. Product name tags are "sticky" (retain last
-      // value when line goes idle), so we detect on totalizer reset, not product name.
-      const totalizerReset = prev.prevValue > LINE_RESET_THRESHOLD_LBS && totalizerLbs < LINE_RESET_THRESHOLD_LBS
-
-      // ── UHT-direct detection ──
-      // When a line feeds directly to UHT (skipping blend tanks), create a WO at start and close at end.
-      if (hasProduct && isUhtDirect(requestedBy) && !prev.uhtActive) {
-        const uhtId = `${line}→${requestedBy}`
-        console.log(`[BlendTankJob] UHT-DIRECT START on ${line}: "${productName}" (${siloName} → ${requestedBy})`)
-        await forward('/api/mes/milk/blend-tank/wo-start', {
-          tankId: uhtId,
-          productName,
-          batchSize: requestedTargetLbs || 0,
-          fromEntName: siloName || '',
-          toEntName: requestedBy || '',
-          detectedAt: new Date().toISOString(),
-        }, `UHT-direct start ${uhtId} "${productName}"`)
-        prev.uhtActive = true
-      }
-
-      // UHT-direct batch end: totalizer reset OR product name cleared while UHT run was active
-      if (prev.uhtActive && (totalizerReset || !hasProduct)) {
-        const uhtId = `${line}→${prev.requestedBy}`
-        const batchTotalLbs = totalizerReset ? prev.prevValue : (totalizerLbs > 10 ? totalizerLbs : prev.prevValue)
-        console.log(`[BlendTankJob] UHT-DIRECT END on ${line}: "${prev.productName}" — ${batchTotalLbs.toFixed(1)} LBS (${prev.siloName} → ${prev.requestedBy})`)
-
-        // Send the line flow with the final totalizer
-        if (batchTotalLbs > 10) {
-          await forward('/api/mes/milk/blend-tank/line-flow', {
-            line,
-            totalLbs: batchTotalLbs,
-            lineProductName: prev.productName,
-            siloName: prev.siloName || '',
-            destination: prev.requestedBy || '',
-            requestedTargetLbs: prev.requestedTargetLbs || 0,
-            resetTime: new Date().toISOString(),
-          }, `UHT-direct flow ${line} ${batchTotalLbs.toFixed(0)} lb "${prev.productName}"`)
-        }
-
-        // Close the WO
-        await forward('/api/mes/milk/blend-tank/wo-end', {
-          tankId: uhtId,
-          productName: prev.productName,
-          detectedAt: new Date().toISOString(),
-        }, `UHT-direct end ${uhtId} "${prev.productName}"`)
-        prev.uhtActive = false
-      }
-
-      // ── Blend tank line flow detection ──
-      // Detect batch complete: totalizer resets OR product name clears.
-      // Product name tags are usually "sticky" (retain value when idle), so totalizer
-      // reset is the primary signal — but we keep product-name-clearing as a fallback.
-      // Only for non-UHT lines (UHT-direct handled above).
-      const productCleared = hadProduct && !hasProduct && prev.prevValue > 10
-      if ((totalizerReset || productCleared) && hadProduct && !prev.uhtActive) {
-        const batchTotalLbs = totalizerReset ? prev.prevValue : (totalizerLbs > 10 ? totalizerLbs : prev.prevValue)
-        const lineProductName = prev.productName
-        const source = prev.siloName || ''
-        const destination = prev.requestedBy || ''
-        console.log(`[BlendTankJob] Line ${line} batch complete: ${batchTotalLbs.toFixed(1)} LBS of "${lineProductName}" (${source} → ${destination})`)
-
-        await forward('/api/mes/milk/blend-tank/line-flow', {
-          line,
-          totalLbs: batchTotalLbs,
-          lineProductName,
-          siloName: source,
-          destination,
-          requestedTargetLbs: prev.requestedTargetLbs || 0,
-          resetTime: new Date().toISOString(),
-        }, `line flow ${line} ${batchTotalLbs.toFixed(0)} lb "${lineProductName}"`)
-      }
-
-      // Track state — update product info when present, preserve last known when idle
-      if (productName) prev.productName = productName
-      if (siloName) prev.siloName = siloName
-      if (requestedBy) prev.requestedBy = requestedBy
+      if (validStr(productName)) prev.productName = productName
+      if (validCode(productCode)) prev.productCode = productCode
+      if (validStr(siloName)) prev.siloName = siloName
+      if (validStr(requestedBy)) prev.requestedBy = requestedBy
       if (requestedTargetLbs) prev.requestedTargetLbs = requestedTargetLbs
       prev.prevValue = totalizerLbs
+      prev.prevMemTotalizer = memTotalizerLbs || 0
     }
 
-    // 3. Print status summary
     logStatusSummary(statuses, lineReadings)
+
+    // Parse NOTE_STRING up-front so the dashboard can show the resolved item
+    // (NS id + confidence + name) even before a batch opens. The same parser
+    // runs at batch-open time in processWOStart, but waiting for that means
+    // operators stare at a raw "Kirkland Whole" string with no NS context
+    // until a feeding line fires. Cheap to run every poll — pure string match.
+
+    // Latest completed (or any) batch per tank — shown when idle so the
+    // operator can see the most recent WO without needing to scroll history.
+    const latestBatchRows = await Promise.all(
+      statuses.map(s => db.MesBlendTankBatch.findOne({
+        where: { tankId: s.tankId },
+        order: [['detectedAt', 'DESC']],
+        attributes: ['tankId', 'productName', 'nsWorkOrderId', 'nsWorkOrderNumber', 'status', 'detectedAt', 'completedAt'],
+      }))
+    )
+    const latestByTank = {}
+    for (const row of latestBatchRows) {
+      if (row) latestByTank[row.tankId] = row
+    }
+
+    const tanks = statuses.map(s => {
+      const parsed = s.productName ? productParser.parseProductName(s.productName) : null
+      const latest = latestByTank[s.tankId]
+      return {
+        ...s,
+        batchActive: !!tankState[s.tankId]?.batchActive,
+        parsed: parsed
+          ? { nsId: parsed.nsId, name: parsed.name, confidence: parsed.confidence }
+          : (s.productName ? { nsId: null, name: null, confidence: 'none' } : null),
+        latestBatch: latest
+          ? {
+              nsWorkOrderId: latest.nsWorkOrderId,
+              nsWorkOrderNumber: latest.nsWorkOrderNumber,
+              status: latest.status,
+              productName: latest.productName,
+              detectedAt: latest.detectedAt,
+              completedAt: latest.completedAt,
+            }
+          : null,
+      }
+    })
+    statusStore.setBlendTanks({
+      tanks,
+      lines: lineReadings,
+      pollDurationMs: Date.now() - pollStart,
+    })
 
     lastPollTime = new Date()
   } catch (err) {
     console.error('[BlendTankJob] Poll error:', err.message)
+    statusStore.pushEvent('blendTank.poll.error', 'Historian poll failed', { error: err.message })
     await notifyService.sendAlert(
-      'MES_Service: Historian Poll Failed',
+      'SunApps MES: Historian Poll Failed',
       `Blend tank job could not poll Historian: ${err.message}`
     )
   }
 }
 
-/**
- * Print a compact status summary to the console.
- */
 function logStatusSummary(statuses, lineReadings) {
   const ts = new Date().toLocaleTimeString()
   const tankLines = statuses.map(s => {
@@ -319,18 +396,16 @@ function logStatusSummary(statuses, lineReadings) {
     const active = state?.batchActive ? 'ACTIVE' : 'idle'
     const product = s.productName || '—'
     const weight = s.weightLbs ? `${Math.round(s.weightLbs).toLocaleString()} lb` : '0 lb'
-    return `  ${s.tankId}: [${active}] ${product} (${weight})`
+    const wo = s.currentWOState ? ` WO=${s.currentWOState}` : ''
+    return `  ${s.tankId}: [${active}]${wo} ${product} (${weight})`
   })
 
   const activeLines = lineReadings
     .filter(r => r.totalizerLbs > 0 || r.active)
     .map(r => {
       const parts = [`${r.line}=${Math.round(r.totalizerLbs).toLocaleString()} lb`]
-      if (r.siloName && r.requestedBy) {
-        parts.push(`${r.siloName}→${r.requestedBy}`)
-      } else if (r.requestedBy) {
-        parts.push(`→${r.requestedBy}`)
-      }
+      if (r.siloName && r.requestedBy) parts.push(`${r.siloName}→${r.requestedBy}`)
+      else if (r.requestedBy) parts.push(`→${r.requestedBy}`)
       if (r.productName) parts.push(r.productName)
       return parts.join(' ')
     })
@@ -345,4 +420,13 @@ function getLastPollTime() {
   return lastPollTime
 }
 
-module.exports = { run, getLastPollTime }
+function reset() {
+  for (const k of Object.keys(tankState)) {
+    tankState[k] = { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false }
+  }
+  for (const k of Object.keys(lineState)) {
+    lineState[k] = { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 }
+  }
+}
+
+module.exports = { run, getLastPollTime, hydrateFromDb, reset }

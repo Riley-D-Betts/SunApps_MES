@@ -1,0 +1,1855 @@
+{
+  "capturedAt": "2026-06-24T18:03:40.715Z",
+  "items": [
+    {
+      "id": 530,
+      "labels": [
+        "BOM_COMPONENT.530"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "402002",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 531,
+      "labels": [
+        "BOM_COMPONENT.531"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "402001",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 2645,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Conventional Milk 3.5%",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 2790,
+      "labels": [
+        "FG_ITEM_MAP: \"DG Heavy Cream\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "202004",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 2793,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200004",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 2808,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200002",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 2889,
+      "labels": [
+        "FG_ITEM_MAP: \"DG Half & Half\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "202001",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 2940,
+      "labels": [
+        "FG_ITEM_MAP: \"DFI Marcels Modern Pantry UHT Half & Half\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200024",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 3222,
+      "labels": [
+        "FG_ITEM_MAP: \"DFI Marcels 0% Milk\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200021",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 3223,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Conventional Whole Milk 3.25% (No Vitamins)",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 3228,
+      "labels": [
+        "FG_ITEM_MAP: \"DFI Marcels 1% Milk\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200019",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 3236,
+      "labels": [
+        "FG_ITEM_MAP: \"DFI Marcels 3.25% Milk\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200018",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 3278,
+      "labels": [
+        "FG_ITEM_MAP: \"Alexandre Eco Dairy A2/A2 Organic 4% Whole Milk\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200022",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 3395,
+      "labels": [
+        "FG_ITEM_MAP: \"DFI Holiday Nog\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200020",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 3471,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200803",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 3493,
+      "labels": [
+        "FG_ITEM_MAP: \"DFI Marcels Modern Pantry Heavy Cream\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200023",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 3900,
+      "labels": [
+        "FG_ITEM_MAP: \"ESL Half & Half\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "202001",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 3905,
+      "labels": [
+        "FG_ITEM_MAP: \"ESL Heavy Whip Cream\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "ESL Heavy Whip Cream",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 3926,
+      "labels": [
+        "FG_ITEM_MAP: \"Organic Milk 0% Lac Free\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "207010",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 4012,
+      "labels": [
+        "FG_ITEM_MAP: \"DFI Marcels 2% Milk\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200017",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 4495,
+      "labels": [
+        "FG_ITEM_MAP: \"Kirkland 1% Organic Milk\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200009",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 4498,
+      "labels": [
+        "FG_ITEM_MAP: \"Kirkland 2% Organic Milk\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200008",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 4501,
+      "labels": [
+        "FG_ITEM_MAP: \"Kirkland 2% Organic Lac Free Milk\"",
+        "FG_ITEM_MAP: \"Kirkland 2% Organic Lactose Free\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "207008",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 4548,
+      "labels": [
+        "FG_ITEM_MAP: \"Kirkland Chocolate 2% Organic Milk - Aseptic\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "203008",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 4899,
+      "labels": [
+        "FG_ITEM_MAP: \"Alexandre Eco Dairy A2/A2 Organic Chocolate 4% Milk\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200027",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 5003,
+      "labels": [
+        "FG_ITEM_MAP: \"Kinera Strawberry\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200036",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 5314,
+      "labels": [
+        "FG_ITEM_MAP: \"Barista Frappe Mix\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200038",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 5317,
+      "labels": [
+        "FG_ITEM_MAP: \"Kinera Chocolate\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200037",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 5401,
+      "labels": [
+        "RAW_ITEMS.ORG_3_5",
+        "PRODUCT_INDEX_ITEM_MAP[6]"
+      ],
+      "expectedName": "Raw Organic 3.5%",
+      "exists": true,
+      "displayName": "300006",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 5402,
+      "labels": [
+        "RAW_ITEMS.ORG_UF",
+        "PRODUCT_INDEX_ITEM_MAP[14]"
+      ],
+      "expectedName": "Raw Organic UF Milk",
+      "exists": false,
+      "displayName": null,
+      "isInactive": null,
+      "type": null,
+      "isLot": null,
+      "useBins": null
+    },
+    {
+      "id": 5403,
+      "labels": [
+        "RAW_ITEMS.ORG_A2",
+        "HISTORIAN_ITEM_MAP.300017",
+        "PRODUCT_INDEX_ITEM_MAP[21]"
+      ],
+      "expectedName": "Raw Organic A2 Milk",
+      "exists": true,
+      "displayName": "300017",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 5404,
+      "labels": [
+        "SILO_ITEM_MAP.MSilo4",
+        "SILO_ITEM_MAP.MSilo5",
+        "RAW_ITEMS.ORG_MILK",
+        "HISTORIAN_ITEM_MAP.300016",
+        "PRODUCT_INDEX_ITEM_MAP[16]"
+      ],
+      "expectedName": "Raw Organic Milk",
+      "exists": true,
+      "displayName": "300016",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 5405,
+      "labels": [
+        "RAW_ITEMS.CONV_UF",
+        "HISTORIAN_ITEM_MAP.300013",
+        "PRODUCT_INDEX_ITEM_MAP[13]"
+      ],
+      "expectedName": "Raw Conventional UF Milk",
+      "exists": false,
+      "displayName": null,
+      "isInactive": null,
+      "type": null,
+      "isLot": null,
+      "useBins": null
+    },
+    {
+      "id": 5406,
+      "labels": [
+        "RAW_ITEMS.ORG_A2_GRADE",
+        "HISTORIAN_ITEM_MAP.205000"
+      ],
+      "expectedName": "Raw Organic Grade A (A2/A2) Milk",
+      "exists": false,
+      "displayName": null,
+      "isInactive": null,
+      "type": null,
+      "isLot": null,
+      "useBins": null
+    },
+    {
+      "id": 5409,
+      "labels": [
+        "RAW_ITEMS.ORG_1",
+        "PRODUCT_INDEX_ITEM_MAP[9]"
+      ],
+      "expectedName": "Raw Organic 1%",
+      "exists": true,
+      "displayName": "300009",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 5410,
+      "labels": [
+        "RAW_ITEMS.ORG_2",
+        "PRODUCT_INDEX_ITEM_MAP[8]"
+      ],
+      "expectedName": "Raw Organic 2%",
+      "exists": true,
+      "displayName": "300008",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 5411,
+      "labels": [
+        "RAW_ITEMS.ORG_3_25",
+        "PRODUCT_INDEX_ITEM_MAP[7]"
+      ],
+      "expectedName": "Raw Organic 3.25%",
+      "exists": true,
+      "displayName": "300007",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 5412,
+      "labels": [
+        "RAW_ITEMS.CONV_2",
+        "PRODUCT_INDEX_ITEM_MAP[3]"
+      ],
+      "expectedName": "Raw Conventional 2%",
+      "exists": true,
+      "displayName": "300003",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 5413,
+      "labels": [
+        "RAW_ITEMS.CONV_3_25",
+        "PRODUCT_INDEX_ITEM_MAP[2]"
+      ],
+      "expectedName": "Raw Conventional 3.25%",
+      "exists": true,
+      "displayName": "300002",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 5415,
+      "labels": [
+        "RAW_ITEMS.CONV_1",
+        "PRODUCT_INDEX_ITEM_MAP[4]"
+      ],
+      "expectedName": "Raw Conventional 1%",
+      "exists": true,
+      "displayName": "300004",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 5416,
+      "labels": [
+        "RAW_ITEMS.CONV_3_5",
+        "PRODUCT_INDEX_ITEM_MAP[1]"
+      ],
+      "expectedName": "Raw Conventional 3.5%",
+      "exists": true,
+      "displayName": "300001",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 5417,
+      "labels": [
+        "SILO_ITEM_MAP.MSilo1",
+        "SILO_ITEM_MAP.MSilo2",
+        "SILO_ITEM_MAP.MSilo3",
+        "RAW_ITEMS.CONV_MILK",
+        "HISTORIAN_ITEM_MAP.300015",
+        "PRODUCT_INDEX_ITEM_MAP[15]"
+      ],
+      "expectedName": "Raw Conventional Milk",
+      "exists": true,
+      "displayName": "300015",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 5480,
+      "labels": [
+        "SILO_ITEM_MAP.CSilo1",
+        "SILO_ITEM_MAP.CSilo2",
+        "RAW_ITEMS.CONV_CREAM",
+        "CREAM_ITEM_CONV",
+        "HISTORIAN_ITEM_MAP.300011",
+        "PRODUCT_INDEX_ITEM_MAP[11]",
+        "RAW_FG_ITEM_MAP: \"Raw conventional cream (40%)\"",
+        "RAW_FG_ITEM_MAP: \"Raw Con Cream 40%\""
+      ],
+      "expectedName": "Raw Conventional Cream",
+      "exists": true,
+      "displayName": "300011",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 5482,
+      "labels": [
+        "RAW_ITEMS.ORG_0",
+        "SKIM_ITEM_ORG",
+        "HISTORIAN_ITEM_MAP.300010",
+        "PRODUCT_INDEX_ITEM_MAP[10]",
+        "RAW_FG_ITEM_MAP: \"Raw organic 0% (skim)\""
+      ],
+      "expectedName": "Raw Organic 0%",
+      "exists": true,
+      "displayName": "300010",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 5483,
+      "labels": [
+        "SILO_ITEM_MAP.CSilo3",
+        "RAW_ITEMS.ORG_CREAM",
+        "CREAM_ITEM_ORG",
+        "HISTORIAN_ITEM_MAP.300012",
+        "PRODUCT_INDEX_ITEM_MAP[12]",
+        "RAW_FG_ITEM_MAP: \"Raw organic cream (40%)\""
+      ],
+      "expectedName": "Raw Organic Cream",
+      "exists": true,
+      "displayName": "300012",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 5484,
+      "labels": [
+        "RAW_ITEMS.ORG_A2_0",
+        "HISTORIAN_ITEM_MAP.300018",
+        "PRODUCT_INDEX_ITEM_MAP[25]",
+        "RAW_FG_ITEM_MAP: \"Raw organic A2 0% (skim)\""
+      ],
+      "expectedName": "Raw Organic A2 0%",
+      "exists": true,
+      "displayName": "300018",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 5510,
+      "labels": [
+        "FG_ITEM_MAP: \"American Farmer Whole Milk\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200032",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 5907,
+      "labels": [
+        "FG_ITEM_MAP: \"Horizon Organic 3.25% Whole Milk\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200137",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 5911,
+      "labels": [
+        "FG_ITEM_MAP: \"Horizon Organic 2% Milk\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Horizon Organic 2% Milk",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 6420,
+      "labels": [
+        "FG_ITEM_MAP: \"Kirkland Organic Whole Milk\"",
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Kirkland Organic Whole Milk",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 7235,
+      "labels": [
+        "BOM_COMPONENT.7235"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "403005",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 7477,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Horizon Organic Half & Half",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8163,
+      "labels": [
+        "RAW_ITEMS.CONV_0",
+        "SKIM_ITEM_CONV",
+        "HISTORIAN_ITEM_MAP.300005",
+        "PRODUCT_INDEX_ITEM_MAP[5]",
+        "RAW_FG_ITEM_MAP: \"Raw conventional 0% (skim)\""
+      ],
+      "expectedName": "Raw Conventional 0% - Skim",
+      "exists": true,
+      "displayName": "300005",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 8271,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "DFI Marcels Chocolate 1%",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8333,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw Alexandre Eco Dairy A2/A2 Organic 4% Whole Milk\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Alexandre Eco Dairy A2/A2 Organic 4% Whole Milk",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8334,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw Kinera Strawberry\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Kinera Strawberry",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8335,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw Horizon Organic 2% Milk\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Horizon Organic 2% Milk",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8336,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw Kinera Chocolate\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Kinera Chocolate",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8339,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw DFI Marcels 2% Milk\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw DFI Marcels 2% Milk",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8340,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw DFI Marcels 1% Milk\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw DFI Marcels 1% Milk",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8341,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw Organic Milk 0% Lac Free\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Organic Milk 0% Lac Free",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8342,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw Kirkland Organic Whole Milk\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Kirkland Organic Whole Milk",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8343,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw Kirkland Chocolate 2% Organic Milk - Aseptic\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Kirkland Chocolate 2% Organic Milk - Aseptic",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8344,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw Kirkland 2% Organic Milk\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Kirkland 2% Organic Milk",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8346,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw Kirkland 2% Organic Lac Free Milk\"",
+        "RAW_FG_ITEM_MAP: \"Raw Kirkland 2% Organic Lactose Free\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Kirkland 2% Organic Lac Free Milk",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8347,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw Kirkland 1% Organic Milk\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Kirkland 1% Organic Milk",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8348,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw Horizon Organic 3.25% Whole Milk\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Horizon Organic 3.25% Whole Milk",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8349,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw ESL Heavy Whip Cream\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw ESL Heavy Whip Cream",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8350,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw ESL Half & Half\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw ESL Half & Half",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8351,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw DG Heavy Cream\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw DG Heavy Cream",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8352,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw DG Half & Half\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw DG Half & Half",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8353,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw DFI Marcels 3.25% Milk\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw DFI Marcels 3.25% Milk",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8354,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw DFI Marcels 0% Milk\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw DFI Marcels 0% Milk",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8355,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw DFI Marcels Modern Pantry UHT Half & Half\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw DFI Marcel's Modern Pantry UHT Half & Half",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8356,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw DFI Marcels Modern Pantry Heavy Cream\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw DFI Marcel's Modern Pantry Heavy Cream",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8357,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw DFI Holiday Nog\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw DFI Holiday Nog",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8358,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Conventional Whole Milk 3.25% (No Vitamins)",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8359,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Conventional Milk 3.5%",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8360,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Conventional Milk 3.25%",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8361,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Conventional Milk 2%",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8362,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Conventional Milk 1%",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8363,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw Barista Frappe Mix\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Barista Frappe Mix",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8364,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw American Farmer Whole Milk\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw American Farmer Whole Milk",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8365,
+      "labels": [
+        "RAW_ITEMS.ORG_A2_CREAM",
+        "PRODUCT_INDEX_ITEM_MAP[26]",
+        "RAW_FG_ITEM_MAP: \"Raw organic A2 cream (40%)\""
+      ],
+      "expectedName": "Raw Organic A2 Cream",
+      "exists": true,
+      "displayName": "Raw Organic A2 Cream",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 8366,
+      "labels": [
+        "RAW_ITEMS.ORG_A2_1",
+        "PRODUCT_INDEX_ITEM_MAP[24]"
+      ],
+      "expectedName": "Raw Organic A2 1%",
+      "exists": true,
+      "displayName": "Raw Organic A2 1%",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 8367,
+      "labels": [
+        "RAW_ITEMS.ORG_A2_2",
+        "PRODUCT_INDEX_ITEM_MAP[23]"
+      ],
+      "expectedName": "Raw Organic A2 2%",
+      "exists": true,
+      "displayName": "Raw Organic A2 2%",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 8368,
+      "labels": [
+        "RAW_ITEMS.ORG_A2_3_25",
+        "PRODUCT_INDEX_ITEM_MAP[22]"
+      ],
+      "expectedName": "Raw Organic A2 3.25%",
+      "exists": true,
+      "displayName": "Raw Organic A2 3.25%",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 8369,
+      "labels": [
+        "RAW_ITEMS.ORG_A2_3_5"
+      ],
+      "expectedName": "Raw Organic A2 3.5%",
+      "exists": true,
+      "displayName": "Raw Organic A2 3.5%",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 8370,
+      "labels": [
+        "RAW_ITEMS.ORG_A2_4"
+      ],
+      "expectedName": "Raw Organic A2 4%",
+      "exists": true,
+      "displayName": "Raw Organic A2 4%",
+      "isInactive": false,
+      "type": null,
+      "isLot": false,
+      "useBins": true
+    },
+    {
+      "id": 8371,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw Alexandre Eco Dairy A2/A2 Organic Chocolate 4% Milk\"",
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "200027",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8401,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Aldi 2% Organic milk",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8406,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "100141",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8409,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(fg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "100142",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8812,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Horizon Organic Half & Half",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": false
+    },
+    {
+      "id": 8815,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": false,
+      "displayName": null,
+      "isInactive": null,
+      "type": null,
+      "isLot": null,
+      "useBins": null
+    },
+    {
+      "id": 8816,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": false,
+      "displayName": null,
+      "isInactive": null,
+      "type": null,
+      "isLot": null,
+      "useBins": null
+    },
+    {
+      "id": 8817,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": false,
+      "displayName": null,
+      "isInactive": null,
+      "type": null,
+      "isLot": null,
+      "useBins": null
+    },
+    {
+      "id": 8918,
+      "labels": [
+        "RAW_FG_TO_FG_MAP(rawFg)"
+      ],
+      "expectedName": null,
+      "exists": false,
+      "displayName": null,
+      "isInactive": null,
+      "type": null,
+      "isLot": null,
+      "useBins": null
+    },
+    {
+      "id": 8928,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw organic A2 4%\""
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Organic A2 4% (Batch)",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8929,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw conventional 1%\""
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Conventional 1% (Batch)",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8930,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw conventional 2%\""
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Conventional 2% (Batch)",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8931,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw conventional 3.25%\""
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Conventional 3.25% (Batch)",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8932,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw conventional 3.5%\""
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Conventional 3.5% (Batch)",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8933,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw organic 1%\""
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Organic 1% (Batch)",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8934,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw organic 2%\""
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Organic 2% (Batch)",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8935,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw organic 3.25%\""
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Organic 3.25% (Batch)",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8936,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw organic 3.5%\""
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Organic 3.5% (Batch)",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8937,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw organic A2 1%\""
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Organic A2 1% (Batch)",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8938,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw organic A2 2%\""
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Organic A2 2% (Batch)",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8939,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw organic A2 3.25%\""
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Organic A2 3.25% (Batch)",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    },
+    {
+      "id": 8940,
+      "labels": [
+        "RAW_FG_ITEM_MAP: \"Raw organic A2 3.5%\""
+      ],
+      "expectedName": null,
+      "exists": true,
+      "displayName": "Raw Organic A2 3.5% (Batch)",
+      "isInactive": false,
+      "type": null,
+      "isLot": true,
+      "useBins": true
+    }
+  ],
+  "bins": [
+    {
+      "id": 3105,
+      "labels": [
+        "TANK_BIN_MAP.BlendTank1A"
+      ],
+      "exists": true,
+      "name": "Blend-1A",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 3106,
+      "labels": [
+        "TANK_BIN_MAP.BlendTank1B"
+      ],
+      "exists": true,
+      "name": "Blend-1B",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 3107,
+      "labels": [
+        "TANK_BIN_MAP.BlendTank2A"
+      ],
+      "exists": true,
+      "name": "Blend-2A",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 3108,
+      "labels": [
+        "TANK_BIN_MAP.BlendTank2B"
+      ],
+      "exists": true,
+      "name": "Blend-2B",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 4928,
+      "labels": [
+        "SILO_BIN_MAP.CSilo1"
+      ],
+      "exists": true,
+      "name": "Silo-Cream-1",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 4929,
+      "labels": [
+        "SILO_BIN_MAP.CSilo2"
+      ],
+      "exists": true,
+      "name": "Silo-Cream-2",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 4930,
+      "labels": [
+        "SILO_BIN_MAP.CSilo3"
+      ],
+      "exists": true,
+      "name": "Silo-Cream-3",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 4931,
+      "labels": [
+        "SILO_BIN_MAP.MSilo1"
+      ],
+      "exists": true,
+      "name": "Silo-Raw-1",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 4932,
+      "labels": [
+        "SILO_BIN_MAP.MSilo2"
+      ],
+      "exists": true,
+      "name": "Silo-Raw-2",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 4933,
+      "labels": [
+        "SILO_BIN_MAP.MSilo3"
+      ],
+      "exists": true,
+      "name": "Silo-Raw-3",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 4934,
+      "labels": [
+        "SILO_BIN_MAP.MSilo4"
+      ],
+      "exists": true,
+      "name": "Silo-Raw-4",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 4935,
+      "labels": [
+        "SILO_BIN_MAP.MSilo5"
+      ],
+      "exists": true,
+      "name": "Silo-Raw-5",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 4995,
+      "labels": [
+        "SURGE_TANK_BIN_MAP.ST81"
+      ],
+      "exists": true,
+      "name": "Surge-81",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 4996,
+      "labels": [
+        "SURGE_TANK_BIN_MAP.ST82"
+      ],
+      "exists": true,
+      "name": "Surge-82",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 4997,
+      "labels": [
+        "SURGE_TANK_BIN_MAP.ST83"
+      ],
+      "exists": true,
+      "name": "Surge-83",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 4998,
+      "labels": [
+        "SURGE_TANK_BIN_MAP.ST84"
+      ],
+      "exists": true,
+      "name": "Surge-84",
+      "locationId": 30,
+      "isInactive": false
+    },
+    {
+      "id": 5016,
+      "labels": [
+        "SEPARATOR_ADJ_BIN_ID"
+      ],
+      "exists": true,
+      "name": "SEPERATOR-ADJUSMENTS",
+      "locationId": 30,
+      "isInactive": false
+    }
+  ],
+  "boms": [
+    {
+      "id": 251,
+      "label": "SEPARATION_BOM_MAP.5417_5",
+      "exists": true,
+      "unverifiable": false,
+      "name": "Raw Conventional Milk to Skim and Cream"
+    },
+    {
+      "id": 252,
+      "label": "SEPARATION_BOM_MAP.5404_10",
+      "exists": true,
+      "unverifiable": false,
+      "name": "Raw Organic Milk to skim and cream"
+    },
+    {
+      "id": 253,
+      "label": "SEPARATION_BOM_MAP.5403_25",
+      "exists": true,
+      "unverifiable": false,
+      "name": "Raw Organic A2 Milk"
+    },
+    {
+      "id": 337,
+      "label": "SEPARATION_BOM_MAP.5417_4",
+      "exists": true,
+      "unverifiable": false,
+      "name": "Raw Conventional Milk to 1% and Cream"
+    },
+    {
+      "id": 338,
+      "label": "SEPARATION_BOM_MAP.5417_3",
+      "exists": true,
+      "unverifiable": false,
+      "name": "Raw Conventional Milk to 2% and Cream"
+    },
+    {
+      "id": 347,
+      "label": "SEPARATION_BOM_MAP.5404_9",
+      "exists": true,
+      "unverifiable": false,
+      "name": "Raw Organic Milk to 1% and cream"
+    },
+    {
+      "id": 348,
+      "label": "SEPARATION_BOM_MAP.5404_8",
+      "exists": true,
+      "unverifiable": false,
+      "name": "Raw Organic Milk to 2% and cream"
+    },
+    {
+      "id": 349,
+      "label": "SEPARATION_BOM_MAP.5404_7",
+      "exists": true,
+      "unverifiable": false,
+      "name": "Raw Organic Milk to 3.25% and cream"
+    },
+    {
+      "id": 350,
+      "label": "SEPARATION_BOM_MAP.5404_6",
+      "exists": true,
+      "unverifiable": false,
+      "name": "Raw Organic Milk to 3.5% and cream"
+    },
+    {
+      "id": 351,
+      "label": "SEPARATION_BOM_MAP.5417_2",
+      "exists": true,
+      "unverifiable": false,
+      "name": "Raw Conventional Milk to 3.25% and Cream"
+    },
+    {
+      "id": 353,
+      "label": "SEPARATION_BOM_MAP.5417_1",
+      "exists": true,
+      "unverifiable": false,
+      "name": "Raw Conventional Milk to 3.5% and Cream"
+    },
+    {
+      "id": 377,
+      "label": "SEPARATION_BOM_MAP.5403_24",
+      "exists": true,
+      "unverifiable": false,
+      "name": "Raw organic A2 1%"
+    },
+    {
+      "id": 378,
+      "label": "SEPARATION_BOM_MAP.5403_23",
+      "exists": true,
+      "unverifiable": false,
+      "name": "Raw organic A2 2%"
+    },
+    {
+      "id": 379,
+      "label": "SEPARATION_BOM_MAP.5403_22",
+      "exists": true,
+      "unverifiable": false,
+      "name": "Raw organic A2 3.25%"
+    }
+  ],
+  "infrastructure": {
+    "location": {
+      "id": 30,
+      "label": "NS_LOCATION_ID",
+      "exists": true,
+      "name": "Ida Milk"
+    },
+    "subsidiary": {
+      "id": 3,
+      "label": "NS_SUBSIDIARY_ID",
+      "exists": true,
+      "name": "Ida Milk"
+    },
+    "accounts": [
+      {
+        "id": 476,
+        "label": "NS_ADJ_ACCOUNT_ID (Inventory Adjustment)",
+        "exists": true,
+        "number": "52500",
+        "name": null,
+        "isInactive": false
+      },
+      {
+        "id": 477,
+        "label": "REVAL_ACCOUNT_ID (COGS: Inventory Revaluation)",
+        "exists": true,
+        "number": "52600",
+        "name": null,
+        "isInactive": false
+      }
+    ]
+  }
+}

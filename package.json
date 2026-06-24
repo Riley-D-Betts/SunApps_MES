@@ -1,16 +1,19 @@
 {
-  "name": "mes-service",
-  "version": "1.0.0",
-  "description": "Thin MES/Historian data poller - forwards raw process data to SunApps_API",
+  "name": "sunapps_mes",
+  "version": "0.0.1",
+  "description": "SunApps MES Service — Historian poller and liquid milk processing",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "body-parser": "^1.20.3",
     "dotenv": "^16.4.7",
     "express": "^5.1.0",
     "httpntlm": "^1.8.13",
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "sequelize": "6.37.7",
+    "tedious": "19.2.1"
   }
 }

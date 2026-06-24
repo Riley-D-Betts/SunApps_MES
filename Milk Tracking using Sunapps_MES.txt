@@ -1,0 +1,110 @@
+Milk Tracking using Sunapps_MES
+
+a service that is the integration layer between the actual production equipment and readings as stored in AVEVA/Historian and the accounting and traceability tracking in NetSuite.
+
+key descriptions: the types of milk.
+
+there are 4 types of milk we need to track in the system. and by type i don't mean the kind of milk it is, but rather the step its on i processing.
+
+type 1: Raw bulk milk. there are currently 3 types in the system - Raw conventional milk, Raw organic milk, Raw organic a2 milk.
+type 2: Raw separated milk. these are the standardized versions of their respective raw bulk milks. there are a bunch of these
+Raw conventional 0% (skim)
+Raw conventional 1%
+Raw conventional 2%
+Raw conventional 3.25%
+Raw conventional 3.5%
+Raw conventional cream (40%)
+Raw organic 0% (skim)
+Raw organic 1%
+Raw organic 2%
+Raw organic 3.25%
+Raw organic 3.5%
+Raw organic cream (40%)
+Raw organic A2 0% (skim)
+Raw organic A2 1%
+Raw organic A2 2%
+Raw organic A2 3.25%
+Raw organic A2 3.5%
+Raw organic A2 4%
+Raw organic A2 cream (40%)
+
+Raw bulk milk goes into the separator, and out comes it's associated standardized percentage and some cream. (so input Raw Conventional milk into the separator and output Raw conventional 2% and Raw conventional cream (40%))
+
+type 1 and type 2 milk are both mainly stored in the Silos. there are 8 silos. MSilo1, MSilo2, MSilo3, MSilo4, MSilo5, CSilo1, CSilo2, CSilo3. Normally raw bulk milk and raw separated milk stay in the MSilos, and then Raw separated Cream (i'm lumping it in with raw separated milk as they are both created teh same way and used the same way) goes into the CSilos. but not always, they can be put into any of them.
+
+type 2 milk can also be made of type 2 milk in the batch tanks. ie raw organic skim and raw organic cream can be combined in a batch tank to make raw organic 2%.
+
+type 3: Raw end product milk (batch tank milk)
+
+this is the next step of milk, and it is what gets created from the Raw separated milk in the batch tanks. there are many types of this milk.
+
+Raw Alexandre Eco Dairy A2/A2 Organic Chocolate 4% Milk
+Raw American Farmer Whole Milk
+Raw Barista Frappe Mix
+Raw DFI Holiday Nog
+Raw DFI Marcel's Modern Pantry Heavy Cream
+Raw DFI Marcel's Modern Pantry UHT Half & Half
+Raw DFI Marcels 0% Milk
+Raw DFI Marcels 3.25% Milk
+Raw DG Half & Half
+Raw DG Heavy Cream
+Raw ESL Half & Half
+Raw ESL Heavy Whip Cream
+Raw Horizon Organic 3.25% Whole Milk
+Raw Kirkland 1% Organic Milk
+Raw Kirkland 2% Organic Lac Free Milk
+Raw Kirkland 2% Organic Lactose Free
+Raw Kirkland 2% Organic Milk
+Raw Kirkland Chocolate 2% Organic Milk - Aseptic
+Raw Kirkland Organic Whole Milk
+Raw Organic Milk 0% Lac Free
+Raw DFI Marcels 1% Milk
+Raw DFI Marcels 2% Milk
+Raw Kinera Chocolate
+Raw Horizon Organic 2% Milk
+Raw Kinera Strawberry
+Raw Alexandre Eco Dairy A2/A2 Organic 4% Whole Milk
+
+these are made in the batch tanks from the type 2 milk.
+
+then there is type 4 milk. this is non-raw "finished good milk" or surge tank milk. this can be made from many different things, from type 3 milk, type 2 milk, or even in some cases type 1 milk. it is passed through one of the homogenizers and UHTs into one of the 4 surge tanks, ST81, ST82, ST83, ST84. here are the type 4 milks. notice how they are exactly the same as type 3 milks except they are no longer raw.
+
+Alexandre Eco Dairy A2/A2 Organic Chocolate 4% Milk
+American Farmer Whole Milk
+Barista Frappe Mix
+DFI Holiday Nog
+DFI Marcel's Modern Pantry Heavy Cream
+DFI Marcel's Modern Pantry UHT Half & Half
+DFI Marcels 0% Milk
+DFI Marcels 3.25% Milk
+DG Half & Half
+DG Heavy Cream
+ESL Half & Half
+ESL Heavy Whip Cream
+Horizon Organic 3.25% Whole Milk
+Kirkland 1% Organic Milk
+Kirkland 2% Organic Lac Free Milk
+Kirkland 2% Organic Lactose Free
+Kirkland 2% Organic Milk
+Kirkland Chocolate 2% Organic Milk - Aseptic
+Kirkland Organic Whole Milk
+Organic Milk 0% Lac Free
+DFI Marcels 1% Milk
+DFI Marcels 2% Milk
+Kinera Chocolate
+Horizon Organic 2% Milk
+Kinera Strawberry
+Alexandre Eco Dairy A2/A2 Organic 4% Whole Milk
+
+
+now let me describe for you the transactions:
+
+1. assembly unbuild. when the separator is running we need to keep track of multiple things. A. the input pounds of type 1 milk and from what silo (a bin in netsuite). B. the output type, so what level we are standardizing (2%, skim, or whatever + cream) C. the amount of teh standardized milk output and the amount of the cream output from the seperator. These will need to be updated in real time, and should be stored and updated as a batch in the DB so it doesn't get lost. Then there are the start and end triggers. We will want designated start conditions to start recording a batch (i say when the seperator goes active on product). and we will want a designated end of batch (i say when the seperator stops being active (like when it goes idle at the end of a batch) or if any of the inputs or outputs change destinations. when the seperator finishes a batch we need to create an assembly unbuild of teh type 1 milk into it's type 2 milk equal to the amounts we recorded. type 1 and type 2 milk are not lot numbered but they are bin tracked so we will need to specify the bins we are using. 
+
+2. Work order 1. When a batch tank gets set up we need to track multiple things: A. a start condition. it should probably be like the tank is not in CIP mode and a milk or cream line has started and is filling it. B. we need to record what products the lines input into the batch tank (blend tank, theyre the same thing). C. how much of each product they put in. D. What product this blend tank is making (probably a type 3 milk but it could be a type 2 milk). E. a stop point of when they have stopped filling the batch tank. the start condition being triggered should make a new work order in netsuite for the item being created in this blend tank. after each flow event the system should create a work order issue of whatever was just input into the batch tank by the milk or cream line and how much. remember type 1 and 2 milk could be used here, and tehy are bin tracked so teh work order issue will need to track the bin (silo) the batch tank is getting input from. Then we will need to record the end amount, or the total milk produced in this step and create a work order issue for it. if we are creating type 3 milk we need to not just work order complete it to this bin but also assign it a lot number (date+wo number). this will be completed to the batch tank.
+
+3. work order 2. when a surge tank is ready to go we need to track multiple things. A. what UHT is filling it. B. where that UHT (TSTAT) is getting it's milk from (it can come from a silo via the milk and cream lines directly to the TSTAT or a batch tank) C. what type of milk is being input into the UHT (it could be type 1, 2 or 3) D. how much is draining from teh source (so outflow measurement of the batch tank / silo the milk is coming from) that will be what is work order issued to this work order is the amount taken out of the source (not necisarily the amount input into the surge tank as there may be waste between the 2). then work order completed is the total amount of type 4 milk made in this surge tank. it will also be lot numbered and bin tracked.
+
+4. Exceptions we need to account for: type 4 milk can be made of type 1,2, and/or 3. type 3 can be made of type 1 and 2. type 2 can be made of type 1. type one gets assembly unbuilt into type 2 not work order completed. All BOMs are suggestions for this, as we want to work order issue the actual amounts used and not the amounts expected on the BOMs. All of this milk is bin tracked, but if a bin doesn't have the full amount in it yet (like if a silo is inflowing and outflowing at the same time) then the transaction will fail becasue not enough inventory availiable. thus, we need built in back up inventory adjustments for all of this. an adjustment up when not enough availiable, and then eventually an invntory adjustment back down to the real level when the source flatens out.
+
+
