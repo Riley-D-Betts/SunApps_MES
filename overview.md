@@ -200,7 +200,7 @@ TEAMS_WEBHOOK_URL                 # for waste/poll-fail alerts
 - **`pending_ns` status** — anything that resolved the physics but failed to resolve an NS item/bin/BOM lands here, not in `error`. Ops queries `WHERE status='pending_ns'` to fix the catalog.
 - **Hydration on restart** — `blendTankJob.hydrateFromDb` + `surgeTankJob.hydrateFromDb` pull `active` rows into in-memory tank state on boot, so a process restart in the middle of a batch doesn't trigger a duplicate WO start *or* leave an orphan active row in the DB.
 - **Catch-up pass** in the blend-tank tick — handles the case where a line reset while the process was down (uses `MesPipeIssueState.lastProductName`/`lastSiloName`).
-- **Teams alert** via `notifyService.sendAlert()` on any historian-poll failure or waste > threshold (infrastructure-level only; business alerts live in SunApps_API).
+- **Teams notifications** — only the deploy workflows post to Teams (via `TEAMS_SOFTWARE_DEPLOYMENT_HOOK`). Runtime alerts are disabled: `notifyService.sendAlert()` is a no-op, so historian-poll/tick/sweep failures are logged locally (`console.error` + `statusStore.pushEvent`) but never sent to Teams.
 
 ---
 
