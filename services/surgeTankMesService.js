@@ -517,18 +517,12 @@ async function _resolveLayer3Source(data, historian) {
         console.warn(`[SurgeTankMesService] _resolveLayer3Source: line lookup failed — ${err.message}`)
       }
     }
-    const fallback = itemConfig.SILO_ITEM_MAP[silo]
-    if (!fallback) {
-      console.warn(`[SurgeTankMesService] _resolveLayer3Source: no SILO_ITEM_MAP entry for ${silo}`)
-      return null
-    }
-    return {
-      itemId: String(fallback.id),
-      itemName: fallback.name,
-      binId: itemConfig.getBinId(silo),
-      resolvedFrom: 'silo-bulk-fallback',
-      layerSkipReason: 'layer-1-and-2-skip',
-    }
+    // No live feeding-line product → do NOT guess from a static silo item.
+    // Silos are product-flexible, so any guess could mislabel the issue.
+    // Return null; the caller defers the tick and the batch surfaces on the
+    // Surge Tank Review backlog for an operator to resolve.
+    console.warn(`[SurgeTankMesService] _resolveLayer3Source: no live product for silo ${silo} — deferring to Surge Tank Review`)
+    return null
   }
 
   console.warn(`[SurgeTankMesService] _resolveLayer3Source: unknown feeding source: ${feedingFromEntName}`)
@@ -543,8 +537,9 @@ async function _resolveLayer3Source(data, historian) {
  *     use its `mesItem`. Source bin is TANK_BIN_MAP[blendTankId].
  *   - feedingFromEntName is a silo → fetch the milk-line reading whose
  *     destination contains the UHT, then run lineMapper.resolveLineProduct
- *     on that line's productName. Falls back to SILO_ITEM_MAP if no line
- *     is currently feeding the UHT.
+ *     on that line's productName. Returns null (no static silo guess) if no
+ *     line is currently feeding the UHT, so the batch defers to Surge Tank
+ *     Review rather than issuing against a guessed item.
  *
  * Returns { itemId, itemName, binId, resolvedFrom } or null when nothing
  * resolves (caller will defer the tick and try again next time).
@@ -725,18 +720,11 @@ async function resolveSurgeTankComponent(batch, historian) {
       }
     }
     if (resolved) return resolved
-    // Last-resort fallback — silo's static raw item (whole milk).
-    const fallback = itemConfig.SILO_ITEM_MAP[silo]
-    if (!fallback) {
-      console.warn(`[SurgeTankMesService] No SILO_ITEM_MAP entry for ${silo}`)
-      return null
-    }
-    return {
-      itemId: String(fallback.id),
-      itemName: fallback.name,
-      binId: itemConfig.getBinId(silo),
-      resolvedFrom: 'silo-static',
-    }
+    // No live feeding-line product → do NOT guess from a static silo item
+    // (silos are product-flexible). Return null so the tick defers and the
+    // batch surfaces on the Surge Tank Review backlog.
+    console.warn(`[SurgeTankMesService] resolveSurgeTankComponent: no live product for silo ${silo} — deferring to Surge Tank Review`)
+    return null
   }
 
   console.warn(`[SurgeTankMesService] Unknown feeding source: ${feedingFromEntName}`)

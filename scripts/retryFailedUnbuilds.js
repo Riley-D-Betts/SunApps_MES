@@ -35,14 +35,18 @@ async function fireUnbuild(row) {
   const src = (!isLegacy && parsed.source) || {}
   const sourceBinId = itemConfig.getBinId(sourceSilo)
 
-  // Source item: prefer stored nsItemId, fall back to SILO_ITEM_MAP by silo name.
+  // Source item: prefer the stored nsItemId from the batch's resolved-source
+  // snapshot. There is no silo-name fallback (silos are product-flexible) — if
+  // the snapshot has no item, the batch can't be auto-retried and must be fixed
+  // from the Separation Review page.
   const sourceItem = src.nsItemId
     ? { id: src.nsItemId }
     : itemConfig.getItem(row.itemId, sourceSilo)
-  if (!sourceItem.id) throw new Error(`Cannot resolve source NS item for batch ${row.batchId} (silo=${sourceSilo})`)
+  if (!sourceItem.id) throw new Error(`Cannot resolve source NS item for batch ${row.batchId} (silo=${sourceSilo}) — fix via Separation Review`)
 
-  // Resolved destinations: new format has the full array; legacy format is a plain
-  // array of silo name strings — classify by prefix and look up from SILO_ITEM_MAP.
+  // Resolved destinations: new format has the full array; legacy format is a
+  // plain array of silo name strings classified by prefix. Legacy rows with no
+  // stored item resolve to { id: null } (no silo guess) and are skipped below.
   let resolved
   if (!isLegacy && Array.isArray(parsed.resolved)) {
     resolved = parsed.resolved
