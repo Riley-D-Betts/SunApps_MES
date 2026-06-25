@@ -2,16 +2,14 @@ const core = require('../clients/coreClient')
 
 const _resolvedItemCache = {}
 
-const SILO_ITEM_MAP = {
-  'MSilo1': { id: 5417, name: 'Raw Conventional Milk' },
-  'MSilo2': { id: 5417, name: 'Raw Conventional Milk' },
-  'MSilo3': { id: 5417, name: 'Raw Conventional Milk' },
-  'MSilo4': { id: 5404, name: 'Raw Organic Milk' },
-  'MSilo5': { id: 5404, name: 'Raw Organic Milk' },
-  'CSilo1': { id: 5480, name: 'Raw Conventional Cream' },
-  'CSilo2': { id: 5480, name: 'Raw Conventional Cream' },
-  'CSilo3': { id: 5483, name: 'Raw Organic Cream' },
-}
+// NOTE: there is intentionally NO static silo→item map. Silos are
+// product-flexible (any silo can hold any milk or cream, raw or separated), so
+// hard-coding "MSilo4 = Organic" etc. produced mislabeled inventory. Silo
+// contents are always resolved LIVE from MES — the Standardization HMI product
+// index (getItemByProductIndex) or the feeding milk line's product name. When
+// no live signal is available, callers resolve to { id: null } / null so the
+// batch lands on its review page (Separation / Blend Tank / Surge Tank Review)
+// instead of being scored against a guessed item.
 
 const CREAM_ITEM_CONV = { id: 5480, name: 'Raw Conventional Cream' }
 const CREAM_ITEM_ORG  = { id: 5483, name: 'Raw Organic Cream' }
@@ -287,18 +285,13 @@ function getItemByProductIndex(idx) {
   return { id: null, name: `Unmapped product index ${n}` }
 }
 
+// Resolve an NS item from the historian MES item code only. There is no
+// silo-name fallback: if the MES code doesn't resolve, returns { id: null } so
+// the caller routes the batch to its review page instead of guessing an item
+// from the (product-flexible, non-authoritative) silo name.
 function getItem(mesItemCode, sourceSilo) {
   if (mesItemCode && HISTORIAN_ITEM_MAP[mesItemCode]) return HISTORIAN_ITEM_MAP[mesItemCode]
-  if (sourceSilo && SILO_ITEM_MAP[sourceSilo]) return SILO_ITEM_MAP[sourceSilo]
   return { id: null, name: `Unknown (item: ${mesItemCode || 'none'}, silo: ${sourceSilo || 'none'})` }
-}
-
-function getOutputItems(sourceSilo) {
-  const isOrganic = sourceSilo === 'MSilo4' || sourceSilo === 'MSilo5'
-  return {
-    cream: isOrganic ? CREAM_ITEM_ORG : CREAM_ITEM_CONV,
-    skim: isOrganic ? SKIM_ITEM_ORG : SKIM_ITEM_CONV,
-  }
 }
 
 // Cream output is fully determined by the source silo's item — operators have
@@ -311,12 +304,6 @@ function getCreamItemForSource(sourceItemId) {
   const id = Number(sourceItemId)
   if (id === 5404 || id === 5403 || id === 5406) return CREAM_ITEM_ORG
   return CREAM_ITEM_CONV
-}
-
-function getInputItem(sourceSilo) {
-  const item = SILO_ITEM_MAP[sourceSilo]
-  if (!item) throw new Error(`Unknown silo: ${sourceSilo}. Known silos: ${Object.keys(SILO_ITEM_MAP).join(', ')}`)
-  return item
 }
 
 function getBlendTankItem(mesItemCode) {
@@ -360,7 +347,6 @@ module.exports = {
   SEPARATION_BOM_MAP,
   getSeparationBomId,
   normalizeSkimIndex,
-  SILO_ITEM_MAP,
   HISTORIAN_ITEM_MAP,
   BLEND_TANK_ITEM_MAP,
   SILO_BIN_MAP,
@@ -381,9 +367,7 @@ module.exports = {
   WASTE_ALERT_THRESHOLD,
   getItem,
   getItemByProductIndex,
-  getOutputItems,
   getCreamItemForSource,
-  getInputItem,
   getBlendTankItem,
   getBinId,
   normalizeSiloName,

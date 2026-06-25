@@ -39,9 +39,6 @@ function collectItemDefs() {
     if (name && !entry.expectedName) entry.expectedName = name
   }
 
-  for (const [silo, item] of Object.entries(itemConfig.SILO_ITEM_MAP))
-    add(item.id, `SILO_ITEM_MAP.${silo}`, item.name)
-
   for (const [key, item] of Object.entries(itemConfig.RAW_ITEMS))
     add(item.id, `RAW_ITEMS.${key}`, item.name)
 
