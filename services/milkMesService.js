@@ -11,7 +11,10 @@ const statusStore = require('./statusStore')
 // cap (constraint #2 in [[assemblyunbuild_must_be_n]]). Raised to unbuildQty+1
 // just before the unbuild and zeroed right back out after, so it never carries
 // lasting inventory.
-const SEPARATOR_ADJ_BIN_ID = 5016
+// NOTE: this id is env-specific. In production SEPARATOR-ADJUSTMENTS is bin 5020
+// (id 5016 there is a real bin, "FL-1A" — do NOT point at it). The sandbox
+// scratch bin was 5016.
+const SEPARATOR_ADJ_BIN_ID = 5020
 
 async function processSeparationBatch(data) {
   const {
