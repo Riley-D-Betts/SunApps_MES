@@ -290,6 +290,11 @@ function buildAssignmentItems({ isLot, useBins }, totalQty, allocations, preferr
 // the lowercase componentinventorydetail shape (they only exist on lot WOs).
 // Bin id MUST be the {id: Number} object form regardless of wrapper — a raw
 // string binnumber credits 0. See [[ns-wo-issue-shape]], SD-597.
+// NOTE: the above lot-mix split is the SANDBOX mapping. PRODUCTION inverts it —
+// a bin-only line wants the camelCase inventoryDetail wrapper regardless of lot
+// mix (replaying WO1470/5003483 on prod: lowercase → "must be N", camelCase OK).
+// This function stays pure (woHasLotLines → wrapper); the env-keyed DEFAULT lives
+// in blendTankMesService.buildWoIssueBody, backed by a self-healing wrapper retry.
 // Returns { quantity, detail }: `detail` is the object to Object.assign onto the
 // component entry (or null when the item needs no inventory detail), and
 // `quantity` is the effective component-LINE quantity the caller must use. For
