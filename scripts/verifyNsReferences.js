@@ -92,7 +92,7 @@ function collectBinDefs() {
     add(id, `SURGE_TANK_BIN_MAP.${name}`)
 
   // Unbuild cap staging bin (milkMesService.SEPARATOR_ADJ_BIN_ID)
-  add(5016, 'SEPARATOR_ADJ_BIN_ID')
+  add(5020, 'SEPARATOR_ADJ_BIN_ID')
 
   return [...map.values()].sort((a, b) => a.id - b.id)
 }
