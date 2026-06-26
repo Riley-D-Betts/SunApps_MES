@@ -3,8 +3,13 @@
  *
  * Every 5 min, walks the M-silos, C-silos, and blend tanks. For each tank
  * that has no live flow movement during the window, computes the 5-min
- * average level in lbs, compares it to NS bin (and lot, for blend tanks)
- * on-hand, and posts a signed inventory adjustment when |delta| >= 500 lb.
+ * average level in lbs and reconciles the WHOLE NS bin to physical reality
+ * (inventoryAdjustmentService.reconcileBinToPhysical): the bin is driven to
+ * hold EXACTLY the current product at the measured weight and ZERO of every
+ * other item, with no negative balance of any item. The current product's leg
+ * keeps the 500-lb sensor-noise threshold; stale/wrong-product and negative
+ * legs are always cleared. When the current product can't be identified the
+ * bin is zeroed out entirely.
  *
  * Silos are swept between batches to pre-fund the NS bin before the next
  * blend WO starts issuing from it. During an active blend batch the silo
@@ -25,7 +30,6 @@
  */
 const itemConfig = require('./mesItemConfig')
 const inventoryAdjustment = require('./inventoryAdjustmentService')
-const nsInventory = require('./nsInventoryLookup')
 const db = require('../models')
 
 const AT_REST_WINDOW_MS = 5 * 60 * 1000
@@ -175,50 +179,44 @@ async function sweepSilo({ silo, activeRoutes, activeSeparationSilos, historian,
 
   // Silos are product-flexible — any silo can hold any milk or cream, raw or
   // separated — so the static SILO_ITEM_MAP cannot say what's actually in the
-  // silo. Resolve the item from the LIVE Standardization HMI product index
-  // (IndexSelectRead, surfaced as silo.productIndex by getSiloStatus), exactly
-  // as the separation unbuild does (milkMesService getItemByProductIndex). If
-  // the live index yields no NS item, SKIP rather than reconcile against an
-  // arbitrary item — posting against the wrong item is what produced mislabeled
-  // adjustments whose two transfer legs never cancelled per item.
+  // silo. Resolve the CURRENT item from the LIVE Standardization HMI product
+  // index (IndexSelectRead, surfaced as silo.productIndex by getSiloStatus),
+  // exactly as the separation unbuild does (getItemByProductIndex). When the
+  // index yields no NS item the product is unidentified — the full-bin reconcile
+  // then drives the bin to 0 (zero-everything-when-unknown), so we no longer
+  // skip here.
   const item = itemConfig.getItemByProductIndex(silo.productIndex)
-  if (!item?.id) {
-    return { tankName, skipped: 'no-product-index', productIndex: silo.productIndex || 0 }
-  }
-
-  // Lot-tracked items that aren't also bin-tracked in NS will land in the
-  // default bin slot — the bin query always returns 0 and every tick posts
-  // a duplicate adjustment. Enable bin tracking on the NS item first.
-  const siloTracking = await nsInventory.getItemTracking(item.id)
-  if (siloTracking.isLot && !siloTracking.useBins) {
-    console.warn(`[TankAtRestSweep] ${tankName}: item ${item.id} is lot-tracked but not bin-tracked in NS — enable bin tracking before sweeping`)
-    return { tankName, skipped: 'lot-not-bin-tracked', itemId: item.id }
-  }
+  const currentItemId = item?.id || null
 
   const reading = await readAvgLbs(historian, siloLbsFqn(tankName), windowStart, windowEnd, silo.lbs)
+  // No level reading at all → don't reconcile. Zeroing a bin off a missing
+  // sensor read would wipe real stock.
   if (!reading) return { tankName, skipped: 'no-level-samples' }
   if (reading.rangeLbs > AT_REST_RANGE_LBS) {
     return { tankName, skipped: 'in-motion', rangeLbs: reading.rangeLbs }
   }
 
-  const nsQty = await inventoryAdjustment.getBinQtyOnHand(item.id, binId)
-  const delta = reading.avgLbs - nsQty
-  if (Math.abs(delta) < MIN_DELTA_LBS) {
-    return { tankName, skipped: 'below-threshold', delta }
-  }
-
-  console.log(`[TankAtRestSweep] ${tankName}: observed ${reading.avgLbs.toFixed(0)} lb (${reading.source}, n=${reading.sampleCount}), NS ${nsQty.toFixed(0)} lb (item ${item.id} "${item.name}", idx ${silo.productIndex}) → Δ ${delta.toFixed(0)} lb`)
-  const result = await inventoryAdjustment.submitInventoryAdjustment({
+  console.log(`[TankAtRestSweep] ${tankName}: observed ${reading.avgLbs.toFixed(0)} lb (${reading.source}, n=${reading.sampleCount}), current item ${currentItemId || 'unidentified'} "${item?.name || ''}" (idx ${silo.productIndex}) → full-bin reconcile`)
+  const result = await inventoryAdjustment.reconcileBinToPhysical({
     binId,
-    itemId: item.id,
-    qtyDelta: delta,
-    source: 'sweep',
+    currentItemId,
+    targetQty: reading.avgLbs,
+    currentItemThreshold: MIN_DELTA_LBS,
     tankName,
+    source: 'sweep',
     observedLbs: reading.avgLbs,
-    nsQtyBefore: nsQty,
-    memo: `Sweep: ${tankName} 5-min avg ${reading.avgLbs.toFixed(0)} vs NS ${nsQty.toFixed(0)} lb (item ${item.id}, idx ${silo.productIndex})`,
+    productIndex: silo.productIndex,
   })
-  return { tankName, adjusted: !!result?.ok, failed: !result?.ok, delta, itemId: item.id, productIndex: silo.productIndex, ...result }
+  if (result.skipped) return { tankName, skipped: result.skipped }
+  return {
+    tankName,
+    reconciled: true,
+    adjustedCount: result.adjusted,
+    failedCount: result.failed,
+    currentItemId,
+    productIndex: silo.productIndex,
+    legs: result.legs,
+  }
 }
 
 async function sweepBlendTank({ tank, activeRoutes, historian, windowStart, windowEnd }) {
@@ -237,28 +235,24 @@ async function sweepBlendTank({ tank, activeRoutes, historian, windowStart, wind
     return { tankName, skipped: 'wo-active' }
   }
 
-  // Pull the most-recent completed batch so we know which NS item the
-  // residual product is, and which WO number to attach a fresh lot to if
-  // NS has no existing lot in this bin.
-  const lastBatch = await db.MesBlendTankBatch.findOne({
-    where: { tankId: tankName, status: 'completed' },
-    order: [['completedAt', 'DESC']],
-  })
-  if (!lastBatch || !lastBatch.mesItem) {
-    return { tankName, skipped: 'no-last-wo-context' }
+  // Pull the most-recent completed batch so we know which NS item the residual
+  // product is, and which WO number to attach a fresh lot to if NS has no lot in
+  // this bin. A genuine "no completed batch yet" → currentItemId null → the
+  // full-bin reconcile zeroes whatever NS thinks is there. A DB error, though,
+  // must SKIP (don't zero a stocked tank off a failed query).
+  let lastBatch
+  try {
+    lastBatch = await db.MesBlendTankBatch.findOne({
+      where: { tankId: tankName, status: 'completed' },
+      order: [['completedAt', 'DESC']],
+    })
+  } catch (err) {
+    console.warn(`[TankAtRestSweep] ${tankName}: last-batch lookup failed: ${err.message.slice(0, 200)}`)
+    return { tankName, skipped: 'last-batch-lookup-failed' }
   }
 
-  const itemId = lastBatch.mesItem
-  const lastWoNumber = lastBatch.nsWorkOrderNumber || null
-
-  // Lot-tracked items that aren't also bin-tracked in NS will land in the
-  // default bin slot — the bin query always returns 0 and every tick posts
-  // a duplicate adjustment. Enable bin tracking on the NS item first.
-  const blendTracking = await nsInventory.getItemTracking(itemId)
-  if (blendTracking.isLot && !blendTracking.useBins) {
-    console.warn(`[TankAtRestSweep] ${tankName}: item ${itemId} is lot-tracked but not bin-tracked in NS — enable bin tracking before sweeping`)
-    return { tankName, skipped: 'lot-not-bin-tracked', itemId }
-  }
+  const currentItemId = lastBatch?.mesItem || null
+  const lastWoNumber = lastBatch?.nsWorkOrderNumber || null
 
   const reading = await readAvgLbs(historian, blendTankLbsFqn(tankName), windowStart, windowEnd, tank.weightLbs)
   if (!reading) return { tankName, skipped: 'no-level-samples' }
@@ -266,25 +260,26 @@ async function sweepBlendTank({ tank, activeRoutes, historian, windowStart, wind
     return { tankName, skipped: 'in-motion', rangeLbs: reading.rangeLbs }
   }
 
-  const nsQty = await inventoryAdjustment.getBinQtyOnHand(itemId, binId)
-  const delta = reading.avgLbs - nsQty
-  if (Math.abs(delta) < MIN_DELTA_LBS) {
-    return { tankName, skipped: 'below-threshold', delta }
-  }
-
-  console.log(`[TankAtRestSweep] ${tankName}: observed ${reading.avgLbs.toFixed(0)} lb (${reading.source}, n=${reading.sampleCount}), NS ${nsQty.toFixed(0)} lb (item ${itemId}, last WO ${lastWoNumber || 'n/a'}) → Δ ${delta.toFixed(0)} lb`)
-  const result = await inventoryAdjustment.submitInventoryAdjustment({
+  console.log(`[TankAtRestSweep] ${tankName}: observed ${reading.avgLbs.toFixed(0)} lb (${reading.source}, n=${reading.sampleCount}), current item ${currentItemId || 'unidentified'} (last WO ${lastWoNumber || 'n/a'}) → full-bin reconcile`)
+  const result = await inventoryAdjustment.reconcileBinToPhysical({
     binId,
-    itemId,
-    qtyDelta: delta,
-    source: 'sweep',
-    tankName,
-    observedLbs: reading.avgLbs,
-    nsQtyBefore: nsQty,
+    currentItemId,
+    targetQty: reading.avgLbs,
+    currentItemThreshold: MIN_DELTA_LBS,
     lastWoNumber,
-    memo: `Sweep: ${tankName} 5-min avg ${reading.avgLbs.toFixed(0)} vs NS ${nsQty.toFixed(0)} lb (item ${itemId})`,
+    tankName,
+    source: 'sweep',
+    observedLbs: reading.avgLbs,
   })
-  return { tankName, adjusted: !!result?.ok, failed: !result?.ok, delta, ...result }
+  if (result.skipped) return { tankName, skipped: result.skipped }
+  return {
+    tankName,
+    reconciled: true,
+    adjustedCount: result.adjusted,
+    failedCount: result.failed,
+    currentItemId,
+    legs: result.legs,
+  }
 }
 
 let lastPollTime = new Date()
@@ -353,17 +348,22 @@ async function tick(historian) {
   }
 
   const all = [...siloResults, ...blendResults]
-  const adjustments = all.filter(r => r.adjusted)
-  const failures = all.filter(r => r.failed)
+  // Each reconciled tank fans out into multiple per-item legs; sum the leg
+  // counts so the summary reflects actual adjustments posted, not tanks touched.
+  const reconciled = all.filter(r => r.reconciled)
+  const adjustments = reconciled.filter(r => (r.adjustedCount || 0) > 0)
+  const failures = reconciled.filter(r => (r.failedCount || 0) > 0)
+  const legsAdjusted = reconciled.reduce((s, r) => s + (r.adjustedCount || 0), 0)
+  const legsFailed = reconciled.reduce((s, r) => s + (r.failedCount || 0), 0)
   const skipped = all.filter(r => r.skipped)
-  console.log(`[TankAtRestSweep] Sweep complete: ${adjustments.length} ok, ${failures.length} failed, ${skipped.length} skipped`)
+  console.log(`[TankAtRestSweep] Sweep complete: ${reconciled.length} tanks reconciled (${legsAdjusted} legs ok, ${legsFailed} legs failed), ${skipped.length} skipped`)
   if (skipped.length > 0) {
     const grouped = skipped.reduce((m, r) => { m[r.skipped] = (m[r.skipped] || 0) + 1; return m }, {})
     console.log(`[TankAtRestSweep] Skip reasons: ${JSON.stringify(grouped)}`)
   }
 
   lastPollTime = new Date()
-  return { adjustments, failures, skipped }
+  return { adjustments, failures, skipped, legsAdjusted, legsFailed }
 }
 
 function getLastPollTime() {

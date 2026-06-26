@@ -449,6 +449,164 @@ async function applyTargetedLotUpAdjustment({ binId, itemId, lotName, upBy, tank
   })
 }
 
+// Any other-product / negative residue at or above this many lbs is cleared to
+// zero by the full-bin reconcile. Kept tiny (not the sweep's 500-lb sensor-noise
+// threshold) because a stale OR negative balance of the WRONG product is never
+// noise — the invariant is that no other product exists in the bin at all. The
+// floor only suppresses sub-lb float dust. Once cleared a balance stays at 0, so
+// there's no per-tick churn.
+const CLEANUP_MIN_LBS = 1
+
+function round2(n) { return Math.round((Number(n) || 0) * 100) / 100 }
+
+/**
+ * Drive a NS bin to match physical reality:
+ *   - exactly `targetQty` lb of `currentItemId` (the product physically in the
+ *     tank), and
+ *   - ZERO of every other item, with no negative balance of ANY item.
+ *
+ * This is the tank-at-rest invariant — a swept bin holds one product at the
+ * measured weight and nothing else. See [[sweep_static_silo_item_bug]]. Unlike
+ * the old per-item sweep (which only ever touched the one item it guessed was
+ * present), this reads the WHOLE bin and reconciles every item in it.
+ *
+ *   - currentItemId null → the tank's product is unidentified (no live product
+ *     index) or the tank is empty; EVERY item in the bin is driven to 0.
+ *   - other items present → zeroed (down-adjust positives, up-adjust negatives).
+ *   - the current item → netted to targetQty; the sweep's sensor-noise threshold
+ *     gates ONLY this leg (passed as currentItemThreshold), since ±noise on the
+ *     real product is expected. Wrong-product / negative legs ignore it.
+ *
+ * Each leg posts through submitInventoryAdjustment / applyTargetedLotUpAdjustment
+ * so every adjustment still gets its own audit row + failure event.
+ *
+ * Returns { skipped?, legs, adjusted, failed } — adjusted/failed are leg counts.
+ */
+async function reconcileBinToPhysical({
+  binId,
+  currentItemId,
+  targetQty,
+  currentItemThreshold = 0,
+  lastWoNumber = null,
+  tankName = null,
+  source = 'sweep',
+  observedLbs = null,
+  productIndex = null,
+  link = {},
+}) {
+  if (!binId) return { skipped: 'no-bin', legs: [], adjusted: 0, failed: 0 }
+
+  const contents = await nsInventory.getBinContents(binId)
+  // null = NS query failed; do NOT treat as empty (would zero a stocked bin).
+  if (contents === null) {
+    return { skipped: 'bin-contents-query-failed', legs: [], adjusted: 0, failed: 0 }
+  }
+
+  const curId = currentItemId != null ? String(currentItemId) : null
+
+  // Group the bin's balances by item.
+  const byItem = new Map() // itemId -> { net, lots: [{ lotId, lotName, qty }] }
+  for (const row of contents) {
+    const g = byItem.get(row.itemId) || { net: 0, lots: [] }
+    g.net += row.qty
+    g.lots.push(row)
+    byItem.set(row.itemId, g)
+  }
+  // Process the current item even if NS shows nothing for it (we may need to
+  // adjust it UP to the observed weight).
+  if (curId && !byItem.has(curId)) byItem.set(curId, { net: 0, lots: [] })
+
+  const legs = []
+  for (const [itemId, g] of byItem) {
+    const isCurrent = curId != null && itemId === curId
+    const desired = isCurrent ? targetQty : 0
+    const tracking = await nsInventory.getItemTracking(itemId)
+
+    // Lot-tracked but not bin-tracked in NS: a bin adjustment lands in the
+    // default slot and never reconciles. Skip this leg (warn) but keep
+    // cleaning the rest of the bin.
+    if (tracking.isLot && !tracking.useBins) {
+      console.warn(`[InventoryAdjustment] reconcile ${tankName || `bin ${binId}`}: item ${itemId} is lot-tracked but not bin-tracked — skipping leg`)
+      legs.push({ itemId, skipped: 'lot-not-bin-tracked' })
+      continue
+    }
+
+    if (!tracking.isLot) {
+      // Bin-only: a single signed net delta to the desired quantity.
+      const delta = round2(desired - g.net)
+      const threshold = isCurrent ? currentItemThreshold : CLEANUP_MIN_LBS
+      if (Math.abs(delta) < threshold) {
+        legs.push({ itemId, isCurrent, skipped: 'below-threshold', delta })
+        continue
+      }
+      const r = await submitInventoryAdjustment({
+        binId, itemId, qtyDelta: delta, source, tankName, observedLbs,
+        nsQtyBefore: g.net, lastWoNumber,
+        memo: reconcileMemo({ tankName, binId, itemId, isCurrent, desired, before: g.net, productIndex }),
+        ...link,
+      })
+      legs.push({ itemId, isCurrent, qtyDelta: delta, ok: !!r.ok, skipped: r.skipped, error: r.error })
+      continue
+    }
+
+    // Lot-tracked. First bring every NEGATIVE lot up to 0 — findExistingLotInBin
+    // can't see a negative lot (it filters on-hand>0), so target each by name
+    // via explicitLotName.
+    for (const lot of g.lots) {
+      if (lot.qty < 0 && lot.lotName) {
+        const upBy = round2(-lot.qty)
+        if (upBy < CLEANUP_MIN_LBS) continue
+        const r = await submitInventoryAdjustment({
+          binId, itemId, qtyDelta: upBy, source, tankName,
+          nsQtyBefore: lot.qty, explicitLotName: lot.lotName,
+          memo: `Sweep reconcile: clear negative lot ${lot.lotName} (+${upBy} lb) in ${tankName || `bin ${binId}`}`,
+          ...link,
+        })
+        legs.push({ itemId, lot: lot.lotName, qtyDelta: upBy, ok: !!r.ok, skipped: r.skipped, error: r.error })
+      }
+    }
+    const positiveNet = round2(g.lots.reduce((s, l) => s + Math.max(0, l.qty), 0))
+
+    if (isCurrent) {
+      // Net the surviving positive lots to the observed weight (down across
+      // lots, or up into a fresh lot when lastWoNumber is known).
+      const delta = round2(desired - positiveNet)
+      if (Math.abs(delta) < currentItemThreshold) {
+        legs.push({ itemId, isCurrent, skipped: 'below-threshold', delta })
+        continue
+      }
+      const r = await submitInventoryAdjustment({
+        binId, itemId, qtyDelta: delta, source, tankName, observedLbs,
+        nsQtyBefore: positiveNet, lastWoNumber,
+        memo: reconcileMemo({ tankName, binId, itemId, isCurrent, desired, before: positiveNet, productIndex }),
+        ...link,
+      })
+      legs.push({ itemId, isCurrent, qtyDelta: delta, ok: !!r.ok, skipped: r.skipped, error: r.error })
+    } else if (positiveNet >= CLEANUP_MIN_LBS) {
+      // Stale product — zero out all its positive lots (FIFO down-adjust).
+      const r = await submitInventoryAdjustment({
+        binId, itemId, qtyDelta: -positiveNet, source, tankName,
+        nsQtyBefore: positiveNet,
+        memo: `Sweep reconcile: clear stale product item ${itemId} (${positiveNet} lb) from ${tankName || `bin ${binId}`}`,
+        ...link,
+      })
+      legs.push({ itemId, isCurrent: false, qtyDelta: -positiveNet, ok: !!r.ok, skipped: r.skipped, error: r.error })
+    }
+  }
+
+  const adjusted = legs.filter(l => l.ok).length
+  const failed = legs.filter(l => l.ok === false && !l.skipped).length
+  return { legs, adjusted, failed }
+}
+
+function reconcileMemo({ tankName, binId, itemId, isCurrent, desired, before, productIndex }) {
+  const where = tankName || `bin ${binId}`
+  if (isCurrent) {
+    return `Sweep reconcile: ${where} item ${itemId} → ${round2(desired)} lb (was ${round2(before)} lb${productIndex != null ? `, idx ${productIndex}` : ''})`
+  }
+  return `Sweep reconcile: ${where} clear item ${itemId} ${round2(before)} → 0 lb`
+}
+
 // Write the audit trail for one adjustment. When auditRowId is set (manual
 // retry of an existing errored/skipped row) we UPDATE that row in place so the
 // review backlog keeps a single record per adjustment across retries, instead
@@ -531,6 +689,7 @@ module.exports = {
   rejectInventoryAdjustment,
   applyShortfallAdjustment,
   applyTargetedLotUpAdjustment,
+  reconcileBinToPhysical,
   resolveLotForBinAdjustment,
   findExistingLotInBin,
   getBinQtyOnHand,
