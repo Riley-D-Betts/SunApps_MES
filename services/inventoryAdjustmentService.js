@@ -88,6 +88,33 @@ async function getBinQtyOnHand(itemId, binId) {
   }
 }
 
+/**
+ * Available (free) qty for (item, bin, location) — on-hand minus what NS has
+ * committed/reserved to open transactions. A bin-only DOWN-adjust can only
+ * remove the AVAILABLE portion; trying to take committed stock is rejected by
+ * NS with "You only have N available." Sums across lots. Falls back to
+ * quantityonhand on older rows where availability is null.
+ */
+async function getBinAvailableQty(itemId, binId) {
+  if (!itemId || !binId) return 0
+  const q = `
+    SELECT SUM(COALESCE(bal.quantityavailable, bal.quantityonhand)) AS qty
+    FROM inventorybalance bal
+    WHERE bal.item = ${Number(itemId)}
+      AND bal.binnumber = ${Number(binId)}
+      AND bal.location = ${NS_LOCATION_ID}
+  `
+  try {
+    const res = await core.netsuitePost('/query/v1/suiteql', { q })
+    const rows = res?.body?.items || res?.items || []
+    if (rows.length === 0) return 0
+    return parseFloat(rows[0].qty) || 0
+  } catch (err) {
+    console.warn(`[InventoryAdjustment] getBinAvailableQty failed for item=${itemId} bin=${binId}:`, err.message.slice(0, 200))
+    return 0
+  }
+}
+
 function pad2(n) { return String(n).padStart(2, '0') }
 
 /**
@@ -348,6 +375,37 @@ async function submitInventoryAdjustment(args) {
       console.warn(`[InventoryAdjustment] (${source}) ${tankName || ''}: clamping down-adjust from ${originalDelta.toFixed(2)} to ${qtyDelta.toFixed(2)} (sum of available lots)`)
     }
     multiLotAllocations = allocations
+  }
+
+  // Bin-only DOWN-adjust: clamp to AVAILABLE. NS won't let an adjustment pull
+  // on-hand below committed/reserved stock — it rejects with "You only have N
+  // available." The committed remainder will be drawn down by the open WO
+  // issues that reserved it, so removing just the free portion now and letting
+  // the rest resolve through normal issue flow is correct. (Lot-tracked already
+  // clamped above via findInventoryAllocations, which uses availability.)
+  if (!lot.tracking?.isLot && qtyDelta < 0) {
+    const available = await getBinAvailableQty(itemId, binId)
+    if (available <= CLEANUP_MIN_LBS) {
+      const reason = `down-adjust requested ${qtyDelta.toFixed(2)} lb but only ${available.toFixed(2)} lb available (rest committed) in bin ${binId}`
+      console.warn(`[InventoryAdjustment] Skipping (${source}) ${tankName || ''}: ${reason}`)
+      statusStore.pushEvent(
+        'inventoryAdjustment.skipped',
+        `${tankName || `bin ${binId}`}: Δ${qtyDelta.toFixed(0)} lb skipped — only ${available.toFixed(0)} lb free (committed)`,
+        { source, tankName, binId, itemId, qtyDelta, reason }
+      )
+      await safeAudit({
+        ...link,
+        source, tankName, binId, itemId, qtyDelta, observedLbs, nsQtyBefore,
+        lotId: null, lotName: null, nsAdjustmentId: null, memo,
+        status: 'skipped', errorMessage: reason,
+      }, auditRowId)
+      return { ok: false, skipped: reason, nsAdjustmentId: null, lotId: null, lotName: null }
+    }
+    if (Math.abs(qtyDelta) > available + 1e-6) {
+      const originalDelta = qtyDelta
+      qtyDelta = -(Math.floor(available * 100) / 100)
+      console.warn(`[InventoryAdjustment] (${source}) ${tankName || ''}: clamping bin-only down-adjust from ${originalDelta.toFixed(2)} to ${qtyDelta.toFixed(2)} (available)`)
+    }
   }
 
   // Item standard cost → line unitcost, so NS doesn't derive a negative one.
