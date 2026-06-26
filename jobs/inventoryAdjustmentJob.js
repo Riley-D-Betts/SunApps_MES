@@ -8,8 +8,10 @@ async function run(historian) {
   try {
     const result = await tankAtRestSweepService.tick(historian)
     lastPollTime = new Date()
-    const ok = result?.adjustments?.length || 0
-    const failed = result?.failures?.length || 0
+    // Count posted ADJUSTMENT LEGS (each reconciled tank fans out into one leg
+    // per item), not the number of tanks touched.
+    const ok = result?.legsAdjusted || 0
+    const failed = result?.legsFailed || 0
     if (ok > 0 || failed > 0) {
       const summary = failed > 0
         ? `Sweep: ${ok} ok, ${failed} failed`

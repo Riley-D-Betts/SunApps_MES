@@ -213,6 +213,48 @@ async function findBinForItem(itemId, preferredBinId = null, neededQty = 0) {
   return String(best.bin_id)
 }
 
+/**
+ * List EVERY (item, lot) balance currently sitting in a bin at NS_LOCATION_ID,
+ * including NEGATIVE balances (so the at-rest sweep can drive them back to 0).
+ * Exactly-zero rows are excluded. Bin-only items come back with lotId/lotName
+ * null. Multiple lots of the same item yield multiple rows.
+ *
+ * Uses quantityonhand (PHYSICAL) — not quantityavailable — because the sweep
+ * reconciles what is bodily in the silo/tank; NS commitments/reservations are
+ * irrelevant to physical reality.
+ *
+ * Returns null on query error so the caller can SKIP the bin (a transient NS
+ * failure must not be read as "bin is empty" and trigger a zero-out).
+ */
+async function getBinContents(binId) {
+  if (!binId) return []
+  const q = `
+    SELECT
+      bal.item                        AS item_id,
+      inv.id                          AS lot_id,
+      inv.inventorynumber             AS lot_name,
+      COALESCE(bal.quantityonhand, 0) AS qty
+    FROM inventorybalance bal
+    LEFT JOIN inventorynumber inv ON inv.id = bal.inventorynumber
+    WHERE bal.binnumber = ${Number(binId)}
+      AND bal.location = ${NS_LOCATION_ID}
+      AND COALESCE(bal.quantityonhand, 0) <> 0
+  `
+  try {
+    const res = await core.netsuitePost('/query/v1/suiteql', { q })
+    const rows = res?.body?.items || res?.items || []
+    return rows.map(r => ({
+      itemId: String(r.item_id),
+      lotId: r.lot_id != null ? String(r.lot_id) : null,
+      lotName: r.lot_name != null ? r.lot_name : null,
+      qty: parseFloat(r.qty) || 0,
+    }))
+  } catch (err) {
+    console.warn(`[NsInventoryLookup] getBinContents failed for bin ${binId}: ${err.message.slice(0, 200)}`)
+    return null
+  }
+}
+
 // FLOOR each lot's assignment qty to 2dp. `a.qty` is the FIFO take, which is
 // `min(remaining, availableInThisLot)` — i.e. always ≤ that lot's NS available.
 // Flooring therefore guarantees the assignment qty never exceeds available;
@@ -362,6 +404,7 @@ module.exports = {
   getItemStandardCost,
   findInventoryAllocations,
   findBinForItem,
+  getBinContents,
   buildAssignmentItems,
   buildComponentDetail,
   anyLotTracked,
