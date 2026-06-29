@@ -10,6 +10,7 @@ const statusStore = require('./statusStore')
 const config = require('../config')
 const db = require('../models')
 const clock = require('../sim/clock')
+const notifyService = require('./notifyService')
 
 function nsErrShort(err) {
   const msg = String(err?.message || '')
@@ -1069,10 +1070,10 @@ async function processWOEnd(data, historian) {
 
   if (wastePercent != null && wastePercent > itemConfig.WASTE_ALERT_THRESHOLD) {
     console.warn(`[SurgeTankMesService] High waste alert: ${wastePercent.toFixed(1)}% on ${tankId}`)
-    await core.sendStagingNotification(
+    await notifyService.sendAlert(
       'MES Surge Tank: High Waste Alert',
       `Batch "${record.productName}" on ${tankId}\nWaste: ${wasteLbs.toFixed(1)} LBS (${wastePercent.toFixed(1)}%) — UHT-leg loss\nIssued ${issuedLbs.toFixed(0)} | Reached surge ${outputLbs.toFixed(0)}\nThreshold: ${itemConfig.WASTE_ALERT_THRESHOLD}%${concurrent ? `\n${concurrentNote.trim()}` : ''}`
-    ).catch(e => console.warn(`[SurgeTankMesService] waste alert send failed: ${e.message}`))
+    )
   }
 
   console.log(`[SurgeTankMesService] Batch "${record.productName}" on ${tankId} closed — issued ${issuedLbs.toFixed(0)} lb, reached ${outputLbs.toFixed(0)} lb, completed ${parseFloat(record.cumulativeCompletedLbs).toFixed(0)} lb, waste ${wasteLbs.toFixed(0)} lb (${wastePercent != null ? wastePercent.toFixed(1) + '%' : 'n/a'})${concurrentNote}`)

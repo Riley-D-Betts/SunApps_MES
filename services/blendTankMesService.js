@@ -10,6 +10,7 @@ const statusStore = require('./statusStore')
 const config = require('../config')
 const db = require('../models')
 const clock = require('../sim/clock')
+const notifyService = require('./notifyService')
 
 // Compact NS error detail for the dashboard event stream — pulls the
 // "detail" string out of the wrapped HTTP-400 body so the user sees the
@@ -46,12 +47,12 @@ async function remediateCostBasisIfNeeded(batch, err) {
       const msg = `${batch.tankId}: item ${assemblyItemId} had no cost basis — posted revaluation @ ${result.unitCost?.toFixed?.(5)}/unit (tranDate ${result.tranDate}). Issues will retry next tick.`
       console.log(`[BlendTankMesService] ${msg}`)
       statusStore.pushEvent('blendTank.costBasisFixed', msg, { tankId: batch.tankId, assemblyItemId, unitCost: result.unitCost })
-      await core.sendStagingNotification('MES: auto-revalued item with no cost basis', msg).catch(() => {})
+      await notifyService.sendAlert('MES: auto-revalued item with no cost basis', msg)
     } else {
       const msg = `${batch.tankId}: item ${assemblyItemId} issues are failing on a missing cost basis and auto-revaluation did NOT run (${result.reason}). Needs manual standard-cost setup in NetSuite.`
       console.warn(`[BlendTankMesService] ${msg}`)
       statusStore.pushEvent('blendTank.costBasisBlocked', msg, { tankId: batch.tankId, assemblyItemId, reason: result.reason })
-      await core.sendStagingNotification('MES: item blocked — no cost basis, manual fix needed', msg).catch(() => {})
+      await notifyService.sendAlert('MES: item blocked — no cost basis, manual fix needed', msg)
     }
   } catch (e) {
     console.error(`[BlendTankMesService] cost-basis remediation for item ${assemblyItemId} failed: ${e.message}`)
@@ -499,7 +500,7 @@ async function processWOStart(data, historian) {
       console.warn(`[BlendTankMesService] ${msg}`)
       await record.update({ status: 'pending_ns', errorMessage: `non-lot assembly ${assemblyItem.id}` })
       statusStore.pushEvent('blendTank.nonLotAssembly', msg, { tankId, productName, assemblyItemId: assemblyItem.id })
-      await core.sendStagingNotification('MES: batch product is not lot-tracked', msg).catch(() => {})
+      await notifyService.sendAlert('MES: batch product is not lot-tracked', msg)
       await db.MesProcessingLog.create({
         eventType: 'blend_tank_wo_create', sourceId: `${tankId}:${productName}`,
         nsTransactionType: 'workOrder', payload: JSON.stringify(data),
@@ -702,10 +703,10 @@ async function processWOEnd(data) {
 
   if (wastePercent != null && wastePercent > itemConfig.WASTE_ALERT_THRESHOLD) {
     console.warn(`[BlendTankMesService] High waste alert: ${wastePercent.toFixed(1)}% on ${tankId}`)
-    await core.sendStagingNotification(
+    await notifyService.sendAlert(
       'MES Blend Tank: High Waste Alert',
       `Batch "${record.productName}" on ${tankId}\nWaste: ${wasteLbs.toFixed(1)} LBS (${wastePercent.toFixed(1)}%)\nIssued ${issuedLbs.toFixed(0)} | Reached tank ${outputLbs.toFixed(0)}\nThreshold: ${itemConfig.WASTE_ALERT_THRESHOLD}%`
-    ).catch(e => console.warn(`[BlendTankMesService] waste alert send failed: ${e.message}`))
+    )
   }
 
   console.log(`[BlendTankMesService] Batch "${record.productName}" on ${tankId} closed — issued ${issuedLbs.toFixed(0)} lb, reached ${outputLbs.toFixed(0)} lb, completed ${parseFloat(record.cumulativeCompletedLbs).toFixed(0)} lb, waste ${wasteLbs.toFixed(0)} lb (${wastePercent != null ? wastePercent.toFixed(1) + '%' : 'n/a'})`)
