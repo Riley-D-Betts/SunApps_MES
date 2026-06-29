@@ -5,6 +5,7 @@ const config = require('../config')
 const db = require('../models')
 const clock = require('../sim/clock')
 const statusStore = require('./statusStore')
+const notifyService = require('./notifyService')
 
 // NS bin id for "SEPARATOR-ADJUSTMENTS" — the scratch bin we stage phantom
 // source-item inventory into to defeat the assemblyUnbuild "largest-other-bin"
@@ -154,7 +155,7 @@ async function processSeparationBatch(data) {
 
   if (wastePercent != null && wastePercent > itemConfig.WASTE_ALERT_THRESHOLD) {
     console.warn(`[MilkMesService] High waste alert: ${wastePercent.toFixed(1)}% (threshold: ${itemConfig.WASTE_ALERT_THRESHOLD}%)`)
-    await core.sendStagingNotification(
+    await notifyService.sendAlert(
       'MES Separation: High Waste Alert',
       `Batch ${batchId} from ${sourceSilo}\nWaste: ${wasteVolume.toFixed(1)} LBS (${wastePercent.toFixed(1)}%)\nThreshold: ${itemConfig.WASTE_ALERT_THRESHOLD}%\nInput: ${inputVolume} | Cream: ${creamVolume} | Skim: ${skimVolume}`
     )
