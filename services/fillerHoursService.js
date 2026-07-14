@@ -11,15 +11,20 @@
  *   unknown  = Historian collection gaps (null disconnect markers)
  *
  * Tag notes (empirically verified against the Historian, SD-655):
- *   - Filler{N}.Filler_State / Filler_Status are NOT reliably collected
- *     (multi-day storage gaps) and their enum meanings are undocumented.
+ *   - Filler{N}.Filler_State / Filler_Status are frozen registers (12 / 2
+ *     through running, CIP, and idle alike) — never use them for state.
  *   - Only Filler 1 has a live machine-level tag set; Fillers 2-6 expose only
  *     stale WO-integration tags, so `filler` defaults to 1.
- *   - Filler{N}.Main_Drive_Current_Speed is delta-stored and reflects the SET
- *     run speed (cartons/min), not instantaneous speed. Reported as
- *     setSpeedCpm so callers can compare actual throughput to capacity.
- *   - Carton counters are historized too sparsely for rate math — derive
- *     effective rate from production records (e.g. NetSuite WOCs) instead.
+ *   - Filler{N}.Main_Drive_Current_Speed reflects the SET run speed
+ *     (cartons/min). Reported as setSpeedCpm for capacity comparison.
+ *   - RETRIEVAL GOTCHA: ProcessValues surfaces only sparse rows for many
+ *     analog tags (and interpolates window boundaries), but AnalogSummary
+ *     exposes the full underlying storage — the carton master counters are
+ *     stored at ~1 Hz. Counter deltas MUST be read via AnalogSummary.
+ *   - L{1,2}_Carton_Count_Master are lifetime cumulative per-SIDE counters
+ *     (Filler 1's two sides, both report Line 1); their sum matches
+ *     Carton_Count_Total's increments. Never reset, so window deltas are
+ *     exact: cartons = (last - first) per side, summed.
  */
 
 const stateTags = (filler) => ({
@@ -30,6 +35,23 @@ const stateTags = (filler) => ({
 })
 
 const speedTag = (filler) => `Filler${filler}.Main_Drive_Current_Speed`
+const masterCountTags = (filler) => [
+  `Filler${filler}.L1_Carton_Count_Master`,
+  `Filler${filler}.L2_Carton_Count_Master`,
+]
+
+// First/Last of a tag over [since, until] via a single-bucket AnalogSummary.
+// Unlike ProcessValues, this reads the full underlying storage (no sparse-row
+// illusion, no boundary interpolation).
+async function analogWindowFirstLast(historian, fqn, since, until) {
+  const resolution = Math.max(until.getTime() - since.getTime(), 1000)
+  const filter = `FQN eq '${fqn}' and StartDateTime ge ${since.toISOString()} and EndDateTime le ${until.toISOString()}`
+  const url = `${historian.baseUrl}/AnalogSummary?$filter=${encodeURIComponent(filter)}&Resolution=${resolution}`
+  const data = await historian._get(url, { verbose: false })
+  const row = data.value?.[0]
+  if (!row || row.First == null || row.Last == null) return null
+  return { first: Number(row.First), last: Number(row.Last), count: row.Count ?? null }
+}
 
 // Value of a delta-stored (step) series at time t: last sample at or before t.
 // The Historian injects a boundary row at the window start, so `null` here
@@ -116,6 +138,28 @@ async function getFillerHours(historian, { filler = 1, since, until }) {
     console.warn(`[FillerHours] set-speed lookup failed for Filler${filler}:`, err.message)
   }
 
+  // Cartons produced: exact window deltas of the lifetime per-side master
+  // counters (both sides belong to the same report line).
+  let cartons = null
+  let cartonsBySide = null
+  try {
+    const sides = await Promise.all(
+      masterCountTags(filler).map(fqn => analogWindowFirstLast(historian, fqn, since, until))
+    )
+    if (sides.every(Boolean)) {
+      cartonsBySide = sides.map(s => Math.round(s.last - s.first))
+      cartons = cartonsBySide.reduce((a, b) => a + b, 0)
+    }
+  } catch (err) {
+    console.warn(`[FillerHours] carton-count lookup failed for Filler${filler}:`, err.message)
+  }
+
+  // True effective rate over machine run time, vs setSpeedCpm capacity.
+  const runtimeMin = totalsMs.runtime / 60000
+  const effectiveCpm = cartons !== null && runtimeMin > 0
+    ? Math.round(cartons / runtimeMin * 10) / 10
+    : null
+
   return {
     filler,
     since: since.toISOString(),
@@ -124,6 +168,9 @@ async function getFillerHours(historian, { filler = 1, since, until }) {
     hours,
     pct,
     setSpeedCpm,
+    cartons,
+    cartonsBySide,
+    effectiveCpm,
     segments,
   }
 }

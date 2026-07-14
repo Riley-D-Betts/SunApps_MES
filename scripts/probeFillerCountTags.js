@@ -3,6 +3,10 @@
  * Probe historization density of every plausible carton-count source on
  * Filler1 (counters + cap photo eye) over the last 7 days, to find one
  * dense enough for throughput/rate math.
+ *
+ * SUPERSEDED CONCLUSION: this probe reads ProcessValues, which hides dense
+ * cyclic storage for analog tags. The counters ARE stored (~1 Hz) and are
+ * readable via AnalogSummary — see probeFillerAnalogSummaryDensity.js.
  */
 
 const path = require('path')

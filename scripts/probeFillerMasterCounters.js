@@ -5,6 +5,11 @@
  * the last 30 days to see storage cadence, monotonicity, and staleness, and
  * compute the Jul 6-12 report-week delta for cross-checking against NetSuite
  * (Line 1 = 31,539 cases that week).
+ *
+ * SUPERSEDED CONCLUSION: ProcessValues shows only ~monthly rows for these
+ * tags, but that is a retrieval artifact — the counters are stored at ~1 Hz
+ * and fully readable via AnalogSummary. See
+ * probeFillerAnalogSummaryDensity.js and services/fillerHoursService.js.
  */
 
 const path = require('path')
