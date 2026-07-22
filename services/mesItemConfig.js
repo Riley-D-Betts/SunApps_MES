@@ -13,6 +13,7 @@ const _resolvedItemCache = {}
 
 const CREAM_ITEM_CONV = { id: 5480, name: 'Raw Conventional Cream' }
 const CREAM_ITEM_ORG  = { id: 5483, name: 'Raw Organic Cream' }
+const CREAM_ITEM_A2   = { id: 8365, name: 'Raw Organic A2 Cream' }
 const SKIM_ITEM_CONV  = { id: 8163, name: 'Raw Conventional 0% - Skim' }
 const SKIM_ITEM_ORG   = { id: 5482, name: 'Raw Organic 0%' }
 
@@ -63,11 +64,16 @@ const SEPARATION_BOM_MAP = {
   '5404_8': 348,  // Organic → 2%     (Raw Organic Milk to 2% and cream)
   '5404_9': 347,  // Organic → 1%     (Raw Organic Milk to 1% and cream)
   '5404_10': 252, // Organic → Fat Free / Skim (Raw Organic Milk to skim and cream)
-  // A2 separator outputs — HMI indices 22-25 only (no 3.5% or 4% in SCADA).
-  // BOM 253 currently produces regular org cream (5483), not A2 cream (8365) — flag for NS fix.
-  '5403_22': 379, // Organic A2 → 3.25% (Raw Organic A2 Milk to A2 3.25% and Cream)
-  '5403_23': 378, // Organic A2 → 2%    (Raw Organic A2 Milk to A2 2% and Cream)
-  '5403_24': 377, // Organic A2 → 1%    (Raw Organic A2 Milk to A2 1% and Cream)
+  // A2 separator outputs — HMI indices 22-25 only (no 3.5% or 4% in SCADA yet).
+  // Dedicated separation BOMs on assembly 5403 created 2026-07-22 (previously
+  // pointed at BOMs 377-379, which are the fat-level items' BUILD BOMs and
+  // cannot unbuild 5403). All output A2 cream (8365). NS BOMs 426 (→A2 3.5%)
+  // and 427 (→A2 4%) also exist — when SCADA gains A2 3.5/4 product indices,
+  // add '5403_<idx>': 426 / 427 entries here and the matching
+  // PRODUCT_INDEX_ITEM_MAP rows (8369 / 8370).
+  '5403_22': 425, // Organic A2 → 3.25% (Raw Organic A2 Milk to A2 3.25% and Cream)
+  '5403_23': 424, // Organic A2 → 2%    (Raw Organic A2 Milk to A2 2% and Cream)
+  '5403_24': 423, // Organic A2 → 1%    (Raw Organic A2 Milk to A2 1% and Cream)
   '5403_25': 253, // Organic A2 → Fat Free / Skim (Raw Organic A2 Milk to A2 Skim and Cream)
 }
 
@@ -256,9 +262,12 @@ const RAW_FG_TO_FG_MAP = {
   8352: 2889,  // Raw DG Half & Half → DG Half & Half
   8351: 2790,  // Raw DG Heavy Cream → DG Heavy Cream
   8341: 3926,  // Raw Organic Milk 0% Lac Free → Organic Milk 0% Lac Free
-  8815: 8401,  // Raw Aldi 2% Organic Milk → Aldi 2% Organic Milk
-  8816: 8406,  // Raw Aldi 3.25% Organic Whole Milk → Aldi 3.25% Organic Whole Milk
-  8817: 8409,  // Raw Aldi 3.25% Organic Whole Milk w/ DHA → Aldi 3.25% Organic Whole Milk w/ DHA
+  // NOTE: Aldi raw items 8815-8817 do not exist in prod NS yet (sandbox ids) —
+  // entries are inert until the Raw Aldi batch items are created. FG values
+  // corrected 2026-07-22: 8406/8409 were the 6-Pack CASE items, not the milks.
+  8815: 8401,  // Raw Aldi 2% Organic Milk → Aldi 2% Organic milk
+  8816: 8404,  // Raw Aldi 3.25% Organic Whole Milk → Aldi 3.25% Organic Milk
+  8817: 8407,  // Raw Aldi 3.25% Organic Whole Milk w/ DHA → Aldi 3.25% Organic Milk w/DHA
   8464: 7477,  // Raw Horizon Organic Half & Half → Horizon Organic Half & Half (prod id 8464; sandbox was 8812)
   8918: 8271,  // Raw DFI Marcels Chocolate 1% Milk → DFI Marcels Chocolate 1% Milk
 }
@@ -298,11 +307,13 @@ function getItem(mesItemCode, sourceSilo) {
 // no fat-level choice for cream, so the cream silo's productIndex on the HMI
 // is not authoritative (and is often stale, e.g. CSilo3 reading idx 11 / conv
 // while fed by organic source). Always derive from source instead.
-// 5404 = Raw Organic, 5403 = Raw Organic A2, 5406 = Grade A A2/A2 → organic cream.
-// A2 cream item 8365 exists in NS but BOM 253 still produces 5483; mirror that.
+// 5404 = Raw Organic → organic cream. 5403 = Raw Organic A2, 5406 = Grade A
+// A2/A2 → A2 cream (8365) — the A2 separation BOMs (253, 423-425) output 8365
+// as of 2026-07-22.
 function getCreamItemForSource(sourceItemId) {
   const id = Number(sourceItemId)
-  if (id === 5404 || id === 5403 || id === 5406) return CREAM_ITEM_ORG
+  if (id === 5403 || id === 5406) return CREAM_ITEM_A2
+  if (id === 5404) return CREAM_ITEM_ORG
   return CREAM_ITEM_CONV
 }
 
@@ -362,6 +373,7 @@ module.exports = {
   SKIM_ITEM,
   CREAM_ITEM_CONV,
   CREAM_ITEM_ORG,
+  CREAM_ITEM_A2,
   SKIM_ITEM_CONV,
   SKIM_ITEM_ORG,
   WASTE_ALERT_THRESHOLD,
