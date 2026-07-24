@@ -22,6 +22,7 @@ const liveStatusRoutes = require('./routes/liveStatusRoutes')
 const fgPairingRoutes = require('./routes/fgPairingRoutes')
 const devRoutes = require('./routes/devRoutes')
 const analyticsRoutes = require('./routes/analyticsRoutes')
+const bomAdminRoutes = require('./routes/bomAdminRoutes')
 const fillerHoursRoutes = require('./routes/fillerHoursRoutes')
 const clock = require('./sim/clock')
 
@@ -193,6 +194,7 @@ app.use('/api/mes/fg-pairings', fgPairingRoutes)
 app.use('/api/milk', milkRoutes)
 app.use('/api/mes/dev/replay', devRoutes)
 app.use('/api/mes/analytics', analyticsRoutes)
+app.use('/api/mes/bom-admin', bomAdminRoutes)
 app.use('/api/mes/filler-hours', fillerHoursRoutes)
 
 app.listen(config.PORT, () => {
