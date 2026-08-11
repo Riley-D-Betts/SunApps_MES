@@ -10,9 +10,46 @@ const pollStore = require('../services/pollStore')
  */
 
 /**
- * GET /api/historian/search?q=keyword&limit=100
- * Search for tags whose FQN contains the query string.
- * Queries the Historian Tags entity directly.
+ * @openapi
+ * /api/historian/search:
+ *   get:
+ *     tags: [Historian]
+ *     summary: Search tags by name
+ *     description: >
+ *       Substring search over the Historian `Tags` entity — returns every tag whose
+ *       fully-qualified name contains `q`. Follows OData `@odata.nextLink` pages until
+ *       `limit` is reached. The install carries ~23,000 tags, so always pass a narrowing `q`.
+ *     parameters:
+ *       - in: query
+ *         name: q
+ *         required: true
+ *         schema: { type: string }
+ *         description: Substring to match against the tag FQN, e.g. `MSILO` or `Separator.`.
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 100, maximum: 10000 }
+ *         description: Maximum tags to return (clamped to 10000).
+ *     responses:
+ *       200:
+ *         description: Matching tags.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 query: { type: string }
+ *                 count: { type: integer }
+ *                 tags:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       fqn:         { type: string, example: MSILO1.GALLONS }
+ *                       tagType:     { type: string, enum: [Analog, Discrete, String] }
+ *                       description: { type: string }
+ *                       engUnit:     { type: string }
+ *       400: { description: Missing `q` query param. }
+ *       500: { description: Historian query failed. }
  */
 router.get('/search', async (req, res) => {
   try {
@@ -45,9 +82,34 @@ router.get('/search', async (req, res) => {
 })
 
 /**
- * GET /api/historian/tag/:fqn
- * Get the current value of a single tag.
- * Example: /api/historian/tag/ColdMilkSeparator1.CurrentWO
+ * @openapi
+ * /api/historian/tag/{fqn}:
+ *   get:
+ *     tags: [Historian]
+ *     summary: Current value of one tag
+ *     description: Reads the tag's latest archived value from the Historian `ProcessValues` entity.
+ *     parameters:
+ *       - in: path
+ *         name: fqn
+ *         required: true
+ *         schema: { type: string }
+ *         description: Fully-qualified tag name.
+ *         example: ColdMilkSeparator1.CurrentWO
+ *     responses:
+ *       200:
+ *         description: The current value.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 FQN:        { type: string }
+ *                 DateTime:   { type: string, format: date-time }
+ *                 Value:      { type: number, nullable: true }
+ *                 Text:       { type: string, nullable: true }
+ *                 OpcQuality: { type: integer, description: '192 = good.' }
+ *       404: { description: No value available for that tag. }
+ *       500: { description: Historian query failed. }
  */
 router.get('/tag/:fqn', async (req, res) => {
   try {
@@ -63,8 +125,43 @@ router.get('/tag/:fqn', async (req, res) => {
 })
 
 /**
- * GET /api/historian/tags?fqn=Tag1&fqn=Tag2
- * Get current values for multiple tags at once.
+ * @openapi
+ * /api/historian/tags:
+ *   get:
+ *     tags: [Historian]
+ *     summary: Current values for several tags
+ *     description: >
+ *       Reads the current value of each requested tag in parallel. Every result is also
+ *       written into the in-memory poll store, so repeated calls build up a queryable
+ *       series retrievable via `/api/historian/polled-history/{fqn}` — useful for tags the
+ *       Historian archives too infrequently to trend.
+ *     parameters:
+ *       - in: query
+ *         name: fqn
+ *         required: true
+ *         style: form
+ *         explode: true
+ *         schema:
+ *           type: array
+ *           items: { type: string }
+ *         description: Repeat once per tag, e.g. `?fqn=MSILO1.GALLONS&fqn=MSILO2.GALLONS`.
+ *     responses:
+ *       200:
+ *         description: One entry per requested tag (`value` is null when unavailable).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 tags:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       fqn:   { type: string }
+ *                       value: { type: object, nullable: true }
+ *       400: { description: No `fqn` query param supplied. }
+ *       500: { description: Historian query failed. }
  */
 router.get('/tags', async (req, res) => {
   try {
@@ -91,11 +188,62 @@ router.get('/tags', async (req, res) => {
 })
 
 /**
- * GET /api/historian/history/:fqn?since=ISO&until=ISO&resolution=raw|minutely|hourly|daily
- * Get historical values for a tag within a time range.
- *
- * For non-raw resolutions, tries AnalogSummary first (native Historian aggregation).
- * Falls back to ProcessValues + server-side step resampling if AnalogSummary fails.
+ * @openapi
+ * /api/historian/history/{fqn}:
+ *   get:
+ *     tags: [Historian]
+ *     summary: Historical values for a tag
+ *     description: >
+ *       Trend data for one tag over a time window. For non-raw resolutions the route first
+ *       tries `AnalogSummary` (native Historian aggregation); if that errors or returns no
+ *       rows it falls back to raw `ProcessValues` and step-resamples them server-side,
+ *       carrying each last-known value forward and marking the synthesised points
+ *       `interpolated: true`. The `source` field in the response says which path was taken.
+ *       Aggregation requires `since` — without it the request is always served raw.
+ *       Results are capped at 100,000 rows.
+ *     parameters:
+ *       - in: path
+ *         name: fqn
+ *         required: true
+ *         schema: { type: string }
+ *         description: Fully-qualified tag name.
+ *         example: MSILO1.GALLONS
+ *       - in: query
+ *         name: since
+ *         schema: { type: string, format: date-time }
+ *         description: Window start (ISO 8601). Required for any non-raw resolution.
+ *       - in: query
+ *         name: until
+ *         schema: { type: string, format: date-time }
+ *         description: Window end (ISO 8601). Defaults to now.
+ *       - in: query
+ *         name: resolution
+ *         schema:
+ *           type: string
+ *           enum: [raw, minutely, hourly, daily]
+ *           default: raw
+ *         description: Aggregation bucket size.
+ *     responses:
+ *       200:
+ *         description: The series, plus a `_debug` block listing each OData page fetched.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 fqn:        { type: string }
+ *                 resolution: { type: string }
+ *                 source:     { type: string, enum: [AnalogSummary, ProcessValues] }
+ *                 count:      { type: integer }
+ *                 values:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     description: >
+ *                       AnalogSummary rows carry Average/Minimum/Maximum/Count and `_summary: true`;
+ *                       resampled ProcessValues rows carry `interpolated: true`.
+ *                 _debug:     { type: object }
+ *       500: { description: Historian query failed. }
  */
 router.get('/history/:fqn', async (req, res) => {
   try {
@@ -211,9 +359,32 @@ router.get('/history/:fqn', async (req, res) => {
 })
 
 /**
- * GET /api/historian/batches?since=ISO
- * Get separator batches since a timestamp (same as the poller uses).
- * Defaults to last 24 hours.
+ * @openapi
+ * /api/historian/batches:
+ *   get:
+ *     tags: [Historian]
+ *     summary: Separator batches from the historian
+ *     description: >
+ *       Runs the same separator-batch extraction the separation cron job uses, straight
+ *       against the historian. Read-only — unlike the cron job this does not persist
+ *       anything or post to NetSuite, so it is safe for ad-hoc inspection.
+ *     parameters:
+ *       - in: query
+ *         name: since
+ *         schema: { type: string, format: date-time }
+ *         description: Window start (ISO 8601). Defaults to 24 hours ago.
+ *     responses:
+ *       200:
+ *         description: Batches detected in the window.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 count:   { type: integer }
+ *                 since:   { type: string, format: date-time }
+ *                 batches: { type: array, items: { type: object } }
+ *       500: { description: Historian query failed. }
  */
 router.get('/batches', async (req, res) => {
   try {
@@ -231,9 +402,44 @@ router.get('/batches', async (req, res) => {
 })
 
 /**
- * GET /api/historian/polled-history/:fqn?since=ISO&until=ISO
- * Return tag values that were captured by live polling (via /tags endpoint).
- * This is a supplement to the Historian archive for tags with low archive frequency.
+ * @openapi
+ * /api/historian/polled-history/{fqn}:
+ *   get:
+ *     tags: [Historian]
+ *     summary: History captured by live polling
+ *     description: >
+ *       Returns values for a tag from the in-memory poll store rather than the Historian
+ *       archive. The store is filled by calls to `/api/historian/tags`, which supplements
+ *       tags the Historian archives too infrequently to trend usefully. The store is
+ *       process-local and non-durable — it is empty after a restart and is cleared by
+ *       the replay reset.
+ *     parameters:
+ *       - in: path
+ *         name: fqn
+ *         required: true
+ *         schema: { type: string }
+ *         description: Fully-qualified tag name.
+ *       - in: query
+ *         name: since
+ *         schema: { type: string, format: date-time }
+ *         description: Window start (ISO 8601). Omit for everything held.
+ *       - in: query
+ *         name: until
+ *         schema: { type: string, format: date-time }
+ *         description: Window end (ISO 8601).
+ *     responses:
+ *       200:
+ *         description: Polled values (empty if the tag was never polled).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 fqn:    { type: string }
+ *                 source: { type: string, example: poll-store }
+ *                 count:  { type: integer }
+ *                 values: { type: array, items: { type: object } }
+ *       500: { description: Poll store query failed. }
  */
 router.get('/polled-history/:fqn', (req, res) => {
   try {
@@ -250,17 +456,57 @@ router.get('/polled-history/:fqn', (req, res) => {
 })
 
 /**
- * GET /api/historian/poll-store/stats
- * Return current poll store statistics (FQN → point count).
+ * @openapi
+ * /api/historian/poll-store/stats:
+ *   get:
+ *     tags: [Historian]
+ *     summary: Poll store statistics
+ *     description: Lists every tag currently held in the in-memory poll store and how many points each has.
+ *     responses:
+ *       200:
+ *         description: Poll store contents.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 fqns:   { type: array, items: { type: string } }
+ *                 counts: { type: object, additionalProperties: { type: integer }, description: 'FQN → point count.' }
  */
 router.get('/poll-store/stats', (req, res) => {
   res.json({ fqns: pollStore.listFqns(), counts: pollStore.stats() })
 })
 
 /**
- * GET /api/historian/tag-detail/:fqn
- * Full tag metadata from /Tags + extended properties.
- * IntegralDivisor, TagType, EngUnit, AcquisitionType, etc.
+ * @openapi
+ * /api/historian/tag-detail/{fqn}:
+ *   get:
+ *     tags: [Historian]
+ *     summary: Full metadata for one tag
+ *     description: >
+ *       Everything the Historian knows about a tag — the `Tags` row (TagType, EngUnit,
+ *       min/max, interpolation type, source) plus its extended properties. The extended
+ *       properties lookup is best-effort: `TagExtendedProperties` 404s on some Historian
+ *       installs, in which case `extendedProps` comes back empty rather than failing.
+ *     parameters:
+ *       - in: path
+ *         name: fqn
+ *         required: true
+ *         schema: { type: string }
+ *         description: Fully-qualified tag name.
+ *     responses:
+ *       200:
+ *         description: Tag metadata.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 fqn:           { type: string }
+ *                 tag:           { type: object }
+ *                 extendedProps: { type: array, items: { type: object } }
+ *       404: { description: Tag not found. }
+ *       500: { description: Historian query failed. }
  */
 router.get('/tag-detail/:fqn', async (req, res) => {
   try {
@@ -291,8 +537,51 @@ router.get('/tag-detail/:fqn', async (req, res) => {
 })
 
 /**
- * GET /api/historian/analog-summary/:fqn?since=ISO&until=ISO&resolution=ms
- * Full AnalogSummary — returns Average, Min, Max, StdDev, Integral, Count per interval.
+ * @openapi
+ * /api/historian/analog-summary/{fqn}:
+ *   get:
+ *     tags: [Historian]
+ *     summary: Statistical summary for an analog tag
+ *     description: >
+ *       Raw `AnalogSummary` rows for an analog tag — First/Last, Minimum/Maximum with their
+ *       timestamps, Average, StdDev, Integral, Count and PercentGood per interval. Unlike
+ *       `/history/{fqn}` this returns the Historian's rows untouched, with no normalisation
+ *       or ProcessValues fallback. Results are capped at 100,000 rows.
+ *     parameters:
+ *       - in: path
+ *         name: fqn
+ *         required: true
+ *         schema: { type: string }
+ *         description: Fully-qualified tag name of an analog tag.
+ *         example: MSILO1.GALLONS
+ *       - in: query
+ *         name: since
+ *         schema: { type: string, format: date-time }
+ *         description: Window start (ISO 8601). Defaults to 24 hours ago.
+ *       - in: query
+ *         name: until
+ *         schema: { type: string, format: date-time }
+ *         description: Window end (ISO 8601). Defaults to now.
+ *       - in: query
+ *         name: resolution
+ *         schema: { type: integer, default: 3600000 }
+ *         description: Interval size in MILLISECONDS (not a keyword). Default 3600000 = 1 hour.
+ *     responses:
+ *       200:
+ *         description: Summary rows.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 fqn:        { type: string }
+ *                 since:      { type: string, format: date-time }
+ *                 until:      { type: string, format: date-time }
+ *                 resolution: { type: integer }
+ *                 count:      { type: integer }
+ *                 values:     { type: array, items: { type: object } }
+ *                 _debug:     { type: object }
+ *       500: { description: Historian query failed. }
  */
 router.get('/analog-summary/:fqn', async (req, res) => {
   try {
@@ -323,8 +612,50 @@ router.get('/analog-summary/:fqn', async (req, res) => {
 })
 
 /**
- * GET /api/historian/state-summary/:fqn?since=ISO&until=ISO&resolution=ms
- * StateSummary — time-in-state statistics for discrete/string tags.
+ * @openapi
+ * /api/historian/state-summary/{fqn}:
+ *   get:
+ *     tags: [Historian]
+ *     summary: Time-in-state summary for a discrete tag
+ *     description: >
+ *       Raw `StateSummary` rows — how long a discrete or string tag spent in each state per
+ *       interval. This is the primitive behind the filler-hours report. Results are capped
+ *       at 100,000 rows.
+ *     parameters:
+ *       - in: path
+ *         name: fqn
+ *         required: true
+ *         schema: { type: string }
+ *         description: Fully-qualified tag name of a discrete or string tag.
+ *         example: Separator.ProcessActive
+ *       - in: query
+ *         name: since
+ *         schema: { type: string, format: date-time }
+ *         description: Window start (ISO 8601). Defaults to 24 hours ago.
+ *       - in: query
+ *         name: until
+ *         schema: { type: string, format: date-time }
+ *         description: Window end (ISO 8601). Defaults to now.
+ *       - in: query
+ *         name: resolution
+ *         schema: { type: integer, default: 3600000 }
+ *         description: Interval size in MILLISECONDS. Default 3600000 = 1 hour.
+ *     responses:
+ *       200:
+ *         description: State summary rows.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 fqn:        { type: string }
+ *                 since:      { type: string, format: date-time }
+ *                 until:      { type: string, format: date-time }
+ *                 resolution: { type: integer }
+ *                 count:      { type: integer }
+ *                 values:     { type: array, items: { type: object } }
+ *                 _debug:     { type: object }
+ *       500: { description: Historian query failed. }
  */
 router.get('/state-summary/:fqn', async (req, res) => {
   try {
@@ -355,8 +686,47 @@ router.get('/state-summary/:fqn', async (req, res) => {
 })
 
 /**
- * GET /api/historian/events?since=ISO&until=ISO&type=&source=&limit=500
- * Query alarm/event history.
+ * @openapi
+ * /api/historian/events:
+ *   get:
+ *     tags: [Historian]
+ *     summary: Alarm and event history
+ *     description: Queries the Historian `Events` entity, newest first, with optional type and source filters.
+ *     parameters:
+ *       - in: query
+ *         name: since
+ *         schema: { type: string, format: date-time }
+ *         description: Window start (ISO 8601, exclusive). Defaults to 24 hours ago.
+ *       - in: query
+ *         name: until
+ *         schema: { type: string, format: date-time }
+ *         description: Window end (ISO 8601, exclusive). Omit for no upper bound.
+ *       - in: query
+ *         name: type
+ *         schema: { type: string }
+ *         description: Exact event type match.
+ *         example: Alarm.Set
+ *       - in: query
+ *         name: source
+ *         schema: { type: string }
+ *         description: Exact `Source_Name` match.
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 500, maximum: 10000 }
+ *         description: Maximum events to return (clamped to 10000).
+ *     responses:
+ *       200:
+ *         description: Events, ordered by EventTime descending.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 since:  { type: string, format: date-time }
+ *                 count:  { type: integer }
+ *                 events: { type: array, items: { type: object } }
+ *                 _debug: { type: object }
+ *       500: { description: Historian query failed. }
  */
 router.get('/events', async (req, res) => {
   try {
@@ -394,8 +764,23 @@ router.get('/events', async (req, res) => {
 })
 
 /**
- * GET /api/historian/tag-groups
- * List all data sources (TagGroups).
+ * @openapi
+ * /api/historian/tag-groups:
+ *   get:
+ *     tags: [Historian]
+ *     summary: List tag groups
+ *     description: Returns the Historian's hierarchical tag grouping (data sources) — useful for discovering what equipment exists.
+ *     responses:
+ *       200:
+ *         description: Tag groups.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 count:  { type: integer }
+ *                 groups: { type: array, items: { type: object } }
+ *       500: { description: Historian query failed. }
  */
 router.get('/tag-groups', async (req, res) => {
   try {
@@ -409,8 +794,23 @@ router.get('/tag-groups', async (req, res) => {
 })
 
 /**
- * GET /api/historian/tag-properties
- * List all tag property names defined on this Historian install.
+ * @openapi
+ * /api/historian/tag-properties:
+ *   get:
+ *     tags: [Historian]
+ *     summary: List tag property names
+ *     description: Every tag property name defined on this Historian install.
+ *     responses:
+ *       200:
+ *         description: Property names.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 count:      { type: integer }
+ *                 properties: { type: array, items: { type: object } }
+ *       500: { description: Historian query failed. }
  */
 router.get('/tag-properties', async (req, res) => {
   try {
@@ -424,8 +824,23 @@ router.get('/tag-properties', async (req, res) => {
 })
 
 /**
- * GET /api/historian/system-params
- * List Historian system parameters (on-premises only).
+ * @openapi
+ * /api/historian/system-params:
+ *   get:
+ *     tags: [Historian]
+ *     summary: List Historian system parameters
+ *     description: Historian system configuration parameters. On-premises installs only — cloud Historian does not expose this entity.
+ *     responses:
+ *       200:
+ *         description: System parameters.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 count:  { type: integer }
+ *                 params: { type: array, items: { type: object } }
+ *       500: { description: Historian query failed, or the entity is unavailable on this install. }
  */
 router.get('/system-params', async (req, res) => {
   try {
