@@ -56,6 +56,31 @@ function buildStatus() {
   }
 }
 
+/**
+ * @openapi
+ * /api/mes/dev/replay/status:
+ *   get:
+ *     tags: [Replay]
+ *     summary: Replay mode status
+ *     description: >
+ *       Full replay configuration plus live sim-clock state — what the UI banner reads to
+ *       show whether the service is running against the real historian or replaying history.
+ *     responses:
+ *       200:
+ *         description: Current replay config and clock.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 replayMode:  { type: boolean, description: True when replaying historical data through the sim clock. }
+ *                 simStart:    { type: string, format: date-time, nullable: true, description: Simulated wall-clock start. }
+ *                 speedup:     { type: number, description: Sim clock multiplier — 60 means one simulated hour per real minute. }
+ *                 replayCrons: { type: object, description: Cron expressions used while replay is on. }
+ *                 clock:       { type: object, description: Live sim clock state (current sim time, paused flag). }
+ *                 updatedAt:   { type: string, format: date-time }
+ *       500: { description: Failed to read status. }
+ */
 router.get('/status', (req, res) => {
   try {
     res.json(buildStatus())
@@ -64,6 +89,35 @@ router.get('/status', (req, res) => {
   }
 })
 
+/**
+ * @openapi
+ * /api/mes/dev/replay/enable:
+ *   post:
+ *     tags: [Replay]
+ *     summary: Turn on replay mode
+ *     description: >
+ *       Switches the service to the historical provider and starts the sim clock, so the
+ *       cron jobs replay past plant activity instead of polling live. All in-memory job
+ *       state is reset on the switch; DB rows are left alone. The body may update
+ *       simStart / speedup / replayCrons at the same time.
+ *
+ *
+ *       Note this only changes where data is READ from — jobs still post to whatever
+ *       NetSuite account is configured, so replaying against a production account will
+ *       create real transactions.
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               simStart:    { type: string, format: date-time, description: Point in history to start replaying from. }
+ *               speedup:     { type: number, description: Sim clock multiplier. }
+ *               replayCrons: { type: object, description: Cron expressions to use while replaying. }
+ *     responses:
+ *       200: { description: Replay enabled — returns the new status. }
+ *       400: { description: Invalid settings. }
+ */
 router.post('/enable', async (req, res) => {
   try {
     const patch = { replayMode: true }
@@ -77,6 +131,20 @@ router.post('/enable', async (req, res) => {
   }
 })
 
+/**
+ * @openapi
+ * /api/mes/dev/replay/disable:
+ *   post:
+ *     tags: [Replay]
+ *     summary: Turn off replay mode
+ *     description: >
+ *       Returns the service to its base provider (the `HISTORIAN_PROVIDER` env value, or
+ *       `mock` when unset), restores the env cron schedule, and stops the sim clock.
+ *       In-memory job state is reset on the switch; DB rows are left alone.
+ *     responses:
+ *       200: { description: Replay disabled — returns the new status. }
+ *       400: { description: Failed to disable. }
+ */
 router.post('/disable', async (req, res) => {
   try {
     await runtimeConfigService.update({ replayMode: false })
@@ -86,6 +154,30 @@ router.post('/disable', async (req, res) => {
   }
 })
 
+/**
+ * @openapi
+ * /api/mes/dev/replay/config:
+ *   post:
+ *     tags: [Replay]
+ *     summary: Update replay settings
+ *     description: >
+ *       Updates simStart / speedup / replayCrons without toggling replay mode. Changes apply
+ *       live if replay is currently on. At least one setting must be supplied.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             minProperties: 1
+ *             properties:
+ *               simStart:    { type: string, format: date-time }
+ *               speedup:     { type: number }
+ *               replayCrons: { type: object }
+ *     responses:
+ *       200: { description: Settings updated — returns the new status. }
+ *       400: { description: No settings provided, or the values were invalid. }
+ */
 router.post('/config', async (req, res) => {
   try {
     const patch = {}
@@ -100,16 +192,71 @@ router.post('/config', async (req, res) => {
   }
 })
 
+/**
+ * @openapi
+ * /api/mes/dev/replay/pause:
+ *   post:
+ *     tags: [Replay]
+ *     summary: Pause the sim clock
+ *     description: Freezes simulated time. Cron jobs keep firing but see a stationary clock, so replay stops advancing.
+ *     responses:
+ *       200: { description: Clock paused — returns the current status. }
+ */
 router.post('/pause', (req, res) => {
   clock.pause()
   res.json(buildStatus())
 })
 
+/**
+ * @openapi
+ * /api/mes/dev/replay/resume:
+ *   post:
+ *     tags: [Replay]
+ *     summary: Resume the sim clock
+ *     description: Unfreezes simulated time after a pause.
+ *     responses:
+ *       200: { description: Clock resumed — returns the current status. }
+ */
 router.post('/resume', (req, res) => {
   clock.resume()
   res.json(buildStatus())
 })
 
+/**
+ * @openapi
+ * /api/mes/dev/replay/reset:
+ *   post:
+ *     tags: [Replay]
+ *     summary: Reset all replay state (DESTRUCTIVE)
+ *     description: >
+ *       Wipes the service back to a clean slate for a fresh replay run. In order it rolls
+ *       the sim clock back to `simStart`, clears every job's in-memory state and the status
+ *       and poll stores, DELETES ALL ROWS from the MES batch tables (blend tank batches and
+ *       inflows, pipe and surge issue states, surge tank batches, separation batches, bulk
+ *       milk runs, inventory adjustments, the processing log, and FG input pairings),
+ *       re-seeds the canonical FG input pairings, and then pm2-restarts the process so all
+ *       state rehydrates from the emptied tables.
+ *
+ *
+ *       The response is sent BEFORE the restart, so a 200 means the truncation succeeded
+ *       and the restart was scheduled — not that the service is back up. The restart is
+ *       best-effort: outside pm2 it just logs a failure.
+ *
+ *
+ *       This deletes production MES history if pointed at a production database. There is
+ *       no confirmation parameter and no authentication in front of it.
+ *     responses:
+ *       200:
+ *         description: Tables cleared and a pm2 restart scheduled.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 replayMode: { type: boolean }
+ *                 restarting: { type: boolean, example: true }
+ *       500: { description: Reset failed before the response was sent. }
+ */
 router.post('/reset', async (req, res) => {
   try {
     // 1. Roll sim clock back to its persisted start.

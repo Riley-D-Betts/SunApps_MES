@@ -1,0 +1,3715 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "SunApps MES",
+    "version": "1.0.8",
+    "description": "Plant-floor MES service for the IdaMilk creamery. Cron jobs poll the AVEVA Historian for separator batches, bulk milk intake, blend tanks, surge tanks and equipment state, turn them into NetSuite work orders / issues / completions / inventory adjustments, and record every batch locally. On top of that it exposes a rich read-only /api/historian query gateway over the plant historian, live status and analytics feeds for the SunApps UI, operator review endpoints for batches that failed to post to NetSuite, a BOM admin surface, and a replay (time-travel simulation) control panel."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:4005",
+      "description": "Local / on-prem (default PORT)"
+    }
+  ],
+  "security": [],
+  "tags": [
+    {
+      "name": "Health",
+      "description": "Liveness and poller freshness"
+    },
+    {
+      "name": "Historian",
+      "description": "Read-only query gateway over the AVEVA Historian (OData v2 REST API). Tag search and metadata, current values, raw and aggregated history, alarm/event history, and the in-memory poll store. `fqn` path params are fully-qualified tag names, e.g. `ColdMilkSeparator1.CurrentWO`."
+    },
+    {
+      "name": "Live Status",
+      "description": "Live snapshot of what the pollers are currently seeing"
+    },
+    {
+      "name": "Separation",
+      "description": "Cold-milk separator batches — ingest, review, retry/reject"
+    },
+    {
+      "name": "Bulk Milk",
+      "description": "Bulk milk intake runs and their NetSuite work orders"
+    },
+    {
+      "name": "Blend Tanks",
+      "description": "Blend tank batches — WO events, components, ingredient issues, review"
+    },
+    {
+      "name": "Surge Tanks",
+      "description": "Surge tank batches and their review queue"
+    },
+    {
+      "name": "FG Pairings",
+      "description": "Finished-good ⇐ raw-input pairing approvals"
+    },
+    {
+      "name": "Analytics",
+      "description": "Batch history, trends, and per-batch detail for the analytics UI"
+    },
+    {
+      "name": "Inventory Adjustments",
+      "description": "Historian-driven inventory adjustments, their NetSuite correlations, and review"
+    },
+    {
+      "name": "BOM Admin",
+      "description": "Read/preview/commit NetSuite assembly BOM revisions"
+    },
+    {
+      "name": "Filler Hours",
+      "description": "Historical filler time-in-state for the Machine Efficiency report"
+    },
+    {
+      "name": "Replay",
+      "description": "Time-travel simulation control (replay mode, sim clock, dev reset)"
+    }
+  ],
+  "paths": {
+    "/api/milk/separation/unbuild": {
+      "post": {
+        "tags": [
+          "Separation"
+        ],
+        "summary": "Create a separation assembly unbuild",
+        "description": "Posts an assembly unbuild to NetSuite for a milk separation — raw milk consumed, skim and cream produced. This is the low-level NetSuite write that `/api/mes/milk/separation/batch` calls into after it has recorded the batch locally; exposed directly for manual correction. Writes to live NetSuite.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Items, quantities and lots for the unbuild."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Unbuild created."
+          },
+          "500": {
+            "description": "Unbuild failed."
+          }
+        }
+      }
+    },
+    "/api/milk/bulk-work-order": {
+      "post": {
+        "tags": [
+          "Bulk Milk"
+        ],
+        "summary": "Create a bulk milk work order",
+        "description": "Creates the NetSuite work order a bulk milk intake run consumes against. Writes to live NetSuite.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Item, quantity, location and bin for the work order."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Work order created."
+          },
+          "500": {
+            "description": "Creation failed."
+          }
+        }
+      }
+    },
+    "/api/milk/bulk-work-order/{id}/issue": {
+      "post": {
+        "tags": [
+          "Bulk Milk"
+        ],
+        "summary": "Issue components to a bulk milk work order",
+        "description": "Issues raw components against an existing bulk milk work order. Writes to live NetSuite.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "NetSuite work order internal id."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Components to issue — item, quantity, and optional bin / lot per line."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Components issued."
+          },
+          "400": {
+            "description": "Missing work order id."
+          },
+          "500": {
+            "description": "Issue failed."
+          }
+        }
+      }
+    },
+    "/api/milk/bulk-work-orders/active": {
+      "get": {
+        "tags": [
+          "Bulk Milk"
+        ],
+        "summary": "List active bulk milk work orders",
+        "description": "Bulk milk work orders currently open or in-process in NetSuite.",
+        "responses": {
+          "200": {
+            "description": "Active work orders."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/separation/batch": {
+      "post": {
+        "tags": [
+          "Separation"
+        ],
+        "summary": "Ingest a separator batch",
+        "description": "Records a completed cold-milk separator batch and posts it to NetSuite as an assembly unbuild (raw milk in → skim + cream out). Called by the separation cron job once the separator state machine sees a run finish. If the NetSuite post fails, or a product index cannot be mapped to an item, the batch is stored with status `pending_ns` / `error` and surfaces in the Separation Review queue.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Raw batch payload — work order, lots, product indices, and skim/cream quantities read off the historian."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Batch processed (check `success` in the body — a held batch also returns 200)."
+          },
+          "500": {
+            "description": "Failed to process the batch."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/bulk-milk/flow": {
+      "post": {
+        "tags": [
+          "Bulk Milk"
+        ],
+        "summary": "Ingest a bulk milk flow reading",
+        "description": "Records a bulk milk intake totalizer reading from an unload bay and consumes the corresponding quantity against the registered bulk milk work order. Called by the bulk milk cron job.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Bay number, destination silo, product code, and totalized unload quantity."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Flow reading processed."
+          },
+          "500": {
+            "description": "Failed to process the reading."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/separation/batches": {
+      "get": {
+        "tags": [
+          "Separation"
+        ],
+        "summary": "List separation batches",
+        "description": "Recorded separator batches, newest first. The Separation Review screen filters on `status` to pull just the backlog.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            },
+            "description": "Maximum batches to return."
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated status filter.",
+            "example": "pending_ns,error"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Batches.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "batches": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/separation/product-indices": {
+      "get": {
+        "tags": [
+          "Separation"
+        ],
+        "summary": "Product-index options",
+        "description": "The separator HMI's product config (indices 1-40) mapped to NetSuite items. Populates the edit dropdowns on the Separation Review screen so an operator can correct a mis-read product index before retrying a batch.\n",
+        "responses": {
+          "200": {
+            "description": "Options.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "options": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "productIndex": {
+                            "type": "integer"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "nsItemId": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/separation/batches/{id}/retry": {
+      "post": {
+        "tags": [
+          "Separation"
+        ],
+        "summary": "Retry a held separation batch",
+        "description": "Re-posts a `pending_ns` / `error` separation batch to NetSuite, optionally with operator-corrected product indices. Writes to live NetSuite.\n",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Local separation batch id."
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "skimProductIndex": {
+                    "type": "integer",
+                    "description": "Corrected skim product index."
+                  },
+                  "sourceProductIndex": {
+                    "type": "integer",
+                    "description": "Corrected source (raw milk) product index."
+                  },
+                  "creamProductIndex": {
+                    "type": "integer",
+                    "description": "Corrected cream product index."
+                  },
+                  "decidedBy": {
+                    "type": "string",
+                    "description": "Operator who approved the retry."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Retry attempted — response carries the NetSuite result and the updated batch."
+          },
+          "400": {
+            "description": "Invalid id",
+            "batch not in a retryable status": null,
+            "or no skim quantity.": null
+          },
+          "404": {
+            "description": "Batch not found."
+          },
+          "500": {
+            "description": "Retry failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/separation/batches/{id}/reject": {
+      "post": {
+        "tags": [
+          "Separation"
+        ],
+        "summary": "Reject a held separation batch",
+        "description": "Dismisses a `pending_ns` / `error` batch so it stops appearing in the review queue. Nothing is posted to NetSuite.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Local separation batch id."
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "decidedBy": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Batch rejected."
+          },
+          "400": {
+            "description": "Invalid batch id."
+          },
+          "404": {
+            "description": "Batch not found."
+          },
+          "500": {
+            "description": "Reject failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/bulk-milk/register": {
+      "post": {
+        "tags": [
+          "Bulk Milk"
+        ],
+        "summary": "Register a bulk milk run",
+        "description": "Binds a NetSuite bulk milk work order to an unload bay so subsequent flow readings auto-consume against it. Called from the SunApps UI when an operator starts an unload.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Work order, bay, silo, and item details for the run."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Run registered."
+          },
+          "500": {
+            "description": "Registration failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/bulk-milk/complete": {
+      "post": {
+        "tags": [
+          "Bulk Milk"
+        ],
+        "summary": "Complete a bulk milk run",
+        "description": "Closes out a registered bulk milk run and finishes its NetSuite work order.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Identifies the run to complete, plus final quantities."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Run completed."
+          },
+          "500": {
+            "description": "Completion failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/bulk-milk/active": {
+      "get": {
+        "tags": [
+          "Bulk Milk"
+        ],
+        "summary": "List active bulk milk runs",
+        "description": "Registered runs that are still accepting flow readings.",
+        "responses": {
+          "200": {
+            "description": "Active runs."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/blend-tank/wo-start": {
+      "post": {
+        "tags": [
+          "Blend Tanks"
+        ],
+        "summary": "Ingest a blend tank WO start",
+        "description": "Opens a blend tank batch when the tank's HMI signals a work order start. Called by the blend tank cron job. Resolves the product name off the tank to a NetSuite item; an unresolvable product holds the batch for review.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Tank id, work order, product name, and start timestamp."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "WO start processed."
+          },
+          "500": {
+            "description": "Failed to process the WO start."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/blend-tank/wo-end": {
+      "post": {
+        "tags": [
+          "Blend Tanks"
+        ],
+        "summary": "Ingest a blend tank WO end",
+        "description": "Closes a blend tank batch and posts its completion to NetSuite. Called by the blend tank cron job when the tank's HMI signals the work order finished.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Tank id, work order, final quantity, and end timestamp."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "WO end processed."
+          },
+          "500": {
+            "description": "Failed to process the WO end."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/blend-tank/line-flow": {
+      "post": {
+        "tags": [
+          "Blend Tanks"
+        ],
+        "summary": "Ingest a blend tank line flow reading",
+        "description": "Records an inflow totalizer reading for one of the lines feeding a blend tank, so the batch accumulates which ingredients (and how much of each) went in. Drives the automatic ingredient issues against the work order.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Tank id, line id, source silo/product, and totalized flow."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Line flow processed."
+          },
+          "500": {
+            "description": "Failed to process the line flow."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/blend-tank/clear-stale": {
+      "post": {
+        "tags": [
+          "Blend Tanks"
+        ],
+        "summary": "Clear stale active batches",
+        "description": "Closes blend tank batches still marked active but with no NetSuite work order behind them — leftovers from a crash or a mis-fired start event. Administrative cleanup; takes no body.\n",
+        "responses": {
+          "200": {
+            "description": "Stale batches cleared — response reports how many."
+          },
+          "500": {
+            "description": "Cleanup failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/blend-tank/active": {
+      "get": {
+        "tags": [
+          "Blend Tanks"
+        ],
+        "summary": "List active blend tank batches",
+        "description": "Batches currently open on a blend tank — what the live dashboard shows as in-progress.",
+        "responses": {
+          "200": {
+            "description": "Active batches."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/blend-tank/batches": {
+      "get": {
+        "tags": [
+          "Blend Tanks"
+        ],
+        "summary": "List blend tank batches",
+        "description": "All recorded blend tank batches. Query params are passed through to the service as filters (notably `status` for the review queue).",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Status filter, e.g. `pending_ns` or `error`."
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Maximum batches to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Batches."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/blend-tank/product-options": {
+      "get": {
+        "tags": [
+          "Blend Tanks"
+        ],
+        "summary": "Blend product options",
+        "description": "Selectable NetSuite items for the blend tank review UI, used to override a batch's product before retrying it.",
+        "responses": {
+          "200": {
+            "description": "Product options."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/blend-tank/batches/{id}/retry": {
+      "post": {
+        "tags": [
+          "Blend Tanks"
+        ],
+        "summary": "Retry a held blend tank batch",
+        "description": "Re-posts a `pending_ns` / `error` blend tank batch to NetSuite, optionally overriding the resolved item. Writes to live NetSuite.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Local blend tank batch id."
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "nsItemId": {
+                    "type": "integer",
+                    "description": "NetSuite item to use instead of the auto-resolved one."
+                  },
+                  "decidedBy": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Retry attempted."
+          },
+          "400": {
+            "description": "Batch not found",
+            "not retryable": null,
+            "or the retry failed.": null
+          }
+        }
+      }
+    },
+    "/api/mes/milk/blend-tank/batches/{id}/reject": {
+      "post": {
+        "tags": [
+          "Blend Tanks"
+        ],
+        "summary": "Reject a held blend tank batch",
+        "description": "Dismisses a `pending_ns` / `error` blend tank batch so it leaves the review queue. Nothing is posted to NetSuite.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Local blend tank batch id."
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "decidedBy": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Batch rejected."
+          },
+          "400": {
+            "description": "Batch not found or reject failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/blend-tank/{id}/components": {
+      "get": {
+        "tags": [
+          "Blend Tanks"
+        ],
+        "summary": "Components of a blend tank batch",
+        "description": "The ingredient inflows recorded against a batch and their issue state against the NetSuite work order.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Local blend tank batch id."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Components."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/blend-tank/{id}/issue-ingredient": {
+      "post": {
+        "tags": [
+          "Blend Tanks"
+        ],
+        "summary": "Manually issue an ingredient",
+        "description": "Issues an ingredient to a blend tank batch's NetSuite work order by hand — the operator escape hatch for when automatic issuing from line flow missed or under-counted. Writes to live NetSuite.\n",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Local blend tank batch id."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Item, quantity, and optional bin / lot for the issue."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Ingredient issued."
+          },
+          "500": {
+            "description": "Issue failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/surge-tank/batches": {
+      "get": {
+        "tags": [
+          "Surge Tanks"
+        ],
+        "summary": "List surge tank batches",
+        "description": "All recorded surge tank batches. Query params are passed through to the service as filters.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Status filter, e.g. `pending_ns` or `error`."
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Maximum batches to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Batches."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/surge-tank/product-options": {
+      "get": {
+        "tags": [
+          "Surge Tanks"
+        ],
+        "summary": "Surge product options",
+        "description": "Selectable NetSuite items for the surge tank review UI, used to override a batch's product before retrying it.",
+        "responses": {
+          "200": {
+            "description": "Product options."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/milk/surge-tank/batches/{id}/retry": {
+      "post": {
+        "tags": [
+          "Surge Tanks"
+        ],
+        "summary": "Retry a held surge tank batch",
+        "description": "Re-posts a `pending_ns` / `error` surge tank batch to NetSuite, optionally overriding the resolved item. Writes to live NetSuite.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Local surge tank batch id."
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "nsItemId": {
+                    "type": "integer",
+                    "description": "NetSuite item to use instead of the auto-resolved one."
+                  },
+                  "decidedBy": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Retry attempted."
+          },
+          "400": {
+            "description": "Batch not found",
+            "not retryable": null,
+            "or the retry failed.": null
+          }
+        }
+      }
+    },
+    "/api/mes/milk/surge-tank/batches/{id}/reject": {
+      "post": {
+        "tags": [
+          "Surge Tanks"
+        ],
+        "summary": "Reject a held surge tank batch",
+        "description": "Dismisses a `pending_ns` / `error` surge tank batch so it leaves the review queue. Nothing is posted to NetSuite.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Local surge tank batch id."
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "decidedBy": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Batch rejected."
+          },
+          "400": {
+            "description": "Batch not found or reject failed."
+          }
+        }
+      }
+    },
+    "/api/mes/live-status": {
+      "get": {
+        "tags": [
+          "Live Status"
+        ],
+        "summary": "Live plant snapshot",
+        "description": "Everything the pollers currently believe about the plant floor — separator state, blend tanks, milk lines, bulk milk intake, and derived silo activity. Served from the in-memory status store (hydrated from the DB at boot), so it is cheap enough for the dashboard to poll on a short interval. Reflects the sim clock while replay mode is on.\n",
+        "responses": {
+          "200": {
+            "description": "Current snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Snapshot keyed by subsystem (separator, blendTanks, milkLines, bulkMilk, silos)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mes/live-status/events": {
+      "get": {
+        "tags": [
+          "Live Status"
+        ],
+        "summary": "Rolling event log",
+        "description": "The in-memory rolling log of notable poller events (batch starts and ends, state transitions, NetSuite posts, errors). Non-durable — it is empty after a restart and is cleared by the replay reset.\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Only return events after this timestamp (ISO 8601)."
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Maximum events to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Events.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/historian/search": {
+      "get": {
+        "tags": [
+          "Historian"
+        ],
+        "summary": "Search tags by name",
+        "description": "Substring search over the Historian `Tags` entity — returns every tag whose fully-qualified name contains `q`. Follows OData `@odata.nextLink` pages until `limit` is reached. The install carries ~23,000 tags, so always pass a narrowing `q`.\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Substring to match against the tag FQN, e.g. `MSILO` or `Separator.`."
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "maximum": 10000
+            },
+            "description": "Maximum tags to return (clamped to 10000)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching tags.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "query": {
+                      "type": "string"
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "tags": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "fqn": {
+                            "type": "string",
+                            "example": "MSILO1.GALLONS"
+                          },
+                          "tagType": {
+                            "type": "string",
+                            "enum": [
+                              "Analog",
+                              "Discrete",
+                              "String"
+                            ]
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "engUnit": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing `q` query param."
+          },
+          "500": {
+            "description": "Historian query failed."
+          }
+        }
+      }
+    },
+    "/api/historian/tag/{fqn}": {
+      "get": {
+        "tags": [
+          "Historian"
+        ],
+        "summary": "Current value of one tag",
+        "description": "Reads the tag's latest archived value from the Historian `ProcessValues` entity.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "fqn",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Fully-qualified tag name.",
+            "example": "ColdMilkSeparator1.CurrentWO"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The current value.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "FQN": {
+                      "type": "string"
+                    },
+                    "DateTime": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "Value": {
+                      "type": "number",
+                      "nullable": true
+                    },
+                    "Text": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "OpcQuality": {
+                      "type": "integer",
+                      "description": "192 = good."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No value available for that tag."
+          },
+          "500": {
+            "description": "Historian query failed."
+          }
+        }
+      }
+    },
+    "/api/historian/tags": {
+      "get": {
+        "tags": [
+          "Historian"
+        ],
+        "summary": "Current values for several tags",
+        "description": "Reads the current value of each requested tag in parallel. Every result is also written into the in-memory poll store, so repeated calls build up a queryable series retrievable via `/api/historian/polled-history/{fqn}` — useful for tags the Historian archives too infrequently to trend.\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "fqn",
+            "required": true,
+            "style": "form",
+            "explode": true,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "description": "Repeat once per tag, e.g. `?fqn=MSILO1.GALLONS&fqn=MSILO2.GALLONS`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One entry per requested tag (`value` is null when unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tags": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "fqn": {
+                            "type": "string"
+                          },
+                          "value": {
+                            "type": "object",
+                            "nullable": true
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No `fqn` query param supplied."
+          },
+          "500": {
+            "description": "Historian query failed."
+          }
+        }
+      }
+    },
+    "/api/historian/history/{fqn}": {
+      "get": {
+        "tags": [
+          "Historian"
+        ],
+        "summary": "Historical values for a tag",
+        "description": "Trend data for one tag over a time window. For non-raw resolutions the route first tries `AnalogSummary` (native Historian aggregation); if that errors or returns no rows it falls back to raw `ProcessValues` and step-resamples them server-side, carrying each last-known value forward and marking the synthesised points `interpolated: true`. The `source` field in the response says which path was taken. Aggregation requires `since` — without it the request is always served raw. Results are capped at 100,000 rows.\n",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "fqn",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Fully-qualified tag name.",
+            "example": "MSILO1.GALLONS"
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window start (ISO 8601). Required for any non-raw resolution."
+          },
+          {
+            "in": "query",
+            "name": "until",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window end (ISO 8601). Defaults to now."
+          },
+          {
+            "in": "query",
+            "name": "resolution",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "raw",
+                "minutely",
+                "hourly",
+                "daily"
+              ],
+              "default": "raw"
+            },
+            "description": "Aggregation bucket size."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The series, plus a `_debug` block listing each OData page fetched.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "fqn": {
+                      "type": "string"
+                    },
+                    "resolution": {
+                      "type": "string"
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "AnalogSummary",
+                        "ProcessValues"
+                      ]
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "values": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "AnalogSummary rows carry Average/Minimum/Maximum/Count and `_summary: true`; resampled ProcessValues rows carry `interpolated: true`.\n"
+                      }
+                    },
+                    "_debug": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Historian query failed."
+          }
+        }
+      }
+    },
+    "/api/historian/batches": {
+      "get": {
+        "tags": [
+          "Historian"
+        ],
+        "summary": "Separator batches from the historian",
+        "description": "Runs the same separator-batch extraction the separation cron job uses, straight against the historian. Read-only — unlike the cron job this does not persist anything or post to NetSuite, so it is safe for ad-hoc inspection.\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window start (ISO 8601). Defaults to 24 hours ago."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Batches detected in the window.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": {
+                      "type": "integer"
+                    },
+                    "since": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "batches": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Historian query failed."
+          }
+        }
+      }
+    },
+    "/api/historian/polled-history/{fqn}": {
+      "get": {
+        "tags": [
+          "Historian"
+        ],
+        "summary": "History captured by live polling",
+        "description": "Returns values for a tag from the in-memory poll store rather than the Historian archive. The store is filled by calls to `/api/historian/tags`, which supplements tags the Historian archives too infrequently to trend usefully. The store is process-local and non-durable — it is empty after a restart and is cleared by the replay reset.\n",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "fqn",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Fully-qualified tag name."
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window start (ISO 8601). Omit for everything held."
+          },
+          {
+            "in": "query",
+            "name": "until",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window end (ISO 8601)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Polled values (empty if the tag was never polled).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "fqn": {
+                      "type": "string"
+                    },
+                    "source": {
+                      "type": "string",
+                      "example": "poll-store"
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "values": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Poll store query failed."
+          }
+        }
+      }
+    },
+    "/api/historian/poll-store/stats": {
+      "get": {
+        "tags": [
+          "Historian"
+        ],
+        "summary": "Poll store statistics",
+        "description": "Lists every tag currently held in the in-memory poll store and how many points each has.",
+        "responses": {
+          "200": {
+            "description": "Poll store contents.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "fqns": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "counts": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer"
+                      },
+                      "description": "FQN → point count."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/historian/tag-detail/{fqn}": {
+      "get": {
+        "tags": [
+          "Historian"
+        ],
+        "summary": "Full metadata for one tag",
+        "description": "Everything the Historian knows about a tag — the `Tags` row (TagType, EngUnit, min/max, interpolation type, source) plus its extended properties. The extended properties lookup is best-effort: `TagExtendedProperties` 404s on some Historian installs, in which case `extendedProps` comes back empty rather than failing.\n",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "fqn",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Fully-qualified tag name."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tag metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "fqn": {
+                      "type": "string"
+                    },
+                    "tag": {
+                      "type": "object"
+                    },
+                    "extendedProps": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Tag not found."
+          },
+          "500": {
+            "description": "Historian query failed."
+          }
+        }
+      }
+    },
+    "/api/historian/analog-summary/{fqn}": {
+      "get": {
+        "tags": [
+          "Historian"
+        ],
+        "summary": "Statistical summary for an analog tag",
+        "description": "Raw `AnalogSummary` rows for an analog tag — First/Last, Minimum/Maximum with their timestamps, Average, StdDev, Integral, Count and PercentGood per interval. Unlike `/history/{fqn}` this returns the Historian's rows untouched, with no normalisation or ProcessValues fallback. Results are capped at 100,000 rows.\n",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "fqn",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Fully-qualified tag name of an analog tag.",
+            "example": "MSILO1.GALLONS"
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window start (ISO 8601). Defaults to 24 hours ago."
+          },
+          {
+            "in": "query",
+            "name": "until",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window end (ISO 8601). Defaults to now."
+          },
+          {
+            "in": "query",
+            "name": "resolution",
+            "schema": {
+              "type": "integer",
+              "default": 3600000
+            },
+            "description": "Interval size in MILLISECONDS (not a keyword). Default 3600000 = 1 hour."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Summary rows.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "fqn": {
+                      "type": "string"
+                    },
+                    "since": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "until": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "resolution": {
+                      "type": "integer"
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "values": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "_debug": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Historian query failed."
+          }
+        }
+      }
+    },
+    "/api/historian/state-summary/{fqn}": {
+      "get": {
+        "tags": [
+          "Historian"
+        ],
+        "summary": "Time-in-state summary for a discrete tag",
+        "description": "Raw `StateSummary` rows — how long a discrete or string tag spent in each state per interval. This is the primitive behind the filler-hours report. Results are capped at 100,000 rows.\n",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "fqn",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Fully-qualified tag name of a discrete or string tag.",
+            "example": "Separator.ProcessActive"
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window start (ISO 8601). Defaults to 24 hours ago."
+          },
+          {
+            "in": "query",
+            "name": "until",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window end (ISO 8601). Defaults to now."
+          },
+          {
+            "in": "query",
+            "name": "resolution",
+            "schema": {
+              "type": "integer",
+              "default": 3600000
+            },
+            "description": "Interval size in MILLISECONDS. Default 3600000 = 1 hour."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "State summary rows.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "fqn": {
+                      "type": "string"
+                    },
+                    "since": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "until": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "resolution": {
+                      "type": "integer"
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "values": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "_debug": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Historian query failed."
+          }
+        }
+      }
+    },
+    "/api/historian/events": {
+      "get": {
+        "tags": [
+          "Historian"
+        ],
+        "summary": "Alarm and event history",
+        "description": "Queries the Historian `Events` entity, newest first, with optional type and source filters.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window start (ISO 8601, exclusive). Defaults to 24 hours ago."
+          },
+          {
+            "in": "query",
+            "name": "until",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window end (ISO 8601, exclusive). Omit for no upper bound."
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact event type match.",
+            "example": "Alarm.Set"
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact `Source_Name` match."
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "default": 500,
+              "maximum": 10000
+            },
+            "description": "Maximum events to return (clamped to 10000)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Events, ordered by EventTime descending.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "since": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "_debug": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Historian query failed."
+          }
+        }
+      }
+    },
+    "/api/historian/tag-groups": {
+      "get": {
+        "tags": [
+          "Historian"
+        ],
+        "summary": "List tag groups",
+        "description": "Returns the Historian's hierarchical tag grouping (data sources) — useful for discovering what equipment exists.",
+        "responses": {
+          "200": {
+            "description": "Tag groups.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": {
+                      "type": "integer"
+                    },
+                    "groups": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Historian query failed."
+          }
+        }
+      }
+    },
+    "/api/historian/tag-properties": {
+      "get": {
+        "tags": [
+          "Historian"
+        ],
+        "summary": "List tag property names",
+        "description": "Every tag property name defined on this Historian install.",
+        "responses": {
+          "200": {
+            "description": "Property names.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": {
+                      "type": "integer"
+                    },
+                    "properties": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Historian query failed."
+          }
+        }
+      }
+    },
+    "/api/historian/system-params": {
+      "get": {
+        "tags": [
+          "Historian"
+        ],
+        "summary": "List Historian system parameters",
+        "description": "Historian system configuration parameters. On-premises installs only — cloud Historian does not expose this entity.",
+        "responses": {
+          "200": {
+            "description": "System parameters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": {
+                      "type": "integer"
+                    },
+                    "params": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Historian query failed",
+            "or the entity is unavailable on this install.": null
+          }
+        }
+      }
+    },
+    "/api/mes/filler-hours": {
+      "get": {
+        "tags": [
+          "Filler Hours"
+        ],
+        "summary": "Filler time-in-state for a window",
+        "description": "Time-in-state breakdown (runtime / cip / idle / unknown) plus set run speed for one filler over a time window, derived from the machine's historian state tags. Backs the Portal's Machine Efficiency report via SunApps_Gateway. `until` is clamped to now.\n\nCaveat: only Filler 1 currently has live machine-level historian tags. Fillers 2-6 return an all-unknown breakdown until their tags are historized.\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "filler",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 6,
+              "default": 1
+            },
+            "description": "Filler number (1-6)."
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window start (ISO 8601)."
+          },
+          {
+            "in": "query",
+            "name": "until",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window end (ISO 8601). Must be after `since`; clamped to now."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Time-in-state breakdown for the filler.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Hours per state (runtime / cip / idle / unknown) plus the set run speed."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "filler out of range",
+            "missing since/until": null,
+            "or an invalid window.": null
+          },
+          "500": {
+            "description": "Historian query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/fg-pairings": {
+      "get": {
+        "tags": [
+          "FG Pairings"
+        ],
+        "summary": "List finished-good pairings",
+        "description": "Finished-good ⇐ raw-input pairings — the learned map of which raw input legitimately feeds which FG on a surge tank. A newly-observed combination lands here as `pending`; until it is approved, surge batches using it are held rather than posted to NetSuite.\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "approved",
+                "pending",
+                "rejected"
+              ]
+            },
+            "description": "Filter by decision status. Omit for all."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pairings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "pairings": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid status value."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/fg-pairings/{id}/approve": {
+      "post": {
+        "tags": [
+          "FG Pairings"
+        ],
+        "summary": "Approve a pairing",
+        "description": "Marks the FG ⇐ raw-input combination valid, so future surge batches using it post to NetSuite without being held.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Pairing id."
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "decidedBy": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Pairing approved."
+          },
+          "400": {
+            "description": "Invalid pairing id."
+          },
+          "404": {
+            "description": "Pairing not found."
+          },
+          "500": {
+            "description": "Approve failed."
+          }
+        }
+      }
+    },
+    "/api/mes/fg-pairings/{id}/reject": {
+      "post": {
+        "tags": [
+          "FG Pairings"
+        ],
+        "summary": "Reject a pairing",
+        "description": "Marks the FG ⇐ raw-input combination bad. Future surge batches using it are held for review instead of posting.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Pairing id."
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "decidedBy": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Pairing rejected."
+          },
+          "400": {
+            "description": "Invalid pairing id."
+          },
+          "404": {
+            "description": "Pairing not found."
+          },
+          "500": {
+            "description": "Reject failed."
+          }
+        }
+      }
+    },
+    "/api/mes/fg-pairings/{id}/fix": {
+      "post": {
+        "tags": [
+          "FG Pairings"
+        ],
+        "summary": "Correct a pairing",
+        "description": "Rejects the wrong FG ⇐ raw-input combination and approves the corrected one in a single step — for when the observed raw input was mis-identified rather than simply invalid.\n",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Pairing id of the incorrect combination."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "rawInputItemId"
+                ],
+                "properties": {
+                  "rawInputItemId": {
+                    "type": "integer",
+                    "description": "NetSuite item id of the correct raw input."
+                  },
+                  "rawInputName": {
+                    "type": "string",
+                    "description": "Display name for the corrected raw input."
+                  },
+                  "decidedBy": {
+                    "type": "string"
+                  },
+                  "notes": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Pairing corrected — the bad combo is rejected and the correct one approved."
+          },
+          "400": {
+            "description": "Invalid pairing id or missing correction details."
+          },
+          "404": {
+            "description": "Pairing not found."
+          }
+        }
+      }
+    },
+    "/api/mes/dev/replay/status": {
+      "get": {
+        "tags": [
+          "Replay"
+        ],
+        "summary": "Replay mode status",
+        "description": "Full replay configuration plus live sim-clock state — what the UI banner reads to show whether the service is running against the real historian or replaying history.\n",
+        "responses": {
+          "200": {
+            "description": "Current replay config and clock.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "replayMode": {
+                      "type": "boolean",
+                      "description": "True when replaying historical data through the sim clock."
+                    },
+                    "simStart": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true,
+                      "description": "Simulated wall-clock start."
+                    },
+                    "speedup": {
+                      "type": "number",
+                      "description": "Sim clock multiplier — 60 means one simulated hour per real minute."
+                    },
+                    "replayCrons": {
+                      "type": "object",
+                      "description": "Cron expressions used while replay is on."
+                    },
+                    "clock": {
+                      "type": "object",
+                      "description": "Live sim clock state (current sim time",
+                      "paused flag).": null
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Failed to read status."
+          }
+        }
+      }
+    },
+    "/api/mes/dev/replay/enable": {
+      "post": {
+        "tags": [
+          "Replay"
+        ],
+        "summary": "Turn on replay mode",
+        "description": "Switches the service to the historical provider and starts the sim clock, so the cron jobs replay past plant activity instead of polling live. All in-memory job state is reset on the switch; DB rows are left alone. The body may update simStart / speedup / replayCrons at the same time.\n\nNote this only changes where data is READ from — jobs still post to whatever NetSuite account is configured, so replaying against a production account will create real transactions.\n",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "simStart": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Point in history to start replaying from."
+                  },
+                  "speedup": {
+                    "type": "number",
+                    "description": "Sim clock multiplier."
+                  },
+                  "replayCrons": {
+                    "type": "object",
+                    "description": "Cron expressions to use while replaying."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Replay enabled — returns the new status."
+          },
+          "400": {
+            "description": "Invalid settings."
+          }
+        }
+      }
+    },
+    "/api/mes/dev/replay/disable": {
+      "post": {
+        "tags": [
+          "Replay"
+        ],
+        "summary": "Turn off replay mode",
+        "description": "Returns the service to its base provider (the `HISTORIAN_PROVIDER` env value, or `mock` when unset), restores the env cron schedule, and stops the sim clock. In-memory job state is reset on the switch; DB rows are left alone.\n",
+        "responses": {
+          "200": {
+            "description": "Replay disabled — returns the new status."
+          },
+          "400": {
+            "description": "Failed to disable."
+          }
+        }
+      }
+    },
+    "/api/mes/dev/replay/config": {
+      "post": {
+        "tags": [
+          "Replay"
+        ],
+        "summary": "Update replay settings",
+        "description": "Updates simStart / speedup / replayCrons without toggling replay mode. Changes apply live if replay is currently on. At least one setting must be supplied.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "minProperties": 1,
+                "properties": {
+                  "simStart": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "speedup": {
+                    "type": "number"
+                  },
+                  "replayCrons": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Settings updated — returns the new status."
+          },
+          "400": {
+            "description": "No settings provided",
+            "or the values were invalid.": null
+          }
+        }
+      }
+    },
+    "/api/mes/dev/replay/pause": {
+      "post": {
+        "tags": [
+          "Replay"
+        ],
+        "summary": "Pause the sim clock",
+        "description": "Freezes simulated time. Cron jobs keep firing but see a stationary clock, so replay stops advancing.",
+        "responses": {
+          "200": {
+            "description": "Clock paused — returns the current status."
+          }
+        }
+      }
+    },
+    "/api/mes/dev/replay/resume": {
+      "post": {
+        "tags": [
+          "Replay"
+        ],
+        "summary": "Resume the sim clock",
+        "description": "Unfreezes simulated time after a pause.",
+        "responses": {
+          "200": {
+            "description": "Clock resumed — returns the current status."
+          }
+        }
+      }
+    },
+    "/api/mes/dev/replay/reset": {
+      "post": {
+        "tags": [
+          "Replay"
+        ],
+        "summary": "Reset all replay state (DESTRUCTIVE)",
+        "description": "Wipes the service back to a clean slate for a fresh replay run. In order it rolls the sim clock back to `simStart`, clears every job's in-memory state and the status and poll stores, DELETES ALL ROWS from the MES batch tables (blend tank batches and inflows, pipe and surge issue states, surge tank batches, separation batches, bulk milk runs, inventory adjustments, the processing log, and FG input pairings), re-seeds the canonical FG input pairings, and then pm2-restarts the process so all state rehydrates from the emptied tables.\n\nThe response is sent BEFORE the restart, so a 200 means the truncation succeeded and the restart was scheduled — not that the service is back up. The restart is best-effort: outside pm2 it just logs a failure.\n\nThis deletes production MES history if pointed at a production database. There is no confirmation parameter and no authentication in front of it.\n",
+        "responses": {
+          "200": {
+            "description": "Tables cleared and a pm2 restart scheduled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "replayMode": {
+                      "type": "boolean"
+                    },
+                    "restarting": {
+                      "type": "boolean",
+                      "example": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Reset failed before the response was sent."
+          }
+        }
+      }
+    },
+    "/api/mes/bom-admin/groups": {
+      "get": {
+        "tags": [
+          "BOM Admin"
+        ],
+        "summary": "Selectable item groups",
+        "description": "The item groups the BOM admin UI offers as starting points — surge finished goods, batch goods, and raw items — plus the surge-FG → batch-twin map that pairs each finished good with the batch item representing the same product mid-process.\n",
+        "responses": {
+          "200": {
+            "description": "Groups and the twin map."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/bom-admin/search": {
+      "get": {
+        "tags": [
+          "BOM Admin"
+        ],
+        "summary": "Search assembly items",
+        "description": "Free-text search over NetSuite assembly items — the fallback when the item isn't in one of the predefined groups.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Search text matched against item name / id."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching items."
+          },
+          "500": {
+            "description": "Search failed."
+          }
+        }
+      }
+    },
+    "/api/mes/bom-admin/item/{id}": {
+      "get": {
+        "tags": [
+          "BOM Admin"
+        ],
+        "summary": "Get an item's BOM components",
+        "description": "Components of the item's current (default) BOM revision.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "NetSuite item internal id."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "BOM components."
+          },
+          "400": {
+            "description": "Invalid id",
+            "item not found": null,
+            "not an assembly": null,
+            "or it has no editable BOM.": null
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/bom-admin/preview": {
+      "post": {
+        "tags": [
+          "BOM Admin"
+        ],
+        "summary": "Preview a BOM change",
+        "description": "Validates a proposed component list against the item's current BOM revision and returns the diff — including circular-reference checks — without writing anything to NetSuite. Run this before `/commit`.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "itemId"
+                ],
+                "properties": {
+                  "itemId": {
+                    "type": "integer",
+                    "description": "NetSuite assembly item id."
+                  },
+                  "components": {
+                    "type": "array",
+                    "description": "Proposed component lines (item + quantity).",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Preview of the change."
+          },
+          "400": {
+            "description": "Missing itemId or the proposed BOM is invalid."
+          }
+        }
+      }
+    },
+    "/api/mes/bom-admin/commit": {
+      "post": {
+        "tags": [
+          "BOM Admin"
+        ],
+        "summary": "Commit a BOM change",
+        "description": "OVERWRITES the components of the item's current BOM revision in live NetSuite. Destructive and not versioned by this service — preview first.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "itemId"
+                ],
+                "properties": {
+                  "itemId": {
+                    "type": "integer",
+                    "description": "NetSuite assembly item id."
+                  },
+                  "components": {
+                    "type": "array",
+                    "description": "Component lines that will replace the revision's current lines.",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "BOM committed."
+          },
+          "400": {
+            "description": "Missing itemId or the commit was rejected."
+          }
+        }
+      }
+    },
+    "/api/mes/bom-admin/bulk/surge-twins": {
+      "post": {
+        "tags": [
+          "BOM Admin"
+        ],
+        "summary": "Bulk-set surge FG BOMs to their batch twin",
+        "description": "Sets every surge finished good's BOM to a single line — 1 lb of its batch twin. Dry-run by default; pass `commit: true` to actually write to live NetSuite across every surge FG at once.\n",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "commit": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "false (default) previews the changes; true writes them to NetSuite."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Per-item results — planned when previewing",
+            "applied when committing.": null
+          },
+          "500": {
+            "description": "Bulk operation failed."
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/blend-batches": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Blend tank batch history",
+        "description": "Paged, filterable, sortable list of blend tank batches for the analytics table.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window start (ISO 8601)."
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window end (ISO 8601)."
+          },
+          {
+            "in": "query",
+            "name": "tankId",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Restrict to one blend tank."
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Batch status filter."
+          },
+          {
+            "in": "query",
+            "name": "product",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Product filter."
+          },
+          {
+            "in": "query",
+            "name": "sortBy",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Column to sort on."
+          },
+          {
+            "in": "query",
+            "name": "sortDir",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Batch rows plus paging totals."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/blend-trend": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Blend tank volume trend",
+        "description": "Blend tank output bucketed over time for the trend chart.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window start (ISO 8601)."
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window end (ISO 8601)."
+          },
+          {
+            "in": "query",
+            "name": "groupBy",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Bucket size, e.g. `day` / `week` / `month`."
+          },
+          {
+            "in": "query",
+            "name": "tankId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "product",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trend points.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "points": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/surge-batches": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Surge tank batch history",
+        "description": "Paged, filterable, sortable list of surge tank batches.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window start (ISO 8601)."
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window end (ISO 8601)."
+          },
+          {
+            "in": "query",
+            "name": "tankId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "product",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sortBy",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sortDir",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Batch rows plus paging totals."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/surge-trend": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Surge tank volume trend",
+        "description": "Surge tank output bucketed over time for the trend chart.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "groupBy",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Bucket size, e.g. `day` / `week` / `month`."
+          },
+          {
+            "in": "query",
+            "name": "tankId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "product",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trend points."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/separation-batches": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Separation batch history",
+        "description": "Paged, filterable, sortable list of separator batches.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sourceSilo",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Restrict to batches drawn from one raw milk silo."
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sortBy",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sortDir",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Batch rows plus paging totals."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/separation-trend": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Separation volume trend",
+        "description": "Separator throughput bucketed over time for the trend chart.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "groupBy",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Bucket size, e.g. `day` / `week` / `month`."
+          },
+          {
+            "in": "query",
+            "name": "sourceSilo",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trend points."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/inventory-adjustments": {
+      "get": {
+        "tags": [
+          "Inventory Adjustments"
+        ],
+        "summary": "List inventory adjustments",
+        "description": "Inventory adjustments this service generated from historian tank-level movements — the shrink/gain postings that reconcile NetSuite inventory to what the plant floor actually measured.\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Which subsystem generated the adjustment."
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Posting status, e.g. `posted` / `error` / `rejected`."
+          },
+          {
+            "in": "query",
+            "name": "binId",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "itemId",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tankName",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "excludePositiveSilo",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Drop positive silo adjustments, which are usually refills rather than true gains."
+          },
+          {
+            "in": "query",
+            "name": "sortBy",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sortDir",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Adjustment rows plus paging totals."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/inventory-adjustments/correlations": {
+      "get": {
+        "tags": [
+          "Inventory Adjustments"
+        ],
+        "summary": "Adjustments with their triggering batch",
+        "description": "Same rows and filters as `/inventory-adjustments`, but each row carries a `correlation` block tracing the adjustment back to the work order, assembly unbuild, or batch that caused it — plus a `correlationStats` summary of how confidently the matches were made.\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "binId",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "itemId",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tankName",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "excludePositiveSilo",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sortBy",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sortDir",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Adjustments with per-row correlation and a correlationStats summary."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/batches-with-adjustments": {
+      "get": {
+        "tags": [
+          "Inventory Adjustments"
+        ],
+        "summary": "Batches with their correlated adjustments",
+        "description": "The batch-centric inverse of the correlations view — each batch in the window with the inventory adjustments attributed to it and per-batch rollups. Drives the Batch Adjustments page.\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "blend",
+                "surge",
+                "separation"
+              ]
+            },
+            "description": "Restrict to one batch kind."
+          },
+          {
+            "in": "query",
+            "name": "onlyWithAdjustments",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Drop batches that have no correlated adjustments."
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Batches with adjustments and rollups."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/batches/{kind}/{id}/netsuite": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "A batch's actual NetSuite transactions",
+        "description": "Pulls the batch's real transactions (issues, completions, unbuilds, adjustments) live from NetSuite by the internal ids this service recorded — source-of-truth reconciliation for when the local record and NetSuite are suspected to disagree.\n",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "blend",
+                "surge",
+                "separation"
+              ]
+            },
+            "description": "Batch kind."
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Local batch id."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The batch's NetSuite transactions."
+          },
+          "500": {
+            "description": "NetSuite lookup failed."
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/batches/{kind}/{id}": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Full detail for one batch",
+        "description": "Everything about a single batch for the batch-detail page — the full record, correlated inventory adjustments and their rollup, transaction counts and the processing log, bins, lots, ingredient inflows, and separation destinations. A local read; use the `/netsuite` variant to reconcile against NetSuite itself.\n",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "blend",
+                "surge",
+                "separation"
+              ]
+            },
+            "description": "Batch kind."
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Local batch id."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Batch detail."
+          },
+          "404": {
+            "description": "Batch not found",
+            "or unknown batch kind.": null
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/inventory-adjustments-trend": {
+      "get": {
+        "tags": [
+          "Inventory Adjustments"
+        ],
+        "summary": "Inventory adjustment trend",
+        "description": "Adjustment quantities bucketed over time for the trend chart.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "groupBy",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Bucket size, e.g. `day` / `week` / `month`."
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "excludePositiveSilo",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trend points."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/inventory-adjustments/{id}/retry": {
+      "post": {
+        "tags": [
+          "Inventory Adjustments"
+        ],
+        "summary": "Retry an inventory adjustment",
+        "description": "Re-posts an errored or skipped adjustment to NetSuite, optionally with operator corrections to the bin, item, quantity or lot. Backs the Retry button on the Inventory Adjustment Review screen. Writes to live NetSuite.\n",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Local inventory adjustment id."
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "binId": {
+                    "type": "integer",
+                    "description": "Corrected NetSuite bin."
+                  },
+                  "itemId": {
+                    "type": "integer",
+                    "description": "Corrected NetSuite item."
+                  },
+                  "qtyDelta": {
+                    "type": "number",
+                    "description": "Corrected signed quantity."
+                  },
+                  "tankName": {
+                    "type": "string"
+                  },
+                  "lotName": {
+                    "type": "string"
+                  },
+                  "decidedBy": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Adjustment re-posted."
+          },
+          "400": {
+            "description": "Adjustment not found",
+            "not retryable": null,
+            "or the post failed.": null
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/inventory-adjustments/{id}/reject": {
+      "post": {
+        "tags": [
+          "Inventory Adjustments"
+        ],
+        "summary": "Reject an inventory adjustment",
+        "description": "Dismisses an adjustment that should not post (status becomes `rejected`). Nothing is written to NetSuite.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Local inventory adjustment id."
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "decidedBy": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Adjustment rejected."
+          },
+          "400": {
+            "description": "Adjustment not found or reject failed."
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Liveness and poller freshness",
+        "description": "Reports uptime, which historian provider is currently active (`RestProvider`, `MockProvider`, or `HistoricalProvider` while replay mode is on), and the last poll timestamp for the separation, bulk milk and blend tank jobs. Used by the deploy workflow's smoke check.\n",
+        "responses": {
+          "200": {
+            "description": "Service is up.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    },
+                    "uptime": {
+                      "type": "integer",
+                      "description": "Seconds since process start."
+                    },
+                    "historianProvider": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Class name of the active provider."
+                    },
+                    "lastSeparationPoll": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "lastBulkMilkPoll": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "lastBlendTankPoll": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {}
+}

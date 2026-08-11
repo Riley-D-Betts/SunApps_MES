@@ -1,11 +1,12 @@
 {
   "name": "sunapps_mes",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "SunApps MES Service — Historian poller and liquid milk processing",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "build:openapi": "node scripts/build-openapi.js"
   },
   "dependencies": {
     "body-parser": "1.20.3",
@@ -14,6 +15,8 @@
     "httpntlm": "1.8.13",
     "node-cron": "3.0.3",
     "sequelize": "6.37.7",
+    "swagger-jsdoc": "6.3.0",
+    "swagger-ui-express": "5.0.1",
     "tedious": "19.2.1"
   }
 }

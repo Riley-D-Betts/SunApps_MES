@@ -1,6 +1,7 @@
 const express = require('express')
 const bodyParser = require('body-parser')
 const cron = require('node-cron')
+const swaggerUi = require('swagger-ui-express')
 const config = require('./config')
 const { sequelize } = require('./config')
 const db = require('./models')
@@ -24,6 +25,7 @@ const devRoutes = require('./routes/devRoutes')
 const analyticsRoutes = require('./routes/analyticsRoutes')
 const bomAdminRoutes = require('./routes/bomAdminRoutes')
 const fillerHoursRoutes = require('./routes/fillerHoursRoutes')
+const { openapiSpec } = require('./config/swagger')
 const clock = require('./sim/clock')
 
 // In prod, silence routine per-tick chatter (every cron job logs progress on each
@@ -176,6 +178,39 @@ Object.defineProperty(app.locals, 'historian', {
   get() { return providerHolder.current },
 })
 
+// Interactive API docs: Swagger UI at /api-docs, raw spec at /api-docs.json.
+app.get('/api-docs.json', (req, res) => res.json(openapiSpec))
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openapiSpec, {
+  customSiteTitle: 'SunApps MES — reference',
+  explorer: true,
+}))
+
+/**
+ * @openapi
+ * /health:
+ *   get:
+ *     tags: [Health]
+ *     summary: Liveness and poller freshness
+ *     description: >
+ *       Reports uptime, which historian provider is currently active
+ *       (`RestProvider`, `MockProvider`, or `HistoricalProvider` while replay mode is on),
+ *       and the last poll timestamp for the separation, bulk milk and blend tank jobs.
+ *       Used by the deploy workflow's smoke check.
+ *     responses:
+ *       200:
+ *         description: Service is up.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:             { type: string, example: ok }
+ *                 uptime:             { type: integer, description: Seconds since process start. }
+ *                 historianProvider:  { type: string, nullable: true, description: Class name of the active provider. }
+ *                 lastSeparationPoll: { type: string, format: date-time }
+ *                 lastBulkMilkPoll:   { type: string, format: date-time }
+ *                 lastBlendTankPoll:  { type: string, format: date-time }
+ */
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',

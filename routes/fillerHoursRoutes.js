@@ -8,12 +8,44 @@ const fillerHoursService = require('../services/fillerHoursService')
  */
 
 /**
- * GET /api/mes/filler-hours?filler=1&since=ISO&until=ISO
- * Time-in-state breakdown (runtime / cip / idle / unknown) plus set run speed
- * for one filler over a time window. `until` is clamped to now.
+ * @openapi
+ * /api/mes/filler-hours:
+ *   get:
+ *     tags: [Filler Hours]
+ *     summary: Filler time-in-state for a window
+ *     description: >
+ *       Time-in-state breakdown (runtime / cip / idle / unknown) plus set run speed for one
+ *       filler over a time window, derived from the machine's historian state tags. Backs
+ *       the Portal's Machine Efficiency report via SunApps_Gateway. `until` is clamped to now.
  *
- * Note: only Filler 1 currently has live machine-level Historian tags;
- * Fillers 2-6 will return all-unknown until their tags are historized.
+ *
+ *       Caveat: only Filler 1 currently has live machine-level historian tags. Fillers 2-6
+ *       return an all-unknown breakdown until their tags are historized.
+ *     parameters:
+ *       - in: query
+ *         name: filler
+ *         schema: { type: integer, minimum: 1, maximum: 6, default: 1 }
+ *         description: Filler number (1-6).
+ *       - in: query
+ *         name: since
+ *         required: true
+ *         schema: { type: string, format: date-time }
+ *         description: Window start (ISO 8601).
+ *       - in: query
+ *         name: until
+ *         required: true
+ *         schema: { type: string, format: date-time }
+ *         description: Window end (ISO 8601). Must be after `since`; clamped to now.
+ *     responses:
+ *       200:
+ *         description: Time-in-state breakdown for the filler.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               description: Hours per state (runtime / cip / idle / unknown) plus the set run speed.
+ *       400: { description: filler out of range, missing since/until, or an invalid window. }
+ *       500: { description: Historian query failed. }
  */
 router.get('/', async (req, res) => {
   try {
