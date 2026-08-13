@@ -9,14 +9,14 @@
     "build:openapi": "node scripts/build-openapi.js"
   },
   "dependencies": {
-    "body-parser": "1.20.3",
-    "dotenv": "16.4.7",
-    "express": "5.1.0",
+    "body-parser": "2.3.0",
+    "dotenv": "17.4.2",
+    "express": "5.2.1",
     "httpntlm": "1.8.13",
-    "node-cron": "3.0.3",
-    "sequelize": "6.37.7",
+    "node-cron": "4.6.0",
+    "sequelize": "6.37.8",
     "swagger-jsdoc": "6.3.0",
     "swagger-ui-express": "5.0.1",
-    "tedious": "19.2.1"
+    "tedious": "20.0.0"
   }
 }
