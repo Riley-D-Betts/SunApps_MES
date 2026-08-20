@@ -100,12 +100,17 @@ async function getFillerFlow(historian, { filler = 1, since, until, resolution =
   // 1. State windows (4 parallel ProcessValues — the shipped pattern).
   const { segments } = await computeStateSegments(historian, { filler, since, until })
 
-  // 2. AnalogSummary reads, sequential (see header).
-  const trendFlow = await analogSummaryPaged(historian, FILLER1_INLET_FLOW, since, until, resolution)
-  const trendTot = await analogSummaryPaged(historian, FILLER1_INLET_FLOW_TOTAL, since, until, resolution)
+  // 2. AnalogSummary reads, sequential (see header). Caps are sized from the
+  // window so a fetch can never silently truncate mid-window (the server
+  // emits one placeholder row per bucket even for pre-history spans, so row
+  // counts are predictable); the route bounds the window itself.
+  const trendCap = bucketsExpected + 2
+  const minutelyCap = Math.ceil(windowMs / 60000) + 2
+  const trendFlow = await analogSummaryPaged(historian, FILLER1_INLET_FLOW, since, until, resolution, trendCap)
+  const trendTot = await analogSummaryPaged(historian, FILLER1_INLET_FLOW_TOTAL, since, until, resolution, trendCap)
   const minutely = resolution === 60000
     ? trendFlow
-    : await analogSummaryPaged(historian, FILLER1_INLET_FLOW, since, until, 60000)
+    : await analogSummaryPaged(historian, FILLER1_INLET_FLOW, since, until, 60000, minutelyCap)
   const totWin = await analogWindowFirstLast(historian, FILLER1_INLET_FLOW_TOTAL, since, until)
 
   // 3. Reset detection over the whole window.
@@ -117,9 +122,11 @@ async function getFillerFlow(historian, { filler = 1, since, until, resolution =
   // 4. Reset-immune integrated volume (probe-validated: Σ avg × span).
   const integratedGal = minutely.reduce((s, r) => s + rowGallons(r), 0)
 
-  // 5. Trend: one point per EXPECTED bucket — AnalogSummary omits empty
-  // buckets, so gaps become explicit measured:false points. Rows are joined
-  // to buckets numerically (nearest index), not by timestamp string.
+  // 5. Trend: one point per EXPECTED bucket, built from since + k*resolution.
+  // The server returns placeholder rows (Count 0, "NaN" values) for empty or
+  // pre-history buckets and may omit others — the expected-bucket join
+  // handles both, and gaps become explicit measured:false points. Rows are
+  // joined to buckets numerically (nearest index), not by timestamp string.
   const flowByIdx = new Map()
   for (const r of trendFlow) {
     const idx = Math.round((Date.parse(r.StartDateTime) - since.getTime()) / resolution)

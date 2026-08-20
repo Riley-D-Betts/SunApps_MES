@@ -9,6 +9,11 @@ const fillerFlowService = require('../services/fillerFlowService')
  */
 
 const MAX_TREND_BUCKETS = 10100 // admits exactly 7 days at minutely (10,080)
+// The service integrates minutely AnalogSummary rows across the whole window
+// (for byState/runs) regardless of the trend resolution — one row per minute,
+// so the window itself must be bounded or a coarse-resolution request over a
+// huge span drags six-figure row counts through the historian.
+const MAX_WINDOW_MS = 35 * 24 * 3600 * 1000 // 35 days ≈ 50,400 minutely rows
 
 /**
  * @openapi
@@ -27,11 +32,12 @@ const MAX_TREND_BUCKETS = 10100 // admits exactly 7 days at minutely (10,080)
  *       measured:false gaps. `until` is clamped to now.
  *
  *
- *       Windows are caller-defined (ISO 8601, UTC) — the API deliberately has no
- *       shift/day bucketing or plant-timezone logic; anchor `since` to a shift
- *       boundary to get shift-aligned trend buckets. Historization of these tags
- *       began 2026-08-18T20:40Z; earlier windows return nulls, not errors. Requires
- *       the live AVEVA historian (returns 501 under the mock provider).
+ *       Windows are caller-defined (ISO 8601, UTC, max 35 days) — the API
+ *       deliberately has no shift/day bucketing or plant-timezone logic; anchor
+ *       `since` to a shift boundary to get shift-aligned trend buckets.
+ *       Historization of these tags began 2026-08-18T20:40Z; earlier windows
+ *       return nulls, not errors. Requires the live AVEVA historian (returns 501
+ *       under the mock provider).
  *     parameters:
  *       - in: query
  *         name: filler
@@ -75,7 +81,9 @@ router.get('/', async (req, res) => {
       })
     }
 
-    const filler = parseInt(req.query.filler) || 1
+    // Default only when the param is ABSENT — an explicit filler=0 or
+    // filler=abc must 400 per the schema, not silently become Filler 1.
+    const filler = req.query.filler === undefined ? 1 : Number(req.query.filler)
     if (filler !== 1) {
       return res.status(400).json({ error: 'only Filler 1 has an inlet flow meter (TR11_FT1140)' })
     }
@@ -89,6 +97,9 @@ router.get('/', async (req, res) => {
     }
     if (since >= new Date()) {
       return res.status(400).json({ error: 'Window is entirely in the future' })
+    }
+    if (until.getTime() - since.getTime() > MAX_WINDOW_MS) {
+      return res.status(400).json({ error: 'Window exceeds 35 days — narrow it (the report integrates minute-level data across the whole window)' })
     }
     const resolution = req.query.resolution != null ? parseInt(req.query.resolution) : 3600000
     if (isNaN(resolution) || resolution < 60000) {

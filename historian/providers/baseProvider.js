@@ -194,8 +194,10 @@ class BaseProvider {
    * totalizer is a resettable odometer that also counts non-production
    * (flush/CIP) flow — product math must gate on `running`.
    * Never rejects: failed or bad-OPC-quality reads return measured:false
-   * with null gpm/totalizerGal. `running` (Filler1 RunMode) and `sampleAt`
-   * (historian timestamp of the GPM sample) are independent of `measured`.
+   * with null gpm/totalizerGal. `running` (Filler1 RunMode) is independent
+   * of `measured`; `sampleAt` is the historian timestamp of the GPM sample
+   * whenever that read succeeded (may be non-null while measured is false;
+   * null only when the GPM read itself failed).
    * @returns {Promise<{
    *   gpm: number | null,
    *   totalizerGal: number | null,

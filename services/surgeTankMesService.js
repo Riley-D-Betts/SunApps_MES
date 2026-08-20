@@ -1565,24 +1565,75 @@ function resolveIssueModes(activeBatches) {
 // collection would read measured:true forever — sampleAt is the guard.
 const DRAIN_STALE_MAX_MS = 15 * 60 * 1000
 
+// Max age of a batch's drain cursor before its spanned delta is re-seeded
+// instead of credited. The credit gates (RunMode/latch) are evaluated at the
+// CURRENT instant only — a delta spanning a long unobserved window (MES
+// redeploy, frozen collection) could contain flush/CIP flow the gates exist
+// to exclude, so never credit across a gap longer than a few ticks.
+const DRAIN_GAP_MAX_MS = 15 * 60 * 1000
+
+// Backward steps up to this are DECIMAL(14,2) round-trip noise (the cursor
+// column stores 2 decimals; the historian serves the raw float) — treat as
+// zero delta silently. The jitter warn is reserved for real backward steps.
+const DRAIN_JITTER_EPS_GAL = 0.01
+
+/**
+ * One consistent per-tick view for the Filler 1 drain credit, built ONCE in
+ * tickAllActiveBatches and shared by every batch's arrival pass. Latch
+ * attribution (claimant/ambiguous) and the meter reading MUST come from a
+ * single snapshot: per-batch snapshots taken seconds apart (NetSuite awaits
+ * sit between batches) let a mid-tick Sel1 handoff show EACH tank as sole
+ * claimant in its own view, double-crediting overlapping totalizer intervals.
+ */
+async function buildFiller1DrainContext(historian) {
+  const none = { flow: null, claimantTankId: null, ambiguous: false }
+  if (typeof historian.getFiller1InletFlow !== 'function') return none // un-updated provider → level-rise-only
+  let statuses
+  try {
+    statuses = await historian.getSurgeTankStatus()
+  } catch (err) {
+    console.warn(`[SurgeTankMesService] drain context: getSurgeTankStatus failed — ${err.message}`)
+    return none
+  }
+  const flow = await historian.getFiller1InletFlow() // never rejects (provider contract)
+  const sel1 = (statuses || []).filter(s => (s.tankId === 'ST81' || s.tankId === 'ST82')
+    && Array.isArray(s.fillerLines) && s.fillerLines.includes(1))
+  const ambiguous = sel1.length > 1
+  if (ambiguous && flow.measured) {
+    console.warn("[SurgeTankMesService] drain: both ST81 and ST82 latched to Sel1 — this tick's meter flow is un-attributable (combined-flow ambiguity)")
+  }
+  return {
+    flow,
+    claimantTankId: sel1.length === 1 ? sel1[0].tankId : null,
+    ambiguous,
+  }
+}
+
 /**
  * Reset-tolerant, gated drain credit from the Filler 1 inlet meter
- * (TR11_FT1140, SD-708) for one arrival tick of one ST81/82 batch.
+ * (TR11_FT1140, SD-708) for one arrival tick of one ST81/82 batch, computed
+ * against the tick-shared drain context (single consistent latch view).
  *
  * Cursor discipline (mirrors the UHT issue cursor above): the cursor advances
  * on EVERY fresh measured read — the credit gates never hold it, so flow that
  * fails a gate is discarded, not deferred onto a later tick. Unmeasured or
- * stale reads HOLD the cursor; the odometer is an integral, so the next good
- * read's delta spans the outage and is attributed by the latch state at
- * recovery. Replay always takes the unmeasured path (ProcessValues is
- * deadbanded to nothing on these tags), which is the designed degradation.
+ * stale reads HOLD the cursor; if the hold outlasts DRAIN_GAP_MAX_MS the next
+ * good read RE-SEEDS instead of crediting (the instant-evaluated gates can't
+ * vouch for a long unobserved span). Replay returns measured:false from the
+ * provider override, which is the designed degradation.
+ *
+ * `fullyAccounted` = this tick's meter flow was measured, unambiguous, and
+ * either credited or genuinely zero — the only ticks that may count toward
+ * the drainFullyMetered waste certification. Ticks whose positive delta was
+ * DISCARDED (RunMode off/unknown, claimant mismatch, gap re-seed, first-read
+ * seed) are NOT fully accounted: gallons were dropped, so waste on this
+ * batch remains an upper bound.
  */
-async function computeFiller1DrainForTick(batch, historian, st, statuses, issueMode, issuedThisTick) {
-  const none = { creditLbs: 0, newCursorGal: null, measured: false, ambiguous: false, running: null, deltaGal: 0 }
+function computeFiller1DrainForTick(batch, ctx, issueMode, issuedThisTick) {
+  const none = { creditLbs: 0, newCursorGal: null, measured: false, ambiguous: false, running: null, deltaGal: 0, fullyAccounted: false }
   if (batch.tankId !== 'ST81' && batch.tankId !== 'ST82') return none // TR11 serves only the Sel1 leg
-  if (typeof historian.getFiller1InletFlow !== 'function') return none // un-updated provider → level-rise-only
-  const flow = await historian.getFiller1InletFlow() // never rejects (provider contract)
-  if (!flow.measured || !Number.isFinite(flow.totalizerGal) || flow.totalizerGal < 0) return none
+  const flow = ctx?.flow
+  if (!flow || !flow.measured || !Number.isFinite(flow.totalizerGal) || flow.totalizerGal < 0) return none
   const sampleMs = flow.sampleAt ? Date.parse(flow.sampleAt) : NaN
   if (!Number.isFinite(sampleMs) || clock.now() - sampleMs > DRAIN_STALE_MAX_MS) return none
 
@@ -1593,9 +1644,21 @@ async function computeFiller1DrainForTick(batch, historian, st, statuses, issueM
     return { ...none, measured: true, running: flow.running, newCursorGal: cur }
   }
 
+  // Gap guard: the cursor held through an unobserved window longer than a few
+  // ticks — re-seed without crediting. Crediting here would apply the current
+  // instant's RunMode/latch to flow that may have been flush/CIP mid-gap.
+  const observedMs = batch.lastDrainObservedAt ? new Date(batch.lastDrainObservedAt).getTime() : NaN
+  if (Number.isFinite(observedMs) && clock.now() - observedMs > DRAIN_GAP_MAX_MS) {
+    const skipped = Math.max(0, cur - cursor)
+    if (skipped > 0) {
+      console.warn(`[SurgeTankMesService] drain ${batch.tankId}: cursor gap of ${Math.round((clock.now() - observedMs) / 60000)} min — re-seeding, skipping ${skipped.toFixed(1)} gal of unattributable flow`)
+    }
+    return { ...none, measured: true, running: flow.running, newCursorGal: cur }
+  }
+
   let deltaGal
-  if (cur >= cursor) {
-    deltaGal = cur - cursor
+  if (cur >= cursor - DRAIN_JITTER_EPS_GAL) {
+    deltaGal = Math.max(0, cur - cursor)
   } else if (cursor - cur > TOTALIZER_RESET_DROP_GAL) {
     // Genuine odometer reset (the meter is field-resettable; a controls-side
     // rename/typo fix would leave the same signature): post-reset value only.
@@ -1604,39 +1667,34 @@ async function computeFiller1DrainForTick(batch, historian, st, statuses, issueM
   } else {
     // Sub-threshold backward step = jitter, not a reset (the WO1598 lesson):
     // hold the cursor, credit nothing.
-    console.warn(`[SurgeTankMesService] drain ${batch.tankId}: Filler 1 totalizer jitter (${cursor.toFixed(1)} → ${cur.toFixed(1)} gal) — holding cursor`)
+    console.warn(`[SurgeTankMesService] drain ${batch.tankId}: Filler 1 totalizer jitter (${cursor.toFixed(2)} → ${cur.toFixed(2)} gal) — holding cursor`)
     return { ...none, measured: true, running: flow.running }
   }
 
-  // Sole-claimant rule: with BOTH ST81 and ST82 latched to Sel1 the meter
-  // reads their combined flow — un-attributable, so advance the cursor and
-  // credit NEITHER (holding would later dump both tanks' flow on one batch).
-  const latched = Array.isArray(st.fillerLines) && st.fillerLines.includes(1)
-  const rival = (statuses || []).some(o => o.tankId !== batch.tankId
-    && (o.tankId === 'ST81' || o.tankId === 'ST82')
-    && Array.isArray(o.fillerLines) && o.fillerLines.includes(1))
-  const ambiguous = latched && rival
-  if (ambiguous && deltaGal > 0) {
-    console.warn(`[SurgeTankMesService] drain ${batch.tankId}: both ST81 and ST82 latched to Sel1 — discarding ${deltaGal.toFixed(1)} gal (combined-flow ambiguity)`)
-  }
+  // Sole-claimant rule on the SHARED tick snapshot: exactly one of ST81/82 is
+  // latched to Sel1 and it's this batch's tank. With both latched the meter
+  // reads combined flow — advance the cursor, credit NEITHER (holding would
+  // later dump both tanks' flow on one batch).
+  const latched = ctx.claimantTankId === batch.tankId
 
   // Credit gates (cursor advances regardless). running false OR null discards:
   // a non-production window can hold flush/CIP flow — the probe saw ~13k gal
   // totalized with RunMode=0 — and holding would credit it later; discarding
   // under-credits, the safe direction.
-  const credit = latched && !ambiguous && flow.running === true
+  const credit = latched && !ctx.ambiguous && flow.running === true
     && issueMode === 'issue' && issuedThisTick && deltaGal > 0
   return {
     creditLbs: credit ? deltaGal * GAL_TO_LBS : 0,
     newCursorGal: cur,
     measured: true,
-    ambiguous,
+    ambiguous: ctx.ambiguous,
     running: flow.running,
     deltaGal,
+    fullyAccounted: !ctx.ambiguous && (deltaGal === 0 || credit),
   }
 }
 
-async function tickArrivalForBatch(batch, historian, issueMode, issuedThisTick = false) {
+async function tickArrivalForBatch(batch, historian, issueMode, issuedThisTick = false, drainCtx = null) {
   let statuses
   try {
     statuses = await historian.getSurgeTankStatus()
@@ -1672,14 +1730,19 @@ async function tickArrivalForBatch(batch, historian, issueMode, issuedThisTick =
 
   // Metered Filler 1 drain (SD-708): reset-tolerant credit from the TR11
   // inlet meter, gated on Sel1 latch / sole claimant / RunMode / concurrent
-  // issue. Cursor + diagnostics persist in the same batch.update() as the
-  // level baseline, so a failed persist retries the whole tick atomically.
-  const drain = await computeFiller1DrainForTick(batch, historian, st, statuses, issueMode, issuedThisTick)
+  // issue — computed against the tick-shared drainCtx (single consistent
+  // latch view; see buildFiller1DrainContext). Cursor + diagnostics persist
+  // in the same batch.update() as the level baseline, so a failed persist
+  // retries the whole tick atomically.
+  const drain = computeFiller1DrainForTick(batch, drainCtx, issueMode, issuedThisTick)
   if (drain.newCursorGal != null) {
     updates.lastDrainTotalizerGal = drain.newCursorGal
     updates.lastDrainObservedAt = new Date(clock.now())
   }
-  if (issuedThisTick && st.drainingToFiller && drain.measured && !drain.ambiguous && drain.running != null) {
+  // Count only ticks whose meter flow was fully accounted (credited or
+  // genuinely zero) — ticks with DISCARDED gallons must demote the
+  // drainFullyMetered certification, not satisfy it.
+  if (issuedThisTick && st.drainingToFiller && drain.fullyAccounted) {
     updates.meteredDrainTickCount = (Number(batch.meteredDrainTickCount) || 0) + 1
   }
   if (drain.creditLbs > 0) {
@@ -1733,6 +1796,12 @@ async function tickAllActiveBatches(historian) {
 
   const issueModeByBatch = resolveIssueModes(activeBatches)
 
+  // One drain context per tick, shared by every batch's arrival pass — latch
+  // attribution and the meter reading must come from a single consistent
+  // snapshot or a mid-tick Sel1 handoff double-credits (see
+  // buildFiller1DrainContext).
+  const drainCtx = await buildFiller1DrainContext(historian)
+
   for (const batch of activeBatches) {
     summary.batchesProcessed++
     const issueMode = issueModeByBatch[batch.id] || 'issue'
@@ -1747,7 +1816,7 @@ async function tickAllActiveBatches(historian) {
     try {
       await batch.reload()
       // Measure arrival (surge level rise) → cumulativeOutputLbs before completing.
-      await tickArrivalForBatch(batch, historian, issueMode, issuedThisTick)
+      await tickArrivalForBatch(batch, historian, issueMode, issuedThisTick, drainCtx)
       await batch.reload()
       const completed = await tickCompletionForBatch(batch)
       if (completed) summary.completionsFired++

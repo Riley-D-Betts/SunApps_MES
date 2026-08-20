@@ -1196,7 +1196,10 @@ class RestProvider extends BaseProvider {
       totalizerGal: measured ? totPv.Value : null,
       measured,
       running:      good(runPv) ? runPv.Value === 1 : null,
-      sampleAt:     measured ? (gpmPv.DateTime ?? null) : null,
+      // Timestamp of the GPM sample whenever that read succeeded — kept even
+      // when measured is false (e.g. only the totalizer read failed) so
+      // consumers can distinguish "meter dead for hours" from "one bad poll".
+      sampleAt:     gpmPv?.DateTime ?? null,
     }
   }
 
