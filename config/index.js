@@ -44,6 +44,12 @@ module.exports = {
   PORT: process.env.PORT || 4005,
   CORE_API_URL: process.env.CORE_API_URL || 'http://localhost:4000',
   MES_DRY_RUN: process.env.MES_DRY_RUN === 'true',
+  // Metered filler drain (SD-708): when true, the Filler 1 inlet meter's gated
+  // drain credit joins the surge arrival math (cumulativeOutputLbs → NS
+  // completion quantities). Off = shadow mode — the credit is still computed,
+  // logged, and persisted (outputWithDrainLbs/meteredDrainLbs), but NS-facing
+  // quantities stay byte-identical to the unmetered behavior.
+  MES_METERED_DRAIN: process.env.MES_METERED_DRAIN === 'true',
   HISTORIAN_PROVIDER: process.env.HISTORIAN_PROVIDER || 'mock',
   SEPARATION_CRON: process.env.SEPARATION_CRON || '*/10 * * * * *',
   BULK_MILK_CRON: process.env.BULK_MILK_CRON || '*/1 * * * *',

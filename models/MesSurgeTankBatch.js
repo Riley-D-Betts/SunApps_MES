@@ -149,6 +149,41 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING(50),
         allowNull: true,
       },
+      // ── Metered filler drain (SD-708, TR11_FT1140 on the Sel1 leg) ──
+      // Cumulative RAW gated credit from the Filler 1 inlet meter (lbs),
+      // BEFORE the arrival floor/clamp — a diagnostic sum, not the applied
+      // effect. The applied effect is outputWithDrainLbs.
+      meteredDrainLbs: {
+        type: DataTypes.DECIMAL(14, 2),
+        allowNull: false,
+        defaultValue: 0,
+      },
+      // Shadow output track: what cumulativeOutputLbs WOULD be with the drain
+      // credit applied through the identical floor+clamp math. Computed every
+      // tick regardless of MES_METERED_DRAIN (flag off = shadow soak); equals
+      // cumulativeOutputLbs while the flag is on — divergence is a bug.
+      outputWithDrainLbs: {
+        type: DataTypes.DECIMAL(14, 2),
+        allowNull: true,
+      },
+      // Reset-tolerant cursor on the TR11_FT1140 totalizer odometer (gal).
+      lastDrainTotalizerGal: {
+        type: DataTypes.DECIMAL(14, 2),
+        allowNull: true,
+      },
+      // When the drain cursor last advanced (outage/reset forensics).
+      lastDrainObservedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      // Concurrent ticks where the drain was measurable (fresh read,
+      // unambiguous Sel1 claim, definite RunMode bit). Compared against
+      // concurrentTickCount to decide whether waste was fully metered.
+      meteredDrainTickCount: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        defaultValue: 0,
+      },
       lastIssueAt: {
         type: DataTypes.DATE,
         allowNull: true,

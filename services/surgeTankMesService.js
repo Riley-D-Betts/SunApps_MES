@@ -1030,11 +1030,27 @@ async function processWOEnd(data, historian) {
     : null
 
   // When the tank filled and drained at once, the net-rise arrival under-counts,
-  // so the waste figure above is a loose upper bound — flag it as not fully
-  // trustworthy rather than presenting it as measured.
+  // so the waste figure above is a loose upper bound — UNLESS every concurrent
+  // tick was metered by the Filler 1 inlet meter (SD-708) and the drain credit
+  // is actually applied (MES_METERED_DRAIN), in which case waste is measured.
   const concurrent = !!record.concurrentFillDrain
+  const concurrentTicks = Number(record.concurrentTickCount) || 0
+  const meteredDrainLbs = parseFloat(record.meteredDrainLbs) || 0
+  const meteredTicks = Number(record.meteredDrainTickCount) || 0
+  const outputWithDrainLbs = record.outputWithDrainLbs != null ? parseFloat(record.outputWithDrainLbs) : null
+  const wasteWithDrainLbs = outputWithDrainLbs != null ? Math.max(0, issuedLbs - outputWithDrainLbs) : null
+  const wasteWithDrainPercent = wasteWithDrainLbs != null && issuedLbs >= 10
+    ? Math.max(0, Math.min(999999.99, (wasteWithDrainLbs / issuedLbs) * 100))
+    : null
+  // Fully metered = every concurrent tick had a measurable, unambiguous meter
+  // read AND the only latched line was 1 (the metered Filler 1 leg — a Filler 2
+  // draw on the shared Sel1 leg keeps waste an upper bound).
+  const drainFullyMetered = concurrent && concurrentTicks > 0
+    && meteredTicks === concurrentTicks && record.drainFillerLines === '1'
   const concurrentNote = concurrent
-    ? ` ⚠ concurrent fill+drain on ${record.concurrentTickCount} tick(s) (filler line(s) ${record.drainFillerLines || '?'}) — waste is an upper bound, not a measured value`
+    ? (drainFullyMetered && config.MES_METERED_DRAIN
+        ? ` — drain metered via Filler 1 inlet (${meteredDrainLbs.toFixed(1)} lb over ${meteredTicks} tick(s)); waste is measured`
+        : ` ⚠ concurrent fill+drain on ${record.concurrentTickCount} tick(s) (filler line(s) ${record.drainFillerLines || '?'}) — waste is an upper bound, not a measured value (metered ${meteredTicks} of ${concurrentTicks} concurrent tick(s))`)
     : ''
 
   await record.update({
@@ -1058,10 +1074,17 @@ async function processWOEnd(data, historian) {
       cumulativeCompletedLbs: parseFloat(record.cumulativeCompletedLbs) || 0,
       wasteLbs,
       wastePercent,
-      note: 'waste = UHT-leg loss (issued − reached); upper bound under concurrent fill+drain',
+      note: 'waste = UHT-leg loss (issued − reached); upper bound under concurrent fill+drain unless drain fully metered',
       concurrentFillDrain: concurrent,
-      concurrentTickCount: Number(record.concurrentTickCount) || 0,
+      concurrentTickCount: concurrentTicks,
       drainFillerLines: record.drainFillerLines || null,
+      meteredDrainLbs,
+      meteredDrainTickCount: meteredTicks,
+      outputWithDrainLbs,
+      wasteWithDrainLbs,
+      wasteWithDrainPercent,
+      drainFullyMetered,
+      meteredDrainApplied: config.MES_METERED_DRAIN,
       flushedIssue,
       flushedCompletion,
     }),
@@ -1088,8 +1111,15 @@ async function processWOEnd(data, historian) {
     wasteLbs,
     wastePercent,
     concurrentFillDrain: concurrent,
-    concurrentTickCount: Number(record.concurrentTickCount) || 0,
+    concurrentTickCount: concurrentTicks,
     drainFillerLines: record.drainFillerLines || null,
+    meteredDrainLbs,
+    meteredDrainTickCount: meteredTicks,
+    outputWithDrainLbs,
+    wasteWithDrainLbs,
+    wasteWithDrainPercent,
+    drainFullyMetered,
+    meteredDrainApplied: config.MES_METERED_DRAIN,
   }
 }
 
@@ -1530,6 +1560,82 @@ function resolveIssueModes(activeBatches) {
  * arrival. Caveat: when a tank fills and drains at once, the net rise
  * under-counts arrival, so waste is a conservative UPPER bound on UHT loss.
  */
+// How stale a Filler 1 meter sample may be before it stops counting as
+// measured. Raw top-1 serves the last STORED sample, so a frozen historian
+// collection would read measured:true forever — sampleAt is the guard.
+const DRAIN_STALE_MAX_MS = 15 * 60 * 1000
+
+/**
+ * Reset-tolerant, gated drain credit from the Filler 1 inlet meter
+ * (TR11_FT1140, SD-708) for one arrival tick of one ST81/82 batch.
+ *
+ * Cursor discipline (mirrors the UHT issue cursor above): the cursor advances
+ * on EVERY fresh measured read — the credit gates never hold it, so flow that
+ * fails a gate is discarded, not deferred onto a later tick. Unmeasured or
+ * stale reads HOLD the cursor; the odometer is an integral, so the next good
+ * read's delta spans the outage and is attributed by the latch state at
+ * recovery. Replay always takes the unmeasured path (ProcessValues is
+ * deadbanded to nothing on these tags), which is the designed degradation.
+ */
+async function computeFiller1DrainForTick(batch, historian, st, statuses, issueMode, issuedThisTick) {
+  const none = { creditLbs: 0, newCursorGal: null, measured: false, ambiguous: false, running: null, deltaGal: 0 }
+  if (batch.tankId !== 'ST81' && batch.tankId !== 'ST82') return none // TR11 serves only the Sel1 leg
+  if (typeof historian.getFiller1InletFlow !== 'function') return none // un-updated provider → level-rise-only
+  const flow = await historian.getFiller1InletFlow() // never rejects (provider contract)
+  if (!flow.measured || !Number.isFinite(flow.totalizerGal) || flow.totalizerGal < 0) return none
+  const sampleMs = flow.sampleAt ? Date.parse(flow.sampleAt) : NaN
+  if (!Number.isFinite(sampleMs) || clock.now() - sampleMs > DRAIN_STALE_MAX_MS) return none
+
+  const cur = flow.totalizerGal
+  const cursor = batch.lastDrainTotalizerGal != null ? parseFloat(batch.lastDrainTotalizerGal) : null
+  // First good read only seeds the cursor — never credit pre-batch history.
+  if (cursor == null || !Number.isFinite(cursor)) {
+    return { ...none, measured: true, running: flow.running, newCursorGal: cur }
+  }
+
+  let deltaGal
+  if (cur >= cursor) {
+    deltaGal = cur - cursor
+  } else if (cursor - cur > TOTALIZER_RESET_DROP_GAL) {
+    // Genuine odometer reset (the meter is field-resettable; a controls-side
+    // rename/typo fix would leave the same signature): post-reset value only.
+    console.warn(`[SurgeTankMesService] drain ${batch.tankId}: Filler 1 totalizer reset (${cursor.toFixed(1)} → ${cur.toFixed(1)} gal) — crediting post-reset value only`)
+    deltaGal = cur
+  } else {
+    // Sub-threshold backward step = jitter, not a reset (the WO1598 lesson):
+    // hold the cursor, credit nothing.
+    console.warn(`[SurgeTankMesService] drain ${batch.tankId}: Filler 1 totalizer jitter (${cursor.toFixed(1)} → ${cur.toFixed(1)} gal) — holding cursor`)
+    return { ...none, measured: true, running: flow.running }
+  }
+
+  // Sole-claimant rule: with BOTH ST81 and ST82 latched to Sel1 the meter
+  // reads their combined flow — un-attributable, so advance the cursor and
+  // credit NEITHER (holding would later dump both tanks' flow on one batch).
+  const latched = Array.isArray(st.fillerLines) && st.fillerLines.includes(1)
+  const rival = (statuses || []).some(o => o.tankId !== batch.tankId
+    && (o.tankId === 'ST81' || o.tankId === 'ST82')
+    && Array.isArray(o.fillerLines) && o.fillerLines.includes(1))
+  const ambiguous = latched && rival
+  if (ambiguous && deltaGal > 0) {
+    console.warn(`[SurgeTankMesService] drain ${batch.tankId}: both ST81 and ST82 latched to Sel1 — discarding ${deltaGal.toFixed(1)} gal (combined-flow ambiguity)`)
+  }
+
+  // Credit gates (cursor advances regardless). running false OR null discards:
+  // a non-production window can hold flush/CIP flow — the probe saw ~13k gal
+  // totalized with RunMode=0 — and holding would credit it later; discarding
+  // under-credits, the safe direction.
+  const credit = latched && !ambiguous && flow.running === true
+    && issueMode === 'issue' && issuedThisTick && deltaGal > 0
+  return {
+    creditLbs: credit ? deltaGal * GAL_TO_LBS : 0,
+    newCursorGal: cur,
+    measured: true,
+    ambiguous,
+    running: flow.running,
+    deltaGal,
+  }
+}
+
 async function tickArrivalForBatch(batch, historian, issueMode, issuedThisTick = false) {
   let statuses
   try {
@@ -1564,18 +1670,57 @@ async function tickArrivalForBatch(batch, historian, issueMode, issuedThisTick =
     }
   }
 
+  // Metered Filler 1 drain (SD-708): reset-tolerant credit from the TR11
+  // inlet meter, gated on Sel1 latch / sole claimant / RunMode / concurrent
+  // issue. Cursor + diagnostics persist in the same batch.update() as the
+  // level baseline, so a failed persist retries the whole tick atomically.
+  const drain = await computeFiller1DrainForTick(batch, historian, st, statuses, issueMode, issuedThisTick)
+  if (drain.newCursorGal != null) {
+    updates.lastDrainTotalizerGal = drain.newCursorGal
+    updates.lastDrainObservedAt = new Date(clock.now())
+  }
+  if (issuedThisTick && st.drainingToFiller && drain.measured && !drain.ambiguous && drain.running != null) {
+    updates.meteredDrainTickCount = (Number(batch.meteredDrainTickCount) || 0) + 1
+  }
+  if (drain.creditLbs > 0) {
+    updates.meteredDrainLbs = (parseFloat(batch.meteredDrainLbs) || 0) + drain.creditLbs
+  }
+
   if (issueMode === 'issue' && prevLbs != null) {
     const rise = curLbs - prevLbs
-    if (rise > config.MES_WASTE_RISE_FLOOR_LBS) {
-      const issued = parseFloat(batch.cumulativeIssuedLbs) || 0
-      const output = parseFloat(batch.cumulativeOutputLbs) || 0
+    const issued = parseFloat(batch.cumulativeIssuedLbs) || 0
+    const output = parseFloat(batch.cumulativeOutputLbs) || 0
+
+    // Real track: the drain credit joins the SIGNED level rise only when the
+    // flag is on. Signed matters — on a drain-only tick rise ≈ −drain, so the
+    // sum self-cancels and the floor blocks a double count (drained product
+    // was already credited when the level rose).
+    const effectiveRise = rise + (config.MES_METERED_DRAIN ? drain.creditLbs : 0)
+    if (effectiveRise > config.MES_WASTE_RISE_FLOOR_LBS) {
       // Clamp so output never exceeds issued (arrival over-read / sensor noise):
-      // completed ≤ output ≤ issued at all times.
-      const next = Math.min(issued, output + rise)
+      // completed ≤ output ≤ issued at all times. Also bounds any non-product
+      // flow the meter sees that slips past the RunMode gate.
+      const next = Math.min(issued, output + effectiveRise)
       if (next > output) {
         updates.cumulativeOutputLbs = next
-        console.log(`[SurgeTankMesService] arrival ${batch.tankId}: +${(next - output).toFixed(1)} lb reached (level ${prevLbs.toFixed(0)}→${curLbs.toFixed(0)}); output ${output.toFixed(0)}→${next.toFixed(0)} of issued ${issued.toFixed(0)}`)
+        console.log(`[SurgeTankMesService] arrival ${batch.tankId}: +${(next - output).toFixed(1)} lb reached (level ${prevLbs.toFixed(0)}→${curLbs.toFixed(0)}${config.MES_METERED_DRAIN && drain.creditLbs > 0 ? `, +${drain.creditLbs.toFixed(1)} lb drained` : ''}); output ${output.toFixed(0)}→${next.toFixed(0)} of issued ${issued.toFixed(0)}`)
       }
+    }
+
+    // Shadow track: identical floor+clamp math WITH the drain term, ALWAYS —
+    // the dev-soak / prod-shadow comparator. Converges to cumulativeOutputLbs
+    // while the flag is on; divergence there is a bug.
+    const shadowPrev = batch.outputWithDrainLbs != null ? parseFloat(batch.outputWithDrainLbs) : output
+    const shadowRise = rise + drain.creditLbs
+    let shadowNext = shadowPrev
+    if (shadowRise > config.MES_WASTE_RISE_FLOOR_LBS) {
+      shadowNext = Math.max(shadowPrev, Math.min(issued, shadowPrev + shadowRise))
+    }
+    if (batch.outputWithDrainLbs == null || shadowNext !== shadowPrev) {
+      updates.outputWithDrainLbs = shadowNext
+    }
+    if (drain.creditLbs > 0) {
+      console.log(`[SurgeTankMesService] drain ${batch.tankId}: +${drain.creditLbs.toFixed(1)} lb metered (${drain.deltaGal.toFixed(1)} gal)${config.MES_METERED_DRAIN ? '' : ' [shadow]'}; level rise ${rise.toFixed(1)} → effective ${(rise + drain.creditLbs).toFixed(1)}`)
     }
   }
   await batch.update(updates)

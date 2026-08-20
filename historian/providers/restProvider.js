@@ -179,6 +179,12 @@ const TAGS = {
   // scripts/probeTr11FillerFlow.js.
   FILLER1_INLET_FLOW:       'ThermaRoute.TR11_FT1140',              // GPM (EngUnit unset; per-minute rate confirmed empirically)
   FILLER1_INLET_FLOW_TOTAL: 'THermaRoute.TR11_FT1140.Totalizer_1',  // gal — exact integral of the flow tag
+
+  // Filler 1 production bit. RunMode==1 is the authoritative "producing"
+  // signal (SD-655: Filler_State/Filler_Status are frozen registers;
+  // Auto_Sanitize stays ACTIVE during production — see fillerHoursService).
+  // Read alongside FT1140 so consumers can gate out flush/CIP flow.
+  FILLER1_RUN_MODE: 'Filler1.CI_To_Proc.RunMode',
 }
 
 class RestProvider extends BaseProvider {
@@ -1154,6 +1160,47 @@ class RestProvider extends BaseProvider {
   }
 
   /**
+   * Read the Filler 1 inlet flow meter (TR11 FT1140 GPM + Totalizer_1 gal)
+   * plus the Filler1 RunMode production bit — the combined ST81/82 → Filler 1
+   * leg. When both tanks feed Filler 1 the meter sees the SUM, so never
+   * attribute this to a single surge tank.
+   *
+   * Raw current-value reads, deliberately stateless: shared by the 5 s
+   * equipment tick and the surge-accounting consumer; any derived baseline
+   * here would let one caller desync the other (the _prevSurgeGal /
+   * _surgeRatePrevGal / _destPrevGal split above exists for that reason).
+   * Consumers keep their own reset-tolerant baselines.
+   *
+   * Never rejects — a flaky meter must not fail the whole equipment poll.
+   * NOTE: keep TAGS.FILLER1_INLET_FLOW_TOTAL's `THermaRoute` casing verbatim;
+   * always read via _getCurrentValue so replay's sim-time pinning and
+   * request semaphore stay intact (raw AnalogSummary/_get would bypass both).
+   */
+  async getFiller1InletFlow() {
+    const fqns = [
+      TAGS.FILLER1_INLET_FLOW,        // 0 — GPM
+      TAGS.FILLER1_INLET_FLOW_TOTAL,  // 1 — totalizer gal (resettable odometer)
+      TAGS.FILLER1_RUN_MODE,          // 2 — discrete production bit
+    ]
+    const [gpmPv, totPv, runPv] = await Promise.all(
+      fqns.map(fqn => this._getCurrentValue(fqn, { verbose: false }).catch(() => null))
+    )
+    // 192 = OPC "good, non-specific" (probeTr11FillerFlow.js GOOD_QUALITY).
+    // Records without the field (mock / replay ProcessValues rows) pass;
+    // OpcQuality=0 — the known dead-tag signature — fails.
+    const good = pv => pv != null && pv.Value != null
+      && (pv.OpcQuality === undefined || pv.OpcQuality === 192)
+    const measured = good(gpmPv) && good(totPv)
+    return {
+      gpm:          measured ? gpmPv.Value : null,
+      totalizerGal: measured ? totPv.Value : null,
+      measured,
+      running:      good(runPv) ? runPv.Value === 1 : null,
+      sampleAt:     measured ? (gpmPv.DateTime ?? null) : null,
+    }
+  }
+
+  /**
    * Resolve which surge tank a given UHT is actively filling right now.
    *
    * Reads Connection_Code for all four (UHT, ST) pairs to find which tanks
@@ -1231,5 +1278,11 @@ class RestProvider extends BaseProvider {
     return pv?.Text || ''
   }
 }
+
+// Canonical tag FQNs, exposed for services that query the historian directly
+// (fillerFlowService) — retyping FQNs is forbidden: the `THermaRoute` totalizer
+// prefix typo is the real catalog string and AnalogSummary $filter is
+// case-SENSITIVE (wrong case silently returns zero rows).
+RestProvider.TAGS = TAGS
 
 module.exports = RestProvider

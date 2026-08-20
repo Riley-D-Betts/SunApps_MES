@@ -188,6 +188,27 @@ class BaseProvider {
   }
 
   /**
+   * Read the Filler 1 inlet flow meter (TR11 FT1140) — the combined
+   * ST81/82 → Filler 1 leg. Line-level, NOT per-surge-tank flow.
+   * Raw current values only; consumers own all baseline/delta math. The
+   * totalizer is a resettable odometer that also counts non-production
+   * (flush/CIP) flow — product math must gate on `running`.
+   * Never rejects: failed or bad-OPC-quality reads return measured:false
+   * with null gpm/totalizerGal. `running` (Filler1 RunMode) and `sampleAt`
+   * (historian timestamp of the GPM sample) are independent of `measured`.
+   * @returns {Promise<{
+   *   gpm: number | null,
+   *   totalizerGal: number | null,
+   *   measured: boolean,
+   *   running: boolean | null,
+   *   sampleAt: string | null
+   * }>}
+   */
+  async getFiller1InletFlow() {
+    throw new Error('getFiller1InletFlow() not implemented')
+  }
+
+  /**
    * Resolve which surge tank a given UHT is currently routed to. Used at the
    * start of a UHT-direct run to figure out which ST{NN} will receive the FG,
    * so the WO can be created with the correct pasteurized assembly item.

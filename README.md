@@ -281,7 +281,7 @@ On start, **`blendTankMesService.processWOStart()`**: duplicate guard + 5-min co
 
 **Arrival & completion:** completions are driven by **measured arrival, not by what was issued**. For blend, arrival = positive load-cell rise on the destination tank (`tickArrivalForBatch`, rise floor 20 lb). When `cumulativeOutputLbs − cumulativeCompletedLbs ≥ 1 lb`, a `workOrderCompletion` fires with the deterministic lot (`MMDDYY` + WO digits) into the tank's bin. Completions are serialized per WO (`withCompletionLock`) because concurrent creates on the same lot make NS throw "already exists"; that error path reconciles against the WO's `builtQuantity`.
 
-**Surge pass:** per batch, `deltaGal` on the UHT software totalizer × **8.6 lb/gal** is issued against the *pinned* component (below). Arrival = surge level rise × 8.6 **plus metered filler drain** (`getFillerDrainGal` over the latched Sel lines, SD-636) so a tank that fills and drains simultaneously still gets credited with what passed through. When any latched line is unmetered (Fillers 1/2), the batch is flagged `concurrentFillDrain` and its waste is an **upper bound**, not a measurement.
+**Surge pass:** per batch, `deltaGal` on the UHT software totalizer × **8.6 lb/gal** is issued against the *pinned* component (below). Arrival = surge level rise × 8.6, **plus — behind `MES_METERED_DRAIN` (SD-708) — metered Filler 1 drain** from the TR11_FT1140 inlet meter (`computeFiller1DrainForTick`: reset-tolerant odometer cursor, gated on the Sel1 latch, a sole-claimant check across ST81/82, and Filler 1 RunMode), so an ST81/82 tank that fills and drains simultaneously still gets credited with what passed through. The always-on shadow column `outputWithDrainLbs` records what output *would* be with the credit applied even while the flag is off. Concurrent drain on unmetered legs (ST83/84's Sel3/4 lines, or a Filler 2 draw on the shared Sel1 leg) keeps the batch flagged `concurrentFillDrain` and its waste an **upper bound**, not a measurement.
 
 ### 9.4 Surge tank batch lifecycle (Layer 3)
 
@@ -314,7 +314,7 @@ Reload the row → final issue tick (surge) → one last completion flush → co
 The core idea (SD-597 → SD-636): **WO completion is driven by measured arrival into the destination vessel; `issued − arrived = waste`, and it lands in NetSuite as WIP shrinkage** (the WO closes with more issued than built).
 
 - Blend: arrival = destination tank load-cell rise (rise floor 20 lb; residual floor 200 lb at close).
-- Surge: arrival = level rise + metered filler drain (Fillers 3–6). Unmetered concurrent drain (Fillers 1/2, shared latch, meter gap) → `concurrentFillDrain=true` and waste is an upper bound. `meteredDrainLbs`, `concurrentTickCount`, `drainFillerLines` are recorded per batch.
+- Surge: arrival = level rise, plus metered Filler 1 drain (TR11_FT1140, SD-708) when `MES_METERED_DRAIN` is on; the always-on shadow column `outputWithDrainLbs` records what output would be with the credit applied (the dev-soak comparator). Unmetered concurrent drain (ST83/84's Sel3/4 legs; a Filler 2 draw on the shared Sel1 latch) → `concurrentFillDrain=true` and waste is an upper bound; when every concurrent tick was metered on line 1 only, the close note reports waste as measured. `meteredDrainLbs` (raw pre-floor credit), `meteredDrainTickCount`, `concurrentTickCount`, `drainFillerLines` are recorded per batch.
 - Separation: waste = feed − cream − skim over the batch window (baselined totalizers). Waste % > 5 (`WASTE_ALERT_THRESHOLD`) logs an alert event (console + statusStore only — Teams is off).
 - `wastePercent` is only computed when input/issued ≥ 10 lb and is clamped to ±999999.99 (sensor-glitch overflow protection — this literally overflowed a DECIMAL(5,2) once).
 
@@ -356,7 +356,7 @@ Sequelize models in `models/`, one file per table, **zero associations** — all
 
 ## 13. The historian layer
 
-`historian/index.js` `createProvider(type)` → one of three providers, all implementing the interface documented in `historian/providers/baseProvider.js` (14 methods: separator batches/status/snapshot, bulk-milk flow, blend-tank status, milk-line status, silo status, UHT status/routing/totalizer/fromEnt, surge status, `getFillerDrainGal`).
+`historian/index.js` `createProvider(type)` → one of three providers, all implementing the interface documented in `historian/providers/baseProvider.js` (14 methods: separator batches/status/snapshot, bulk-milk flow, blend-tank status, milk-line status, silo status, UHT status/routing/totalizer/fromEnt, surge status, `getFiller1InletFlow`).
 
 ### `restProvider.js` — the live one (~1300 lines, read its header comments)
 
@@ -369,7 +369,7 @@ Talks OData v2 over NTLM. Two read styles: `Tags('fqn')/Raw?$orderby=DateTime de
 - **Software UHT totalizer** (`_uhtMilkGal`): trapezoidal integration of `FT1102_Output` GPM, **only during "Sterile on Product"** (counting all of PROCESS once booked ~100 GPM of water recirc as >1M lb of milk on a 10k-gal tank); negative/raced contributions floored (a concurrent-poll race once drove it to −394k gal).
 - **Rate-sample pollution:** multiple crons hit the shared provider within the same second; sub-second gaps with quantized gallon changes produced 30k lb/min spikes — samples under a minimum elapsed time are rejected, and each consumer keeps its *own* baseline (`_prevSurgeGal` vs `_surgeRatePrevGal` vs `_destPrevGal` are deliberately separate).
 - **Filler drain** (`getFillerDrainGal`, SD-636): AnalogSummary `Average × duration` per bucket (NOT the `Integral` field — its time basis is inconsistent per tag), l/min despite the l/h label, negative glitches clamped, empty buckets = "unreadable" (`measured:false`), never zero. Sel→metered-filler map: `{Sel3: [5,6], Sel4: [3,4]}`. Meters also see CIP/water flow; the arrival clamp bounds it.
-- **Filler 1 inlet meter casing (SD-708):** the totalizer's catalog FQN really is misspelled — `THermaRoute.TR11_FT1140.Totalizer_1` (capital H). `Tags('fqn')/Raw` resolves FQNs case-*in*sensitively, but `$filter=FQN eq` on ProcessValues/AnalogSummary is case-*sensitive* — wrong casing silently returns zero history, no error. Both FT1140 tags are deadbanded to ~nothing in ProcessValues (10 rows/30 d); history reads must use AnalogSummary (~60 and ~42 samples/min). The totalizer also counts non-production flow (flush/CIP ran ~13k gal through it before the first RunMode=1) — product math must gate on RunMode/Sel1, the same lesson as FT1102's "Sterile on Product" gate. Evidence: `scripts/probeTr11FillerFlow.js`.
+- **Filler 1 inlet meter casing (SD-708):** the totalizer's catalog FQN really is misspelled — `THermaRoute.TR11_FT1140.Totalizer_1` (capital H). `Tags('fqn')/Raw` resolves FQNs case-*in*sensitively, but `$filter=FQN eq` on ProcessValues/AnalogSummary is case-*sensitive* — wrong casing silently returns zero history, no error. Both FT1140 tags are deadbanded to ~nothing in ProcessValues (10 rows/30 d); history reads must use AnalogSummary (~60 and ~42 samples/min). The totalizer also counts non-production flow (flush/CIP ran ~13k gal through it before the first RunMode=1) — product math must gate on RunMode/Sel1, the same lesson as FT1102's "Sterile on Product" gate. Exposed live via `getFiller1InletFlow()` (gpm + totalizer + RunMode; `measured:false` on failed/bad-quality reads; never rejects — it must not fail the whole equipment poll) and historically via `/api/mes/filler-flow`; canonical FQNs are exported as `RestProvider.TAGS`. Evidence: `scripts/probeTr11FillerFlow.js`.
 - Per-instance delta state (`_prevTransferComplete`, `_prevCreamTotal`, …) means **provider swaps reset all deltas** — first tick after a swap re-baselines.
 
 ### `historicalProvider.js` — replay
@@ -447,7 +447,7 @@ Uptime, provider class name, last poll times (separation/bulkMilk/blendTank only
 Generic OData proxy so the frontend and ad-hoc scripts never re-implement NTLM/OData: `GET /search?q=`, `GET /tag/:fqn`, `GET /tags?fqn=&fqn=`, `GET /history/:fqn?since&until&resolution` (AnalogSummary with ProcessValues fallback + resample), `GET /analog-summary/:fqn`, `GET /state-summary/:fqn`, `GET /events`, `GET /batches?since`, `GET /tag-detail/:fqn`, `GET /tag-groups`, `GET /tag-properties`, `GET /system-params`, plus `GET /polled-history/:fqn` and `GET /poll-store/stats` (in-memory `pollStore` replay of live-polled values, 7-day/50k-point rings).
 
 ### `/api/mes/live-status` (`routes/liveStatusRoutes.js`)
-`GET /` → `statusStore.snapshot()` — one JSON blob: separator, blend tanks + lines, bulk milk, silo activity, UHTs + surge tanks (incl. `activeFill`), tick cumulative state, recent-batch rings. The frontend polls this. `GET /events?since&limit` → rolling 500-event ring.
+`GET /` → `statusStore.snapshot()` — one JSON blob: separator, blend tanks + lines, bulk milk, silo activity, UHTs + surge tanks (incl. `activeFill`), fillers (Filler 1 inlet meter: `inletGpm`, `inletTotalizerGal`, `measured`, `running`, `sampleAt` — SD-708), tick cumulative state, recent-batch rings. The frontend polls this. `GET /events?since&limit` → rolling 500-event ring.
 
 ### `/api/mes/milk` (`routes/milkMesRoutes.js`)
 Separation review: `GET /separation/batches?status=`, `GET /separation/product-indices`, `POST /separation/batches/:id/retry` (accepts corrected product indices), `POST /separation/batches/:id/reject`. Blend: `GET /blend-tank/active|batches|product-options`, `POST /blend-tank/batches/:id/retry|reject`, `GET /blend-tank/:id/components`, `POST /blend-tank/:id/issue-ingredient`, `POST /blend-tank/clear-stale`. Surge: `GET /surge-tank/batches|product-options`, `POST /surge-tank/batches/:id/retry` (accepts `nsItemId` override) `|reject`. Bulk milk: `POST /bulk-milk/register|complete`, `GET /bulk-milk/active`. (The `POST /separation/batch`, `/bulk-milk/flow`, `/blend-tank/wo-*` ingest endpoints are legacy — the in-process cron loop is what actually fires.)
@@ -466,6 +466,9 @@ Filtered/paged/sorted (whitelisted sort fields, limit cap 500): `GET /blend-batc
 
 ### `/api/mes/filler-hours` (`routes/fillerHoursRoutes.js`)
 `GET /?filler=1&since=&until=` — time-in-state history for Machine Efficiency (SD-655). Filler 1 only has real tags today.
+
+### `/api/mes/filler-flow` (`routes/fillerFlowRoutes.js`)
+`GET /?since=&until=&resolution=` — windowed Filler 1 inlet flow analytics (SD-708): totalizer delta with reset detection, volume split by machine state (the meter counts flush/CIP too — use `volume.byState.runtime` or `runs[]` for production volume), per-run volumes, and trend points with explicit `measured:false` gaps. Window-based only — no shift/timezone logic; anchor `since` to a shift boundary for aligned buckets. 501 under the mock provider.
 
 ### `/api/milk` (`routes/milkRoutes.js`)
 Legacy passthroughs to `services/milkService.js` (direct unbuild/bulk-WO helpers, incl. a RESTlet fallback). Kept for admin use.

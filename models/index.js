@@ -140,6 +140,30 @@ db.ensureRuntimeSchema = async function () {
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'drainFillerLines' AND Object_ID = Object_ID(N'${P}MesSurgeTankBatches'))
       ALTER TABLE ${P}MesSurgeTankBatches ADD drainFillerLines NVARCHAR(50) NULL;
   `)
+  // Metered filler drain (SD-708): raw gated credit from the Filler 1 inlet
+  // meter, the always-on shadow output track, the reset-tolerant odometer
+  // cursor, and the metered-tick coverage counter. See MesSurgeTankBatch.js
+  // field comments for semantics.
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'meteredDrainLbs' AND Object_ID = Object_ID(N'${P}MesSurgeTankBatches'))
+      ALTER TABLE ${P}MesSurgeTankBatches ADD meteredDrainLbs DECIMAL(14,2) NOT NULL CONSTRAINT DF_${P}MesSurgeTankBatches_meteredDrainLbs DEFAULT 0;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'outputWithDrainLbs' AND Object_ID = Object_ID(N'${P}MesSurgeTankBatches'))
+      ALTER TABLE ${P}MesSurgeTankBatches ADD outputWithDrainLbs DECIMAL(14,2) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lastDrainTotalizerGal' AND Object_ID = Object_ID(N'${P}MesSurgeTankBatches'))
+      ALTER TABLE ${P}MesSurgeTankBatches ADD lastDrainTotalizerGal DECIMAL(14,2) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lastDrainObservedAt' AND Object_ID = Object_ID(N'${P}MesSurgeTankBatches'))
+      ALTER TABLE ${P}MesSurgeTankBatches ADD lastDrainObservedAt DATETIME2 NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'meteredDrainTickCount' AND Object_ID = Object_ID(N'${P}MesSurgeTankBatches'))
+      ALTER TABLE ${P}MesSurgeTankBatches ADD meteredDrainTickCount INT NOT NULL CONSTRAINT DF_${P}MesSurgeTankBatches_meteredDrainTickCount DEFAULT 0;
+  `)
   // Actual-start backfill: historian-derived timestamp of when milk actually
   // started flowing, as opposed to when MES detected the batch (detectedAt).
   await sequelize.query(`
