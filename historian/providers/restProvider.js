@@ -164,6 +164,21 @@ const TAGS = {
   // (UHT, ST) pair. A non-zero code means the operator has routed that UHT
   // to that surge tank — i.e. the FG from a UHT-direct run will land there.
   UHT_ST_CONNECTION_FQN: 'ThermaRoute.{UHT}_{ST}_Connection_Code',
+
+  // Line 1 filler inlet flow (ThermaRoute TR11: surge tanks ST81/82 → Filler 1).
+  // First historized 2026-08-18 (SD-708) — the Sel1 leg was previously unmetered.
+  // The totalizer prefix really is misspelled `THermaRoute` in the historian
+  // catalog; keep it verbatim. Raw lookups resolve case-insensitively but
+  // ProcessValues/AnalogSummary $filter is case-SENSITIVE — wrong casing
+  // silently returns zero history. ProcessValues is deadbanded to ~nothing on
+  // both tags; history reads must use AnalogSummary (dense, ~60 and ~42
+  // samples/min). Totalizer is a monotonic odometer today but is resettable —
+  // consumers must do reset-tolerant baseline math — and it counts
+  // NON-production flow too (flush/CIP), so product accounting must gate on
+  // RunMode/Sel1 like FT1102 gates on "Sterile on Product". Evidence:
+  // scripts/probeTr11FillerFlow.js.
+  FILLER1_INLET_FLOW:       'ThermaRoute.TR11_FT1140',              // GPM (EngUnit unset; per-minute rate confirmed empirically)
+  FILLER1_INLET_FLOW_TOTAL: 'THermaRoute.TR11_FT1140.Totalizer_1',  // gal — exact integral of the flow tag
 }
 
 class RestProvider extends BaseProvider {
