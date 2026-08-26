@@ -184,6 +184,25 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: 0,
       },
+      // ── Issue-failure streak (SD-708 / WO2060 incident) ──
+      // Consecutive NS workOrderIssue failures on this batch; reset to 0 on any
+      // successful (or dry-run) issue. At STUCK_ISSUE_FAILURE_THRESHOLD the
+      // batch is surfaced as 'stuck' in the review payload. Deliberately
+      // separate from errorMessage, which drives the create-failure review UI.
+      consecutiveIssueFailures: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        defaultValue: 0,
+      },
+      // Last NS issue error text (truncated) + when it happened.
+      lastIssueError: {
+        type: DataTypes.STRING(500),
+        allowNull: true,
+      },
+      lastIssueErrorAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
       lastIssueAt: {
         type: DataTypes.DATE,
         allowNull: true,

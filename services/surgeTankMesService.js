@@ -130,7 +130,7 @@ async function ensureItemOnWoBom(nsWorkOrderId, targetItemId, bomLines) {
 // detailed rationale. Lowercase componentinventorydetail + omit non-target
 // lines + raw string IDs. Looks up tracking class (lot / bin / both) and
 // allocations from NS via nsInventoryLookup.
-async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferredBinId, bomLines) {
+async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferredBinId, bomLines, opts = {}) {
   const tracking = await nsInventory.getItemTracking(targetItemId)
   const targetLine = await ensureItemOnWoBom(nsWorkOrderId, targetItemId, bomLines)
 
@@ -195,12 +195,22 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
     }
   }
 
-  // The bin-only inventory-detail wrapper differs by WO: lowercase
-  // componentinventorydetail when the WO has any lot line, camelCase
-  // inventoryDetail when it's pure bin-only. Surge WOs are pure bin-only today,
-  // so this resolves to false, but compute it from the BOM so a future
-  // lot-bearing surge WO stays correct.
-  const woHasLotLines = await nsInventory.anyLotTracked(bomLines)
+  // woHasLotLines selects the bin-only line's inventory-detail wrapper:
+  // true → lowercase componentinventorydetail, false → camelCase inventoryDetail.
+  // The correct case differs by NS ACCOUNT, so the DEFAULT is keyed off
+  // ENVIRONMENT (SD-597, ported to surge for SD-708): production wants the
+  // camelCase wrapper on a bin-only line REGARDLESS of the WO's lot mix.
+  // The old lot-mix auto-detect assumed "surge WOs are pure bin-only" — false
+  // for UHT-direct-from-silo WOs, whose NS-defaulted multi-line BOM carries
+  // lot-tracked lines (WO2060/WO2062: 246 consecutive prod rejections,
+  // "total inventory detail quantity must be N", ~219k lb never booked).
+  // Sandbox/dev keeps the auto-detect. opts.forceWoHasLotLines overrides —
+  // used by the wrapper-mismatch retry, so a wrong default still self-heals.
+  const woHasLotLines = opts.forceWoHasLotLines != null
+    ? opts.forceWoHasLotLines
+    : config.ENVIRONMENT === 'prod'
+      ? false
+      : await nsInventory.anyLotTracked(bomLines)
   const { quantity: issueQty, detail } = nsInventory.buildComponentDetail(tracking, quantity, allocations, resolvedBinId, woHasLotLines)
 
   // issueQty == quantity for bin-only lines; for lot lines it's the sum of the
@@ -213,6 +223,7 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
     allocations,
     tracking,
     resolvedBinId,
+    woHasLotLines,
   }
 }
 
@@ -284,6 +295,17 @@ function isInventoryUnavailable(err) {
   return /Inventory numbers are not available/i.test(err?.message || '')
 }
 
+// Mirror of blendTankMesService.isWrapperMismatch (SD-597). NS silently ignores
+// a bin-only line's inventory-detail wrapper when it's the wrong CASE for that
+// NS account, then rejects with one of two signatures — both meaning "your
+// detail was dropped": "configure the inventory detail in line N" or
+// "total inventory detail quantity must be N" (the exact WO2060/WO2062 error).
+function isWrapperMismatch(err) {
+  const m = err?.message || ''
+  return /configure the inventory detail in line/i.test(m)
+    || /total inventory detail quantity must be/i.test(m)
+}
+
 // Pull each unavailable lot's (name, requested qty, current on-hand) out of the
 // NS error. The error conveniently carries the exact lot name we must top up
 // plus the on-hand to compute by how much.
@@ -304,11 +326,24 @@ function parseUnavailableLots(err) {
 // body. We fabricate onto the real lot the issue references (not a phantom new
 // lot): if blend later completes that lot, the at-rest sweep reconciles the
 // overshoot. See Bug B + [[downstream_waste_tracking]]. Returns { nsResult, body }.
-async function postSurgeIssueWithShortfallRetry({ nsWorkOrderId, targetItemId, binId, body, tankName }) {
+async function postSurgeIssueWithShortfallRetry({ nsWorkOrderId, targetItemId, binId, body, tankName, quantity, bomLines, woHasLotLines, tracking }) {
   try {
     const nsResult = await core.netsuitePost(`/record/v1/workOrder/${nsWorkOrderId}/!transform/workOrderIssue`, body)
     return { nsResult, body }
   } catch (err) {
+    // Wrapper-mismatch on a bin-only line: flip the wrapper case and retry ONCE
+    // (SD-597 pattern, ported for SD-708 — the WO2060/WO2062 failure mode).
+    // The flip only changes bin-only lines; lot lines always use the lowercase
+    // shape, so no retry for those. Signatures are disjoint from the
+    // inventory-unavailable branch below.
+    if (isWrapperMismatch(err) && tracking && tracking.useBins && !tracking.isLot
+        && bomLines && quantity != null) {
+      const flipped = !woHasLotLines
+      console.warn(`[SurgeTankMesService] WO ${nsWorkOrderId} item ${targetItemId} rejected with wrapper-mismatch ("${(err.message || '').replace(/\s+/g, ' ').slice(0, 90)}…") — retrying with ${flipped ? 'lowercase componentinventorydetail' : 'camelCase inventoryDetail'} wrapper`)
+      const rebuilt = await buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, binId, bomLines, { forceWoHasLotLines: flipped })
+      const nsResult = await core.netsuitePost(`/record/v1/workOrder/${nsWorkOrderId}/!transform/workOrderIssue`, rebuilt.body)
+      return { nsResult, body: rebuilt.body }
+    }
     if (!isInventoryUnavailable(err)) throw err
     const shorts = parseUnavailableLots(err)
     if (!binId || shorts.length === 0) throw err
@@ -1029,6 +1064,32 @@ async function processWOEnd(data, historian) {
     ? Math.max(0, Math.min(999999.99, (wasteLbs / issuedLbs) * 100))
     : null
 
+  // Zero-issue close guard (SD-708 / WO2060 incident): a batch can close
+  // 'completed' with essentially nothing issued while the UHT totalizer
+  // observed real flow — every NS issue was rejected or skipped, and because
+  // wastePercent is null below 10 lb issued, no alert would ever fire. Shout
+  // (error-level survives the prod log silencer) and stamp the close record so
+  // the review/analytics surfaces can show what the books are missing.
+  let closedZeroIssued = false
+  let unIssuedLbs = 0
+  try {
+    const issueState = await db.MesSurgeTankIssueState.findOne({ where: { surgeTankBatchId: record.id } })
+    if (issueState) {
+      unIssuedLbs = Math.max(0, (parseFloat(issueState.lastTotalizerGal) || 0) - (parseFloat(issueState.lastIssuedUhtGal) || 0)) * GAL_TO_LBS
+    }
+    if (issuedLbs < 10 && unIssuedLbs > 1000) {
+      closedZeroIssued = true
+      console.error(`[SurgeTankMesService] ${tankId} (WO ${record.nsWorkOrderNumber || record.nsWorkOrderId}) closed with ~0 lb issued but ~${unIssuedLbs.toFixed(0)} lb of UHT flow un-issued — NetSuite is missing this production. Last issue error: ${String(record.lastIssueError || 'n/a').replace(/\s+/g, ' ').slice(0, 200)}`)
+      statusStore.pushEvent(
+        'surgeBatch.closedZeroIssued',
+        `${tankId}: batch closed with ~0 lb issued, ~${unIssuedLbs.toFixed(0)} lb un-issued (WO ${record.nsWorkOrderNumber || record.nsWorkOrderId})`,
+        { tankId, nsWorkOrderId: record.nsWorkOrderId, nsWorkOrderNumber: record.nsWorkOrderNumber || null, unIssuedLbs, lastIssueError: record.lastIssueError || null }
+      )
+    }
+  } catch (e) {
+    console.warn(`[SurgeTankMesService] zero-issue close check failed: ${e.message}`)
+  }
+
   // When the tank filled and drained at once, the net-rise arrival under-counts,
   // so the waste figure above is a loose upper bound — UNLESS every concurrent
   // tick was metered by the Filler 1 inlet meter (SD-708) and the drain credit
@@ -1085,6 +1146,8 @@ async function processWOEnd(data, historian) {
       wasteWithDrainPercent,
       drainFullyMetered,
       meteredDrainApplied: config.MES_METERED_DRAIN,
+      closedZeroIssued,
+      unIssuedLbs,
       flushedIssue,
       flushedCompletion,
     }),
@@ -1230,7 +1293,7 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
   if (config.MES_DRY_RUN) {
     await state.update({ lastIssuedUhtGal: currentGal, lastIssueAt: observedAt })
     await batch.increment({ cumulativeIssuedLbs: deltaLbs })
-    await batch.update({ lastIssueAt: observedAt })
+    await batch.update({ lastIssueAt: observedAt, consecutiveIssueFailures: 0, lastIssueError: null, lastIssueErrorAt: null })
     console.log(`[SurgeTankMesService] DRY RUN tick issue UHT ${batch.feedingUhtId} → ${batch.tankId}: ${deltaLbs.toFixed(1)} lb (${deltaGal.toFixed(1)} gal)`)
     return true
   }
@@ -1266,13 +1329,14 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
   // by construction the BOM contains exactly this item. Legacy batches without
   // a pinned component fall through to today's re-resolver path above.
 
-  let body, allocations, tracking, resolvedBin
+  let body, allocations, tracking, resolvedBin, woHasLotLines
   try {
     const built = await buildWoIssueBody(batch.nsWorkOrderId, component.itemId, deltaLbs, component.binId, bomLines)
     body = built.body
     allocations = built.allocations
     tracking = built.tracking
     resolvedBin = built.resolvedBinId
+    woHasLotLines = built.woHasLotLines
   } catch (err) {
     console.error(`[SurgeTankMesService] tick issue ${batch.tankId} → WO ${batch.nsWorkOrderId}: buildWoIssueBody failed — ${err.message}`)
     statusStore.pushEvent(
@@ -1297,6 +1361,7 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
       success: false,
       errorMessage: err.message,
     })
+    await noteIssueFailure(batch, err, state)
     return false
   }
 
@@ -1308,6 +1373,7 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
     const issued = await postSurgeIssueWithShortfallRetry({
       nsWorkOrderId: batch.nsWorkOrderId, targetItemId: component.itemId,
       binId: component.binId, body, tankName: batch.tankId,
+      quantity: deltaLbs, bomLines, woHasLotLines, tracking,
     })
     body = issued.body
     const nsResult = issued.nsResult
@@ -1320,7 +1386,12 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
       lastProductName: component.itemName,
     })
     await batch.increment({ cumulativeIssuedLbs: deltaLbs })
-    await batch.update({ lastIssueAt: observedAt })
+    await batch.update({
+      lastIssueAt: observedAt,
+      consecutiveIssueFailures: 0,
+      lastIssueError: null,
+      lastIssueErrorAt: null,
+    })
 
     await db.MesProcessingLog.create({
       eventType: 'surge_tank_tick_issue',
@@ -1355,6 +1426,7 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
         error: err.message.slice(0, 500),
         requestBody: body,
         tracking,
+        woHasLotLines,
         resolvedBin,
         binOnHand,
       }
@@ -1368,7 +1440,42 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
       errorMessage: err.message,
     })
     // Don't advance lastIssuedUhtGal — same delta retries next tick.
+    await noteIssueFailure(batch, err, state)
     return false
+  }
+}
+
+// A batch whose NS issues fail back-to-back is "stuck": milk keeps flowing and
+// the cursor keeps holding, but nothing reaches the books — the WO2060/WO2062
+// failure mode that ran silent for 11 hours. Track the streak on the batch row
+// (survives restarts, flows into live-status/analytics/review), and escalate
+// quietly: console.error (pm2-visible in prod) + an ordinary statusStore event.
+// Deliberately NO email/Teams — report-only, per SD-708 rollout decisions.
+const STUCK_ISSUE_FAILURE_THRESHOLD = 5 // ~25 min at the prod 5-min tick
+
+async function noteIssueFailure(batch, err, state) {
+  try {
+    const count = (Number(batch.consecutiveIssueFailures) || 0) + 1
+    await batch.update({
+      consecutiveIssueFailures: count,
+      lastIssueError: String(err.message || err).slice(0, 500),
+      lastIssueErrorAt: new Date(clock.now()),
+    })
+    // First shout at the threshold, then at most ~hourly (every 12th tick).
+    if (count === STUCK_ISSUE_FAILURE_THRESHOLD
+        || (count > STUCK_ISSUE_FAILURE_THRESHOLD && count % 12 === 0)) {
+      const heldLbs = state
+        ? Math.max(0, (parseFloat(state.lastTotalizerGal) || 0) - (parseFloat(state.lastIssuedUhtGal) || 0)) * GAL_TO_LBS
+        : null
+      console.error(`[SurgeTankMesService] STUCK: ${batch.tankId} (WO ${batch.nsWorkOrderNumber || batch.nsWorkOrderId}) — ${count} consecutive NS issue failures${heldLbs != null ? `, ~${heldLbs.toFixed(0)} lb held` : ''}. Last error: ${String(err.message || '').replace(/\s+/g, ' ').slice(0, 200)}`)
+      statusStore.pushEvent(
+        'surgeTick.stuck',
+        `${batch.tankId}: ${count} consecutive NS issue failures${heldLbs != null ? ` — ~${heldLbs.toFixed(0)} lb held` : ''} (WO ${batch.nsWorkOrderNumber || batch.nsWorkOrderId})`,
+        { tankId: batch.tankId, nsWorkOrderId: batch.nsWorkOrderId, nsWorkOrderNumber: batch.nsWorkOrderNumber || null, count, heldLbs }
+      )
+    }
+  } catch (e) {
+    console.warn(`[SurgeTankMesService] noteIssueFailure bookkeeping failed: ${e.message}`)
   }
 }
 
@@ -1847,7 +1954,17 @@ async function getAllBatches({ status, limit = 200 } = {}) {
     order: [['createdAt', 'DESC']],
     limit: Math.min(Number(limit) || 200, 500),
   })
-  return { success: true, batches }
+  // Mark actively-stuck batches (NS issues failing back-to-back) so the
+  // existing Surge Tank Review view can list them while they're stuck —
+  // this failure class previously never touched status/errorMessage and
+  // sailed under every review surface (the WO2060 incident).
+  const rows = batches.map(b => {
+    const j = b.toJSON()
+    j.stuck = b.status === 'active'
+      && (Number(b.consecutiveIssueFailures) || 0) >= STUCK_ISSUE_FAILURE_THRESHOLD
+    return j
+  })
+  return { success: true, batches: rows }
 }
 
 async function retrySurgeBatch(id, { nsItemId, decidedBy } = {}) {
@@ -1969,4 +2086,5 @@ module.exports = {
   rejectSurgeBatch,
   getSurgeProductOptions,
   clearCaches,
+  STUCK_ISSUE_FAILURE_THRESHOLD,
 }
