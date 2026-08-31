@@ -72,7 +72,7 @@ function buildOrder(sortBy, sortDir, validFields) {
   return [[field, dir]]
 }
 
-async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', outputField = 'cumulativeOutputLbs', completedField = 'cumulativeCompletedLbs', skimField = null, concurrentField = null } = {}) {
+async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', outputField = 'cumulativeOutputLbs', completedField = 'cumulativeCompletedLbs', skimField = null, concurrentField = null, meteredDrainField = null } = {}) {
   const attrs = [
     [fn('COUNT', col('id')), 'batchCount'],
     [fn('AVG', col('wastePercent')), 'avgWastePercent'],
@@ -84,6 +84,9 @@ async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', o
   // Count batches whose waste is an upper bound because they filled and drained
   // at once (BIT column → cast to INT so SUM works on SQL Server).
   if (concurrentField) attrs.push([fn('SUM', cast(col(concurrentField), 'INT')), 'concurrentCount'])
+  // Raw metered Filler-1 drain credit (SD-708) — pre-floor/pre-clamp diagnostic
+  // sum, NOT the applied arrival effect (that's outputWithDrainLbs per batch).
+  if (meteredDrainField) attrs.push([fn('SUM', col(meteredDrainField)), 'totalMeteredDrainLbs'])
 
   const [result] = await Model.findAll({ where, attributes: attrs, raw: true })
   return {
@@ -94,6 +97,7 @@ async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', o
     totalCompletedLbs: result?.totalCompletedLbs != null ? Number(result.totalCompletedLbs) : null,
     totalSkimLbs:      result?.totalSkimLbs      != null ? Number(result.totalSkimLbs)      : null,
     ...(concurrentField ? { concurrentCount: Number(result?.concurrentCount) || 0 } : {}),
+    ...(meteredDrainField ? { totalMeteredDrainLbs: result?.totalMeteredDrainLbs != null ? Number(result.totalMeteredDrainLbs) : 0 } : {}),
   }
 }
 
@@ -189,7 +193,7 @@ async function getSurgeBatches({ from, to, tankId, status, product, sortBy, sort
 
   const [rows, summary] = await Promise.all([
     db.MesSurgeTankBatch.findAll({ where, order, limit: safeLimit, offset: safeOffset }),
-    getSummary(db.MesSurgeTankBatch, where, { concurrentField: 'concurrentFillDrain' }),
+    getSummary(db.MesSurgeTankBatch, where, { concurrentField: 'concurrentFillDrain', meteredDrainField: 'meteredDrainLbs' }),
   ])
   return { total: summary.batchCount, batches: rows, summary }
 }

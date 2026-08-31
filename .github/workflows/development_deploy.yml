@@ -43,6 +43,7 @@ jobs:
             "SQL_SERVER=${{ secrets.SQL_SERVER }}"
             "TEAMS_WEBHOOK_URL=${{ secrets.TEAMS_WEBHOOK_URL }}"
             "MES_DRY_RUN=${{ secrets.MES_DRY_RUN }}"
+            "MES_METERED_DRAIN=${{ secrets.MES_METERED_DRAIN }}"
           )
           $utf8NoBomEncoding = New-Object System.Text.UTF8Encoding $false
           [System.IO.File]::WriteAllLines($envPath, $envVars, $utf8NoBomEncoding)

@@ -49,8 +49,21 @@ async function analogWindowFirstLast(historian, fqn, since, until) {
   const url = `${historian.baseUrl}/AnalogSummary?$filter=${encodeURIComponent(filter)}&Resolution=${resolution}`
   const data = await historian._get(url, { verbose: false })
   const row = data.value?.[0]
-  if (!row || row.First == null || row.Last == null) return null
-  return { first: Number(row.First), last: Number(row.Last), count: row.Count ?? null }
+  if (!row) return null
+  // The server returns the literal string "NaN" for Minimum/Maximum on
+  // single-sample buckets AND for First/Last on windows that pre-date the
+  // tag's history — treat those as no-data, not as numbers.
+  const num = v => (v != null && !isNaN(Number(v)) ? Number(v) : null)
+  const first = num(row.First)
+  const last = num(row.Last)
+  if (first == null || last == null) return null
+  return {
+    first,
+    last,
+    count: row.Count ?? null,
+    min: num(row.Minimum),
+    max: num(row.Maximum),
+  }
 }
 
 // Value of a delta-stored (step) series at time t: last sample at or before t.
@@ -73,19 +86,15 @@ function classify(run, cipMode, cipRun, sipRun) {
 }
 
 /**
- * Compute time-in-state hours for one filler over [since, until].
- * `until` is clamped to now so live queries never count the future as unknown.
- *
- * @param {object} historian  provider instance (app.locals.historian)
- * @returns {{ filler, since, until, windowHours, hours, pct, setSpeedCpm, segments }}
+ * Merge the four delta-stored state bits into a classified timeline over
+ * [since, until]. Shared by getFillerHours and fillerFlowService — any change
+ * here alters the deployed Machine Efficiency report too.
+ * @returns {Promise<{
+ *   segments: Array<{category: string, start: string, end: string}>,
+ *   totalsMs: { runtime: number, cip: number, idle: number, unknown: number }
+ * }>}
  */
-async function getFillerHours(historian, { filler = 1, since, until }) {
-  const now = new Date()
-  if (until > now) until = now
-  if (!(since instanceof Date) || isNaN(since) || !(until instanceof Date) || isNaN(until) || since >= until) {
-    throw new Error('Invalid time window')
-  }
-
+async function computeStateSegments(historian, { filler = 1, since, until }) {
   const tags = stateTags(filler)
   const series = {}
   await Promise.all(Object.entries(tags).map(async ([key, fqn]) => {
@@ -115,6 +124,25 @@ async function getFillerHours(historian, { filler = 1, since, until }) {
     if (last && last.category === cat) last.end = new Date(t1).toISOString()
     else segments.push({ category: cat, start: new Date(t0).toISOString(), end: new Date(t1).toISOString() })
   }
+
+  return { segments, totalsMs }
+}
+
+/**
+ * Compute time-in-state hours for one filler over [since, until].
+ * `until` is clamped to now so live queries never count the future as unknown.
+ *
+ * @param {object} historian  provider instance (app.locals.historian)
+ * @returns {{ filler, since, until, windowHours, hours, pct, setSpeedCpm, segments }}
+ */
+async function getFillerHours(historian, { filler = 1, since, until }) {
+  const now = new Date()
+  if (until > now) until = now
+  if (!(since instanceof Date) || isNaN(since) || !(until instanceof Date) || isNaN(until) || since >= until) {
+    throw new Error('Invalid time window')
+  }
+
+  const { segments, totalsMs } = await computeStateSegments(historian, { filler, since, until })
 
   const windowMs = until.getTime() - since.getTime()
   const toHours = ms => Math.round(ms / 3600000 * 100) / 100
@@ -175,4 +203,4 @@ async function getFillerHours(historian, { filler = 1, since, until }) {
   }
 }
 
-module.exports = { getFillerHours }
+module.exports = { getFillerHours, computeStateSegments, analogWindowFirstLast }

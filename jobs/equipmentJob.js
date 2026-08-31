@@ -78,11 +78,12 @@ function resolveActiveFillTank(uhtId, connectedTanks, surgeTanks) {
 async function run(historian) {
   const pollStart = Date.now()
   try {
-    const [silos, uhts, surgeTanks, routing] = await Promise.all([
+    const [silos, uhts, surgeTanks, routing, filler1Flow] = await Promise.all([
       historian.getSiloStatus(),
       historian.getUhtStatus(),
       historian.getSurgeTankStatus(),
       historian.getUhtSurgeTankRouting(),
+      historian.getFiller1InletFlow(),
     ])
 
     // Decorate UHTs with their active surge tank and surge tanks with their UHT.
@@ -110,8 +111,19 @@ async function run(historian) {
     statusStore.setSilos({ silos, pollDurationMs: durationMs })
     statusStore.setUhts({ uhts: uhtsDecorated, pollDurationMs: durationMs })
     statusStore.setSurgeTanks({ tanks: surgeTanksDecorated, pollDurationMs: durationMs })
+    statusStore.setFillers({
+      fillers: [{
+        fillerId: 1,
+        inletGpm: filler1Flow.gpm,
+        inletTotalizerGal: filler1Flow.totalizerGal,
+        measured: filler1Flow.measured,
+        running: filler1Flow.running,
+        sampleAt: filler1Flow.sampleAt,
+      }],
+      pollDurationMs: durationMs,
+    })
 
-    console.log(`[EquipmentJob] Polled ${silos.length} silos, ${uhts.length} UHTs, ${surgeTanks.length} surge tanks in ${durationMs}ms`)
+    console.log(`[EquipmentJob] Polled ${silos.length} silos, ${uhts.length} UHTs, ${surgeTanks.length} surge tanks, filler1 ${filler1Flow.measured ? `${filler1Flow.gpm} gpm` : 'unmeasured'} in ${durationMs}ms`)
   } catch (err) {
     console.error('[EquipmentJob] Poll error:', err.message)
     statusStore.pushEvent('equipment.poll.error', 'Equipment poll failed', { error: err.message })

@@ -14,11 +14,11 @@ const statusStore = require('../services/statusStore')
  *     tags: [Live Status]
  *     summary: Live plant snapshot
  *     description: >
- *       Everything the pollers currently believe about the plant floor — separator state,
- *       blend tanks, milk lines, bulk milk intake, and derived silo activity. Served from
+ *       Everything the pollers currently believe about the plant floor. Served from
  *       the in-memory status store (hydrated from the DB at boot), so it is cheap enough
- *       for the dashboard to poll on a short interval. Reflects the sim clock while replay
- *       mode is on.
+ *       for the dashboard to poll on a short interval. Sections are null until their
+ *       first poll completes (HTTP serves before hydration finishes) and each carries
+ *       its own pollAt. Reflects the sim clock while replay mode is on.
  *     responses:
  *       200:
  *         description: Current snapshot.
@@ -26,9 +26,14 @@ const statusStore = require('../services/statusStore')
  *           application/json:
  *             schema:
  *               type: object
- *               description: Snapshot keyed by subsystem (separator, blendTanks, milkLines, bulkMilk, silos).
+ *               description: >
+ *                 Snapshot keyed by subsystem — separator, blendTanks (tanks + lines),
+ *                 bulkMilk, silos (levels merged with derived activity), uhts, surgeTanks,
+ *                 fillers (Filler 1 inlet meter — inletGpm, inletTotalizerGal, measured,
+ *                 running, sampleAt), recentBatches, recentBlendBatches, recentSurgeBatches,
+ *                 tick, lastPoll, eventCount.
  */
-// Full snapshot: separator + blend tanks + milk lines + bulk milk + derived silo activity.
+// Full snapshot: all poller sections + recent-batch rings + tick state (see @openapi above).
 router.get('/', (req, res) => {
   res.json(statusStore.snapshot())
 })

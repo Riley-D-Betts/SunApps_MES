@@ -222,8 +222,13 @@ class MockProvider extends BaseProvider {
       const prev = this._prevSurgeGal[tankId]
       const pollDeltaGal = prev == null ? null : mainGallons - prev
       this._prevSurgeGal[tankId] = mainGallons
-      // Simulate a filler latched to a line ~half the time a tank holds product.
-      const fillerLines = filling && Math.random() > 0.5 ? [1 + (i % 5)] : []
+      // Sel latch: ST81/82 share the Sel1 leg (Fillers 1/2), so BOTH latch
+      // line 1 — lets the Sel1 credit path AND the both-tanks-latched
+      // ambiguity-discard in surge accounting fire in mock (each tank coin-
+      // flips independently, so single- and double-latch ticks both occur).
+      // ST83/84 latch lines 3/4 (the Sel3/4 legs) to keep drain-line variety
+      // for the concurrent fill+drain path.
+      const fillerLines = filling && Math.random() > 0.5 ? [i < 2 ? 1 : i + 1] : []
       return {
         tankId,
         mainLevelPct,
@@ -240,6 +245,35 @@ class MockProvider extends BaseProvider {
         drainingToFiller: fillerLines.length > 0,
       }
     })
+  }
+
+  async getFiller1InletFlow() {
+    // Cross-poll odometer + phase counter, lazily initialized like _prevSurgeGal.
+    if (!this._filler1Flow) this._filler1Flow = { totalizerGal: 12000, phase: 0 }
+    const s = this._filler1Flow
+    s.phase++
+    // ~2% unmeasured reads — exercises the dashboard "—" rendering and the
+    // accounting measured:false fallback (the only path replay ever takes).
+    if (Math.random() < 0.02) {
+      return { gpm: null, totalizerGal: null, measured: false, running: null, sampleAt: null }
+    }
+    // Rare totalizer reset — exercises consumers' reset-tolerant baseline math.
+    if (Math.random() < 0.005) s.totalizerGal = 0
+    // ~15-poll production bursts, ~5-poll gaps; gaps occasionally show flush
+    // flow with RunMode off — exercises the non-production gating downstream.
+    // Deliberately NOT correlated with the Sel1 latch above: the latch holds
+    // through pauses at the plant too, so latched ≠ flowing.
+    const producing = (s.phase % 20) < 15
+    const flushing = !producing && Math.random() < 0.3
+    const gpm = producing ? 40 + Math.random() * 50 : (flushing ? 20 + Math.random() * 20 : 0)
+    s.totalizerGal += gpm * (5 / 60)  // one 5 s equipment tick's worth of gallons
+    return {
+      gpm: Math.round(gpm * 10) / 10,
+      totalizerGal: Math.round(s.totalizerGal * 10) / 10,
+      measured: true,
+      running: producing,
+      sampleAt: new Date().toISOString(),
+    }
   }
 
   async getUhtMilkTotalizer(uhtId) {

@@ -1,8 +1,26 @@
 const path = require('path')
 const dotenv = require('dotenv')
 const { Sequelize } = require('sequelize')
+const cron = require('node-cron')
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') })
+
+// A malformed cron override (typo'd secret, stray quote, trailing space) must
+// never brick boot: server.js passes these straight to cron.schedule(), which
+// THROWS on an invalid pattern — pm2 then crash-loops and the box looks "on"
+// while doing nothing (the SD-708 weekend-soak failure mode). Validate every
+// override and fall back to the code default, loudly — console.error survives
+// the prod log silencer.
+function cronEnv(name, def) {
+  const v = process.env[name]
+  if (!v) return def
+  const trimmed = v.trim().replace(/^['"]|['"]$/g, '')
+  if (!cron.validate(trimmed)) {
+    console.error(`[Config] Invalid ${name}="${v}" — falling back to default "${def}"`)
+    return def
+  }
+  return trimmed
+}
 
 const sequelize = new Sequelize(
   process.env.SQL_DATABASE,
@@ -44,22 +62,28 @@ module.exports = {
   PORT: process.env.PORT || 4005,
   CORE_API_URL: process.env.CORE_API_URL || 'http://localhost:4000',
   MES_DRY_RUN: process.env.MES_DRY_RUN === 'true',
+  // Metered filler drain (SD-708): when true, the Filler 1 inlet meter's gated
+  // drain credit joins the surge arrival math (cumulativeOutputLbs → NS
+  // completion quantities). Off = shadow mode — the credit is still computed,
+  // logged, and persisted (outputWithDrainLbs/meteredDrainLbs), but NS-facing
+  // quantities stay byte-identical to the unmetered behavior.
+  MES_METERED_DRAIN: process.env.MES_METERED_DRAIN === 'true',
   HISTORIAN_PROVIDER: process.env.HISTORIAN_PROVIDER || 'mock',
-  SEPARATION_CRON: process.env.SEPARATION_CRON || '*/10 * * * * *',
-  BULK_MILK_CRON: process.env.BULK_MILK_CRON || '*/1 * * * *',
-  BLEND_TANK_CRON: process.env.BLEND_TANK_CRON || '*/10 * * * * *',
-  SURGE_TANK_CRON: process.env.SURGE_TANK_CRON || '*/10 * * * * *',
+  SEPARATION_CRON: cronEnv('SEPARATION_CRON', '*/10 * * * * *'),
+  BULK_MILK_CRON: cronEnv('BULK_MILK_CRON', '*/1 * * * *'),
+  BLEND_TANK_CRON: cronEnv('BLEND_TANK_CRON', '*/10 * * * * *'),
+  SURGE_TANK_CRON: cronEnv('SURGE_TANK_CRON', '*/10 * * * * *'),
   // 5 s keeps the UHT software-totalizer (_uhtMilkGal) at a 5 s integration
   // step, halving the trapezoidal error vs the old 15 s default.  The equipment
   // job is a parallel batch OData fetch — 12 polls/min is fine for AVEVA.
-  EQUIPMENT_CRON: process.env.EQUIPMENT_CRON || '*/5 * * * * *',
+  EQUIPMENT_CRON: cronEnv('EQUIPMENT_CRON', '*/5 * * * * *'),
   // Tick that fires periodic blend-tank WO issues + completions. Production cadence
   // is once every 5 minutes; sandbox can override to e.g. '*/30 * * * * *' for testing.
-  TICK_CRON: process.env.TICK_CRON || '*/5 * * * *',
+  TICK_CRON: cronEnv('TICK_CRON', '*/5 * * * *'),
   // Tank-at-rest inventory adjustment sweep. Same 5-min cadence as the tick —
   // matches the 5-min average window the sweep service uses to denoise the
   // ~±800 lb level sensor jitter on idle tanks.
-  INVENTORY_ADJUSTMENT_CRON: process.env.INVENTORY_ADJUSTMENT_CRON || '*/5 * * * *',
+  INVENTORY_ADJUSTMENT_CRON: cronEnv('INVENTORY_ADJUSTMENT_CRON', '*/5 * * * *'),
   // Min delta (lbs) to actually fire a workOrderIssue / workOrderCompletion. Below
   // this we just defer to the next tick so we don't spam NS with sub-pound noise.
   MES_MIN_ISSUE_LBS: parseFloat(process.env.MES_MIN_ISSUE_LBS || '10'),

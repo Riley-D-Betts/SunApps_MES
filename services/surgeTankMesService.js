@@ -130,7 +130,7 @@ async function ensureItemOnWoBom(nsWorkOrderId, targetItemId, bomLines) {
 // detailed rationale. Lowercase componentinventorydetail + omit non-target
 // lines + raw string IDs. Looks up tracking class (lot / bin / both) and
 // allocations from NS via nsInventoryLookup.
-async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferredBinId, bomLines) {
+async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferredBinId, bomLines, opts = {}) {
   const tracking = await nsInventory.getItemTracking(targetItemId)
   const targetLine = await ensureItemOnWoBom(nsWorkOrderId, targetItemId, bomLines)
 
@@ -195,12 +195,22 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
     }
   }
 
-  // The bin-only inventory-detail wrapper differs by WO: lowercase
-  // componentinventorydetail when the WO has any lot line, camelCase
-  // inventoryDetail when it's pure bin-only. Surge WOs are pure bin-only today,
-  // so this resolves to false, but compute it from the BOM so a future
-  // lot-bearing surge WO stays correct.
-  const woHasLotLines = await nsInventory.anyLotTracked(bomLines)
+  // woHasLotLines selects the bin-only line's inventory-detail wrapper:
+  // true → lowercase componentinventorydetail, false → camelCase inventoryDetail.
+  // The correct case differs by NS ACCOUNT, so the DEFAULT is keyed off
+  // ENVIRONMENT (SD-597, ported to surge for SD-708): production wants the
+  // camelCase wrapper on a bin-only line REGARDLESS of the WO's lot mix.
+  // The old lot-mix auto-detect assumed "surge WOs are pure bin-only" — false
+  // for UHT-direct-from-silo WOs, whose NS-defaulted multi-line BOM carries
+  // lot-tracked lines (WO2060/WO2062: 246 consecutive prod rejections,
+  // "total inventory detail quantity must be N", ~219k lb never booked).
+  // Sandbox/dev keeps the auto-detect. opts.forceWoHasLotLines overrides —
+  // used by the wrapper-mismatch retry, so a wrong default still self-heals.
+  const woHasLotLines = opts.forceWoHasLotLines != null
+    ? opts.forceWoHasLotLines
+    : config.ENVIRONMENT === 'prod'
+      ? false
+      : await nsInventory.anyLotTracked(bomLines)
   const { quantity: issueQty, detail } = nsInventory.buildComponentDetail(tracking, quantity, allocations, resolvedBinId, woHasLotLines)
 
   // issueQty == quantity for bin-only lines; for lot lines it's the sum of the
@@ -213,6 +223,7 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
     allocations,
     tracking,
     resolvedBinId,
+    woHasLotLines,
   }
 }
 
@@ -284,6 +295,17 @@ function isInventoryUnavailable(err) {
   return /Inventory numbers are not available/i.test(err?.message || '')
 }
 
+// Mirror of blendTankMesService.isWrapperMismatch (SD-597). NS silently ignores
+// a bin-only line's inventory-detail wrapper when it's the wrong CASE for that
+// NS account, then rejects with one of two signatures — both meaning "your
+// detail was dropped": "configure the inventory detail in line N" or
+// "total inventory detail quantity must be N" (the exact WO2060/WO2062 error).
+function isWrapperMismatch(err) {
+  const m = err?.message || ''
+  return /configure the inventory detail in line/i.test(m)
+    || /total inventory detail quantity must be/i.test(m)
+}
+
 // Pull each unavailable lot's (name, requested qty, current on-hand) out of the
 // NS error. The error conveniently carries the exact lot name we must top up
 // plus the on-hand to compute by how much.
@@ -304,11 +326,24 @@ function parseUnavailableLots(err) {
 // body. We fabricate onto the real lot the issue references (not a phantom new
 // lot): if blend later completes that lot, the at-rest sweep reconciles the
 // overshoot. See Bug B + [[downstream_waste_tracking]]. Returns { nsResult, body }.
-async function postSurgeIssueWithShortfallRetry({ nsWorkOrderId, targetItemId, binId, body, tankName }) {
+async function postSurgeIssueWithShortfallRetry({ nsWorkOrderId, targetItemId, binId, body, tankName, quantity, bomLines, woHasLotLines, tracking }) {
   try {
     const nsResult = await core.netsuitePost(`/record/v1/workOrder/${nsWorkOrderId}/!transform/workOrderIssue`, body)
     return { nsResult, body }
   } catch (err) {
+    // Wrapper-mismatch on a bin-only line: flip the wrapper case and retry ONCE
+    // (SD-597 pattern, ported for SD-708 — the WO2060/WO2062 failure mode).
+    // The flip only changes bin-only lines; lot lines always use the lowercase
+    // shape, so no retry for those. Signatures are disjoint from the
+    // inventory-unavailable branch below.
+    if (isWrapperMismatch(err) && tracking && tracking.useBins && !tracking.isLot
+        && bomLines && quantity != null) {
+      const flipped = !woHasLotLines
+      console.warn(`[SurgeTankMesService] WO ${nsWorkOrderId} item ${targetItemId} rejected with wrapper-mismatch ("${(err.message || '').replace(/\s+/g, ' ').slice(0, 90)}…") — retrying with ${flipped ? 'lowercase componentinventorydetail' : 'camelCase inventoryDetail'} wrapper`)
+      const rebuilt = await buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, binId, bomLines, { forceWoHasLotLines: flipped })
+      const nsResult = await core.netsuitePost(`/record/v1/workOrder/${nsWorkOrderId}/!transform/workOrderIssue`, rebuilt.body)
+      return { nsResult, body: rebuilt.body }
+    }
     if (!isInventoryUnavailable(err)) throw err
     const shorts = parseUnavailableLots(err)
     if (!binId || shorts.length === 0) throw err
@@ -1029,12 +1064,54 @@ async function processWOEnd(data, historian) {
     ? Math.max(0, Math.min(999999.99, (wasteLbs / issuedLbs) * 100))
     : null
 
+  // Zero-issue close guard (SD-708 / WO2060 incident): a batch can close
+  // 'completed' with essentially nothing issued while the UHT totalizer
+  // observed real flow — every NS issue was rejected or skipped, and because
+  // wastePercent is null below 10 lb issued, no alert would ever fire. Shout
+  // (error-level survives the prod log silencer) and stamp the close record so
+  // the review/analytics surfaces can show what the books are missing.
+  let closedZeroIssued = false
+  let unIssuedLbs = 0
+  try {
+    const issueState = await db.MesSurgeTankIssueState.findOne({ where: { surgeTankBatchId: record.id } })
+    if (issueState) {
+      unIssuedLbs = Math.max(0, (parseFloat(issueState.lastTotalizerGal) || 0) - (parseFloat(issueState.lastIssuedUhtGal) || 0)) * GAL_TO_LBS
+    }
+    if (issuedLbs < 10 && unIssuedLbs > 1000) {
+      closedZeroIssued = true
+      console.error(`[SurgeTankMesService] ${tankId} (WO ${record.nsWorkOrderNumber || record.nsWorkOrderId}) closed with ~0 lb issued but ~${unIssuedLbs.toFixed(0)} lb of UHT flow un-issued — NetSuite is missing this production. Last issue error: ${String(record.lastIssueError || 'n/a').replace(/\s+/g, ' ').slice(0, 200)}`)
+      statusStore.pushEvent(
+        'surgeBatch.closedZeroIssued',
+        `${tankId}: batch closed with ~0 lb issued, ~${unIssuedLbs.toFixed(0)} lb un-issued (WO ${record.nsWorkOrderNumber || record.nsWorkOrderId})`,
+        { tankId, nsWorkOrderId: record.nsWorkOrderId, nsWorkOrderNumber: record.nsWorkOrderNumber || null, unIssuedLbs, lastIssueError: record.lastIssueError || null }
+      )
+    }
+  } catch (e) {
+    console.warn(`[SurgeTankMesService] zero-issue close check failed: ${e.message}`)
+  }
+
   // When the tank filled and drained at once, the net-rise arrival under-counts,
-  // so the waste figure above is a loose upper bound — flag it as not fully
-  // trustworthy rather than presenting it as measured.
+  // so the waste figure above is a loose upper bound — UNLESS every concurrent
+  // tick was metered by the Filler 1 inlet meter (SD-708) and the drain credit
+  // is actually applied (MES_METERED_DRAIN), in which case waste is measured.
   const concurrent = !!record.concurrentFillDrain
+  const concurrentTicks = Number(record.concurrentTickCount) || 0
+  const meteredDrainLbs = parseFloat(record.meteredDrainLbs) || 0
+  const meteredTicks = Number(record.meteredDrainTickCount) || 0
+  const outputWithDrainLbs = record.outputWithDrainLbs != null ? parseFloat(record.outputWithDrainLbs) : null
+  const wasteWithDrainLbs = outputWithDrainLbs != null ? Math.max(0, issuedLbs - outputWithDrainLbs) : null
+  const wasteWithDrainPercent = wasteWithDrainLbs != null && issuedLbs >= 10
+    ? Math.max(0, Math.min(999999.99, (wasteWithDrainLbs / issuedLbs) * 100))
+    : null
+  // Fully metered = every concurrent tick had a measurable, unambiguous meter
+  // read AND the only latched line was 1 (the metered Filler 1 leg — a Filler 2
+  // draw on the shared Sel1 leg keeps waste an upper bound).
+  const drainFullyMetered = concurrent && concurrentTicks > 0
+    && meteredTicks === concurrentTicks && record.drainFillerLines === '1'
   const concurrentNote = concurrent
-    ? ` ⚠ concurrent fill+drain on ${record.concurrentTickCount} tick(s) (filler line(s) ${record.drainFillerLines || '?'}) — waste is an upper bound, not a measured value`
+    ? (drainFullyMetered && config.MES_METERED_DRAIN
+        ? ` — drain metered via Filler 1 inlet (${meteredDrainLbs.toFixed(1)} lb over ${meteredTicks} tick(s)); waste is measured`
+        : ` ⚠ concurrent fill+drain on ${record.concurrentTickCount} tick(s) (filler line(s) ${record.drainFillerLines || '?'}) — waste is an upper bound, not a measured value (metered ${meteredTicks} of ${concurrentTicks} concurrent tick(s))`)
     : ''
 
   await record.update({
@@ -1058,10 +1135,19 @@ async function processWOEnd(data, historian) {
       cumulativeCompletedLbs: parseFloat(record.cumulativeCompletedLbs) || 0,
       wasteLbs,
       wastePercent,
-      note: 'waste = UHT-leg loss (issued − reached); upper bound under concurrent fill+drain',
+      note: 'waste = UHT-leg loss (issued − reached); upper bound under concurrent fill+drain unless drain fully metered',
       concurrentFillDrain: concurrent,
-      concurrentTickCount: Number(record.concurrentTickCount) || 0,
+      concurrentTickCount: concurrentTicks,
       drainFillerLines: record.drainFillerLines || null,
+      meteredDrainLbs,
+      meteredDrainTickCount: meteredTicks,
+      outputWithDrainLbs,
+      wasteWithDrainLbs,
+      wasteWithDrainPercent,
+      drainFullyMetered,
+      meteredDrainApplied: config.MES_METERED_DRAIN,
+      closedZeroIssued,
+      unIssuedLbs,
       flushedIssue,
       flushedCompletion,
     }),
@@ -1088,8 +1174,15 @@ async function processWOEnd(data, historian) {
     wasteLbs,
     wastePercent,
     concurrentFillDrain: concurrent,
-    concurrentTickCount: Number(record.concurrentTickCount) || 0,
+    concurrentTickCount: concurrentTicks,
     drainFillerLines: record.drainFillerLines || null,
+    meteredDrainLbs,
+    meteredDrainTickCount: meteredTicks,
+    outputWithDrainLbs,
+    wasteWithDrainLbs,
+    wasteWithDrainPercent,
+    drainFullyMetered,
+    meteredDrainApplied: config.MES_METERED_DRAIN,
   }
 }
 
@@ -1200,7 +1293,7 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
   if (config.MES_DRY_RUN) {
     await state.update({ lastIssuedUhtGal: currentGal, lastIssueAt: observedAt })
     await batch.increment({ cumulativeIssuedLbs: deltaLbs })
-    await batch.update({ lastIssueAt: observedAt })
+    await batch.update({ lastIssueAt: observedAt, consecutiveIssueFailures: 0, lastIssueError: null, lastIssueErrorAt: null })
     console.log(`[SurgeTankMesService] DRY RUN tick issue UHT ${batch.feedingUhtId} → ${batch.tankId}: ${deltaLbs.toFixed(1)} lb (${deltaGal.toFixed(1)} gal)`)
     return true
   }
@@ -1236,13 +1329,14 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
   // by construction the BOM contains exactly this item. Legacy batches without
   // a pinned component fall through to today's re-resolver path above.
 
-  let body, allocations, tracking, resolvedBin
+  let body, allocations, tracking, resolvedBin, woHasLotLines
   try {
     const built = await buildWoIssueBody(batch.nsWorkOrderId, component.itemId, deltaLbs, component.binId, bomLines)
     body = built.body
     allocations = built.allocations
     tracking = built.tracking
     resolvedBin = built.resolvedBinId
+    woHasLotLines = built.woHasLotLines
   } catch (err) {
     console.error(`[SurgeTankMesService] tick issue ${batch.tankId} → WO ${batch.nsWorkOrderId}: buildWoIssueBody failed — ${err.message}`)
     statusStore.pushEvent(
@@ -1267,6 +1361,7 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
       success: false,
       errorMessage: err.message,
     })
+    await noteIssueFailure(batch, err, state)
     return false
   }
 
@@ -1278,6 +1373,7 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
     const issued = await postSurgeIssueWithShortfallRetry({
       nsWorkOrderId: batch.nsWorkOrderId, targetItemId: component.itemId,
       binId: component.binId, body, tankName: batch.tankId,
+      quantity: deltaLbs, bomLines, woHasLotLines, tracking,
     })
     body = issued.body
     const nsResult = issued.nsResult
@@ -1290,7 +1386,12 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
       lastProductName: component.itemName,
     })
     await batch.increment({ cumulativeIssuedLbs: deltaLbs })
-    await batch.update({ lastIssueAt: observedAt })
+    await batch.update({
+      lastIssueAt: observedAt,
+      consecutiveIssueFailures: 0,
+      lastIssueError: null,
+      lastIssueErrorAt: null,
+    })
 
     await db.MesProcessingLog.create({
       eventType: 'surge_tank_tick_issue',
@@ -1325,6 +1426,7 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
         error: err.message.slice(0, 500),
         requestBody: body,
         tracking,
+        woHasLotLines,
         resolvedBin,
         binOnHand,
       }
@@ -1338,7 +1440,42 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
       errorMessage: err.message,
     })
     // Don't advance lastIssuedUhtGal — same delta retries next tick.
+    await noteIssueFailure(batch, err, state)
     return false
+  }
+}
+
+// A batch whose NS issues fail back-to-back is "stuck": milk keeps flowing and
+// the cursor keeps holding, but nothing reaches the books — the WO2060/WO2062
+// failure mode that ran silent for 11 hours. Track the streak on the batch row
+// (survives restarts, flows into live-status/analytics/review), and escalate
+// quietly: console.error (pm2-visible in prod) + an ordinary statusStore event.
+// Deliberately NO email/Teams — report-only, per SD-708 rollout decisions.
+const STUCK_ISSUE_FAILURE_THRESHOLD = 5 // ~25 min at the prod 5-min tick
+
+async function noteIssueFailure(batch, err, state) {
+  try {
+    const count = (Number(batch.consecutiveIssueFailures) || 0) + 1
+    await batch.update({
+      consecutiveIssueFailures: count,
+      lastIssueError: String(err.message || err).slice(0, 500),
+      lastIssueErrorAt: new Date(clock.now()),
+    })
+    // First shout at the threshold, then at most ~hourly (every 12th tick).
+    if (count === STUCK_ISSUE_FAILURE_THRESHOLD
+        || (count > STUCK_ISSUE_FAILURE_THRESHOLD && count % 12 === 0)) {
+      const heldLbs = state
+        ? Math.max(0, (parseFloat(state.lastTotalizerGal) || 0) - (parseFloat(state.lastIssuedUhtGal) || 0)) * GAL_TO_LBS
+        : null
+      console.error(`[SurgeTankMesService] STUCK: ${batch.tankId} (WO ${batch.nsWorkOrderNumber || batch.nsWorkOrderId}) — ${count} consecutive NS issue failures${heldLbs != null ? `, ~${heldLbs.toFixed(0)} lb held` : ''}. Last error: ${String(err.message || '').replace(/\s+/g, ' ').slice(0, 200)}`)
+      statusStore.pushEvent(
+        'surgeTick.stuck',
+        `${batch.tankId}: ${count} consecutive NS issue failures${heldLbs != null ? ` — ~${heldLbs.toFixed(0)} lb held` : ''} (WO ${batch.nsWorkOrderNumber || batch.nsWorkOrderId})`,
+        { tankId: batch.tankId, nsWorkOrderId: batch.nsWorkOrderId, nsWorkOrderNumber: batch.nsWorkOrderNumber || null, count, heldLbs }
+      )
+    }
+  } catch (e) {
+    console.warn(`[SurgeTankMesService] noteIssueFailure bookkeeping failed: ${e.message}`)
   }
 }
 
@@ -1530,7 +1667,141 @@ function resolveIssueModes(activeBatches) {
  * arrival. Caveat: when a tank fills and drains at once, the net rise
  * under-counts arrival, so waste is a conservative UPPER bound on UHT loss.
  */
-async function tickArrivalForBatch(batch, historian, issueMode, issuedThisTick = false) {
+// How stale a Filler 1 meter sample may be before it stops counting as
+// measured. Raw top-1 serves the last STORED sample, so a frozen historian
+// collection would read measured:true forever — sampleAt is the guard.
+const DRAIN_STALE_MAX_MS = 15 * 60 * 1000
+
+// Max age of a batch's drain cursor before its spanned delta is re-seeded
+// instead of credited. The credit gates (RunMode/latch) are evaluated at the
+// CURRENT instant only — a delta spanning a long unobserved window (MES
+// redeploy, frozen collection) could contain flush/CIP flow the gates exist
+// to exclude, so never credit across a gap longer than a few ticks.
+const DRAIN_GAP_MAX_MS = 15 * 60 * 1000
+
+// Backward steps up to this are DECIMAL(14,2) round-trip noise (the cursor
+// column stores 2 decimals; the historian serves the raw float) — treat as
+// zero delta silently. The jitter warn is reserved for real backward steps.
+const DRAIN_JITTER_EPS_GAL = 0.01
+
+/**
+ * One consistent per-tick view for the Filler 1 drain credit, built ONCE in
+ * tickAllActiveBatches and shared by every batch's arrival pass. Latch
+ * attribution (claimant/ambiguous) and the meter reading MUST come from a
+ * single snapshot: per-batch snapshots taken seconds apart (NetSuite awaits
+ * sit between batches) let a mid-tick Sel1 handoff show EACH tank as sole
+ * claimant in its own view, double-crediting overlapping totalizer intervals.
+ */
+async function buildFiller1DrainContext(historian) {
+  const none = { flow: null, claimantTankId: null, ambiguous: false }
+  if (typeof historian.getFiller1InletFlow !== 'function') return none // un-updated provider → level-rise-only
+  let statuses
+  try {
+    statuses = await historian.getSurgeTankStatus()
+  } catch (err) {
+    console.warn(`[SurgeTankMesService] drain context: getSurgeTankStatus failed — ${err.message}`)
+    return none
+  }
+  const flow = await historian.getFiller1InletFlow() // never rejects (provider contract)
+  const sel1 = (statuses || []).filter(s => (s.tankId === 'ST81' || s.tankId === 'ST82')
+    && Array.isArray(s.fillerLines) && s.fillerLines.includes(1))
+  const ambiguous = sel1.length > 1
+  if (ambiguous && flow.measured) {
+    console.warn("[SurgeTankMesService] drain: both ST81 and ST82 latched to Sel1 — this tick's meter flow is un-attributable (combined-flow ambiguity)")
+  }
+  return {
+    flow,
+    claimantTankId: sel1.length === 1 ? sel1[0].tankId : null,
+    ambiguous,
+  }
+}
+
+/**
+ * Reset-tolerant, gated drain credit from the Filler 1 inlet meter
+ * (TR11_FT1140, SD-708) for one arrival tick of one ST81/82 batch, computed
+ * against the tick-shared drain context (single consistent latch view).
+ *
+ * Cursor discipline (mirrors the UHT issue cursor above): the cursor advances
+ * on EVERY fresh measured read — the credit gates never hold it, so flow that
+ * fails a gate is discarded, not deferred onto a later tick. Unmeasured or
+ * stale reads HOLD the cursor; if the hold outlasts DRAIN_GAP_MAX_MS the next
+ * good read RE-SEEDS instead of crediting (the instant-evaluated gates can't
+ * vouch for a long unobserved span). Replay returns measured:false from the
+ * provider override, which is the designed degradation.
+ *
+ * `fullyAccounted` = this tick's meter flow was measured, unambiguous, and
+ * either credited or genuinely zero — the only ticks that may count toward
+ * the drainFullyMetered waste certification. Ticks whose positive delta was
+ * DISCARDED (RunMode off/unknown, claimant mismatch, gap re-seed, first-read
+ * seed) are NOT fully accounted: gallons were dropped, so waste on this
+ * batch remains an upper bound.
+ */
+function computeFiller1DrainForTick(batch, ctx, issueMode, issuedThisTick) {
+  const none = { creditLbs: 0, newCursorGal: null, measured: false, ambiguous: false, running: null, deltaGal: 0, fullyAccounted: false }
+  if (batch.tankId !== 'ST81' && batch.tankId !== 'ST82') return none // TR11 serves only the Sel1 leg
+  const flow = ctx?.flow
+  if (!flow || !flow.measured || !Number.isFinite(flow.totalizerGal) || flow.totalizerGal < 0) return none
+  const sampleMs = flow.sampleAt ? Date.parse(flow.sampleAt) : NaN
+  if (!Number.isFinite(sampleMs) || clock.now() - sampleMs > DRAIN_STALE_MAX_MS) return none
+
+  const cur = flow.totalizerGal
+  const cursor = batch.lastDrainTotalizerGal != null ? parseFloat(batch.lastDrainTotalizerGal) : null
+  // First good read only seeds the cursor — never credit pre-batch history.
+  if (cursor == null || !Number.isFinite(cursor)) {
+    return { ...none, measured: true, running: flow.running, newCursorGal: cur }
+  }
+
+  // Gap guard: the cursor held through an unobserved window longer than a few
+  // ticks — re-seed without crediting. Crediting here would apply the current
+  // instant's RunMode/latch to flow that may have been flush/CIP mid-gap.
+  const observedMs = batch.lastDrainObservedAt ? new Date(batch.lastDrainObservedAt).getTime() : NaN
+  if (Number.isFinite(observedMs) && clock.now() - observedMs > DRAIN_GAP_MAX_MS) {
+    const skipped = Math.max(0, cur - cursor)
+    if (skipped > 0) {
+      console.warn(`[SurgeTankMesService] drain ${batch.tankId}: cursor gap of ${Math.round((clock.now() - observedMs) / 60000)} min — re-seeding, skipping ${skipped.toFixed(1)} gal of unattributable flow`)
+    }
+    return { ...none, measured: true, running: flow.running, newCursorGal: cur }
+  }
+
+  let deltaGal
+  if (cur >= cursor - DRAIN_JITTER_EPS_GAL) {
+    deltaGal = Math.max(0, cur - cursor)
+  } else if (cursor - cur > TOTALIZER_RESET_DROP_GAL) {
+    // Genuine odometer reset (the meter is field-resettable; a controls-side
+    // rename/typo fix would leave the same signature): post-reset value only.
+    console.warn(`[SurgeTankMesService] drain ${batch.tankId}: Filler 1 totalizer reset (${cursor.toFixed(1)} → ${cur.toFixed(1)} gal) — crediting post-reset value only`)
+    deltaGal = cur
+  } else {
+    // Sub-threshold backward step = jitter, not a reset (the WO1598 lesson):
+    // hold the cursor, credit nothing.
+    console.warn(`[SurgeTankMesService] drain ${batch.tankId}: Filler 1 totalizer jitter (${cursor.toFixed(2)} → ${cur.toFixed(2)} gal) — holding cursor`)
+    return { ...none, measured: true, running: flow.running }
+  }
+
+  // Sole-claimant rule on the SHARED tick snapshot: exactly one of ST81/82 is
+  // latched to Sel1 and it's this batch's tank. With both latched the meter
+  // reads combined flow — advance the cursor, credit NEITHER (holding would
+  // later dump both tanks' flow on one batch).
+  const latched = ctx.claimantTankId === batch.tankId
+
+  // Credit gates (cursor advances regardless). running false OR null discards:
+  // a non-production window can hold flush/CIP flow — the probe saw ~13k gal
+  // totalized with RunMode=0 — and holding would credit it later; discarding
+  // under-credits, the safe direction.
+  const credit = latched && !ctx.ambiguous && flow.running === true
+    && issueMode === 'issue' && issuedThisTick && deltaGal > 0
+  return {
+    creditLbs: credit ? deltaGal * GAL_TO_LBS : 0,
+    newCursorGal: cur,
+    measured: true,
+    ambiguous: ctx.ambiguous,
+    running: flow.running,
+    deltaGal,
+    fullyAccounted: !ctx.ambiguous && (deltaGal === 0 || credit),
+  }
+}
+
+async function tickArrivalForBatch(batch, historian, issueMode, issuedThisTick = false, drainCtx = null) {
   let statuses
   try {
     statuses = await historian.getSurgeTankStatus()
@@ -1564,18 +1835,62 @@ async function tickArrivalForBatch(batch, historian, issueMode, issuedThisTick =
     }
   }
 
+  // Metered Filler 1 drain (SD-708): reset-tolerant credit from the TR11
+  // inlet meter, gated on Sel1 latch / sole claimant / RunMode / concurrent
+  // issue — computed against the tick-shared drainCtx (single consistent
+  // latch view; see buildFiller1DrainContext). Cursor + diagnostics persist
+  // in the same batch.update() as the level baseline, so a failed persist
+  // retries the whole tick atomically.
+  const drain = computeFiller1DrainForTick(batch, drainCtx, issueMode, issuedThisTick)
+  if (drain.newCursorGal != null) {
+    updates.lastDrainTotalizerGal = drain.newCursorGal
+    updates.lastDrainObservedAt = new Date(clock.now())
+  }
+  // Count only ticks whose meter flow was fully accounted (credited or
+  // genuinely zero) — ticks with DISCARDED gallons must demote the
+  // drainFullyMetered certification, not satisfy it.
+  if (issuedThisTick && st.drainingToFiller && drain.fullyAccounted) {
+    updates.meteredDrainTickCount = (Number(batch.meteredDrainTickCount) || 0) + 1
+  }
+  if (drain.creditLbs > 0) {
+    updates.meteredDrainLbs = (parseFloat(batch.meteredDrainLbs) || 0) + drain.creditLbs
+  }
+
   if (issueMode === 'issue' && prevLbs != null) {
     const rise = curLbs - prevLbs
-    if (rise > config.MES_WASTE_RISE_FLOOR_LBS) {
-      const issued = parseFloat(batch.cumulativeIssuedLbs) || 0
-      const output = parseFloat(batch.cumulativeOutputLbs) || 0
+    const issued = parseFloat(batch.cumulativeIssuedLbs) || 0
+    const output = parseFloat(batch.cumulativeOutputLbs) || 0
+
+    // Real track: the drain credit joins the SIGNED level rise only when the
+    // flag is on. Signed matters — on a drain-only tick rise ≈ −drain, so the
+    // sum self-cancels and the floor blocks a double count (drained product
+    // was already credited when the level rose).
+    const effectiveRise = rise + (config.MES_METERED_DRAIN ? drain.creditLbs : 0)
+    if (effectiveRise > config.MES_WASTE_RISE_FLOOR_LBS) {
       // Clamp so output never exceeds issued (arrival over-read / sensor noise):
-      // completed ≤ output ≤ issued at all times.
-      const next = Math.min(issued, output + rise)
+      // completed ≤ output ≤ issued at all times. Also bounds any non-product
+      // flow the meter sees that slips past the RunMode gate.
+      const next = Math.min(issued, output + effectiveRise)
       if (next > output) {
         updates.cumulativeOutputLbs = next
-        console.log(`[SurgeTankMesService] arrival ${batch.tankId}: +${(next - output).toFixed(1)} lb reached (level ${prevLbs.toFixed(0)}→${curLbs.toFixed(0)}); output ${output.toFixed(0)}→${next.toFixed(0)} of issued ${issued.toFixed(0)}`)
+        console.log(`[SurgeTankMesService] arrival ${batch.tankId}: +${(next - output).toFixed(1)} lb reached (level ${prevLbs.toFixed(0)}→${curLbs.toFixed(0)}${config.MES_METERED_DRAIN && drain.creditLbs > 0 ? `, +${drain.creditLbs.toFixed(1)} lb drained` : ''}); output ${output.toFixed(0)}→${next.toFixed(0)} of issued ${issued.toFixed(0)}`)
       }
+    }
+
+    // Shadow track: identical floor+clamp math WITH the drain term, ALWAYS —
+    // the dev-soak / prod-shadow comparator. Converges to cumulativeOutputLbs
+    // while the flag is on; divergence there is a bug.
+    const shadowPrev = batch.outputWithDrainLbs != null ? parseFloat(batch.outputWithDrainLbs) : output
+    const shadowRise = rise + drain.creditLbs
+    let shadowNext = shadowPrev
+    if (shadowRise > config.MES_WASTE_RISE_FLOOR_LBS) {
+      shadowNext = Math.max(shadowPrev, Math.min(issued, shadowPrev + shadowRise))
+    }
+    if (batch.outputWithDrainLbs == null || shadowNext !== shadowPrev) {
+      updates.outputWithDrainLbs = shadowNext
+    }
+    if (drain.creditLbs > 0) {
+      console.log(`[SurgeTankMesService] drain ${batch.tankId}: +${drain.creditLbs.toFixed(1)} lb metered (${drain.deltaGal.toFixed(1)} gal)${config.MES_METERED_DRAIN ? '' : ' [shadow]'}; level rise ${rise.toFixed(1)} → effective ${(rise + drain.creditLbs).toFixed(1)}`)
     }
   }
   await batch.update(updates)
@@ -1587,6 +1902,12 @@ async function tickAllActiveBatches(historian) {
   if (activeBatches.length === 0) return summary
 
   const issueModeByBatch = resolveIssueModes(activeBatches)
+
+  // One drain context per tick, shared by every batch's arrival pass — latch
+  // attribution and the meter reading must come from a single consistent
+  // snapshot or a mid-tick Sel1 handoff double-credits (see
+  // buildFiller1DrainContext).
+  const drainCtx = await buildFiller1DrainContext(historian)
 
   for (const batch of activeBatches) {
     summary.batchesProcessed++
@@ -1602,7 +1923,7 @@ async function tickAllActiveBatches(historian) {
     try {
       await batch.reload()
       // Measure arrival (surge level rise) → cumulativeOutputLbs before completing.
-      await tickArrivalForBatch(batch, historian, issueMode, issuedThisTick)
+      await tickArrivalForBatch(batch, historian, issueMode, issuedThisTick, drainCtx)
       await batch.reload()
       const completed = await tickCompletionForBatch(batch)
       if (completed) summary.completionsFired++
@@ -1633,7 +1954,17 @@ async function getAllBatches({ status, limit = 200 } = {}) {
     order: [['createdAt', 'DESC']],
     limit: Math.min(Number(limit) || 200, 500),
   })
-  return { success: true, batches }
+  // Mark actively-stuck batches (NS issues failing back-to-back) so the
+  // existing Surge Tank Review view can list them while they're stuck —
+  // this failure class previously never touched status/errorMessage and
+  // sailed under every review surface (the WO2060 incident).
+  const rows = batches.map(b => {
+    const j = b.toJSON()
+    j.stuck = b.status === 'active'
+      && (Number(b.consecutiveIssueFailures) || 0) >= STUCK_ISSUE_FAILURE_THRESHOLD
+    return j
+  })
+  return { success: true, batches: rows }
 }
 
 async function retrySurgeBatch(id, { nsItemId, decidedBy } = {}) {
@@ -1755,4 +2086,5 @@ module.exports = {
   rejectSurgeBatch,
   getSurgeProductOptions,
   clearCaches,
+  STUCK_ISSUE_FAILURE_THRESHOLD,
 }

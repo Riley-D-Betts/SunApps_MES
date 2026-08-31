@@ -8688,6 +8688,12 @@
     "TagType": "Discrete"
   },
   {
+    "FQN": "BlendTank2A.BT2A_TANK_MODE",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
     "FQN": "BlendTank2A.ConsBomPos",
     "Description": "Consumed Item BOM Position",
     "EngUnit": "None",
@@ -9160,6 +9166,12 @@
     "Description": "BT2BBlend Tank 2B Tank Cooling On",
     "EngUnit": "",
     "TagType": "Discrete"
+  },
+  {
+    "FQN": "BlendTank2B.BT2B_TANK_MODE",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
   },
   {
     "FQN": "BlendTank2B.BTCA_100FT_SCL_GPM",
@@ -15694,6 +15706,18 @@
     "Description": "BTCA Cocoa Tank  Cooling On",
     "EngUnit": "",
     "TagType": "Discrete"
+  },
+  {
+    "FQN": "CocoaTank.BTCA_NOTE_STRING",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "String"
+  },
+  {
+    "FQN": "CocoaTank.BTCA_TANK_MODE",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
   },
   {
     "FQN": "CocoaTank.Product_Time",
@@ -48042,6 +48066,12 @@
     "TagType": "Discrete"
   },
   {
+    "FQN": "Filler3.AirFlowRate",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
     "FQN": "Filler3.BatchSize",
     "Description": "Distributed batch size",
     "EngUnit": "None",
@@ -48202,6 +48232,12 @@
     "Description": "Produced Item Sub Lot Number",
     "EngUnit": "",
     "TagType": "String"
+  },
+  {
+    "FQN": "Filler3.ProductFlowRate",
+    "Description": "",
+    "EngUnit": "l/h",
+    "TagType": "Analog"
   },
   {
     "FQN": "Filler3.StartJob",
@@ -48402,6 +48438,12 @@
     "TagType": "String"
   },
   {
+    "FQN": "Filler4.ProductFlowRate",
+    "Description": "",
+    "EngUnit": "l/h",
+    "TagType": "Analog"
+  },
+  {
     "FQN": "Filler4.StartJob",
     "Description": "Start Job Trigger",
     "EngUnit": "",
@@ -48600,6 +48642,12 @@
     "TagType": "String"
   },
   {
+    "FQN": "Filler5.ProductFlowRate",
+    "Description": "",
+    "EngUnit": "l/min",
+    "TagType": "Analog"
+  },
+  {
     "FQN": "Filler5.StartJob",
     "Description": "Start Job Trigger",
     "EngUnit": "",
@@ -48796,6 +48844,12 @@
     "Description": "Produced Item Sub Lot Number",
     "EngUnit": "",
     "TagType": "String"
+  },
+  {
+    "FQN": "Filler6.ProductFlowRate",
+    "Description": "",
+    "EngUnit": "l/min",
+    "TagType": "Analog"
   },
   {
     "FQN": "Filler6.StartJob",
@@ -51954,6 +52008,18 @@
     "TagType": "Analog"
   },
   {
+    "FQN": "Intake.CSILO1_Index_Snapshot_12pm",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Intake.CSILO1_Index_Snapshot_7am",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
     "FQN": "Intake.CSILO1_LBS_Snapshot_12pm",
     "Description": "",
     "EngUnit": "None",
@@ -51966,6 +52032,18 @@
     "TagType": "Analog"
   },
   {
+    "FQN": "Intake.CSILO2_Index_Snapshot_12pm",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Intake.CSILO2_Index_Snapshot_7am",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
     "FQN": "Intake.CSILO2_LBS_Snapshot_12pm",
     "Description": "",
     "EngUnit": "None",
@@ -51973,6 +52051,18 @@
   },
   {
     "FQN": "Intake.CSILO2_LBS_Snapshot_7am",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Intake.CSILO3_Index_Snapshot_12pm",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Intake.CSILO3_Index_Snapshot_7am",
     "Description": "",
     "EngUnit": "None",
     "TagType": "Analog"
@@ -52020,6 +52110,18 @@
     "TagType": "Analog"
   },
   {
+    "FQN": "Intake.MSILO1_Index_Snapshot_12pm",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Intake.MSILO1_Index_Snapshot_7am",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
     "FQN": "Intake.MSILO1_LBS_Snapshot_12pm",
     "Description": "",
     "EngUnit": "None",
@@ -52027,6 +52129,18 @@
   },
   {
     "FQN": "Intake.MSILO1_LBS_Snapshot_7am",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Intake.MSILO2_Index_Snapshot_12pm",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Intake.MSILO2_Index_Snapshot_7am",
     "Description": "",
     "EngUnit": "None",
     "TagType": "Analog"
@@ -52044,6 +52158,18 @@
     "TagType": "Analog"
   },
   {
+    "FQN": "Intake.MSILO3_Index_Snapshot_12pm",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Intake.MSILO3_Index_Snapshot_7am",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
     "FQN": "Intake.MSILO3_LBS_Snapshot_12pm",
     "Description": "",
     "EngUnit": "None",
@@ -52056,6 +52182,18 @@
     "TagType": "Analog"
   },
   {
+    "FQN": "Intake.MSILO4_Index_Snapshot_12pm",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Intake.MSILO4_Index_Snapshot_7am",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
     "FQN": "Intake.MSILO4_LBS_Snapshot_12pm",
     "Description": "",
     "EngUnit": "None",
@@ -52063,6 +52201,18 @@
   },
   {
     "FQN": "Intake.MSILO4_LBS_Snapshot_7am",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Intake.MSILO5_Index_Snapshot_12pm",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Intake.MSILO5_Index_Snapshot_7am",
     "Description": "",
     "EngUnit": "None",
     "TagType": "Analog"
@@ -55668,6 +55818,12 @@
     "TagType": "Analog"
   },
   {
+    "FQN": "Liquifier1.LIQ1_TANK_MODE",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
     "FQN": "Liquifier1.NextWO",
     "Description": "Next requested Work Order",
     "EngUnit": "",
@@ -56001,6 +56157,12 @@
     "FQN": "Liquifier2.LIC_BLD_2100LT_SP",
     "Description": "LIQ2 Liquifier 2 Level Control SP",
     "EngUnit": "%",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Liquifier2.LIQ2_TANK_MODE",
+    "Description": "",
+    "EngUnit": "None",
     "TagType": "Analog"
   },
   {
@@ -108240,6 +108402,18 @@
     "TagType": "Analog"
   },
   {
+    "FQN": "ThermaRoute.TR11_FT1140",
+    "Description": "Filler 1 inlet Flow",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "THermaRoute.TR11_FT1140.Totalizer_1",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
     "FQN": "ThermaRoute.TR11_LineFlush_Disable",
     "Description": "TR11 LineFlush Disable",
     "EngUnit": "",
@@ -117072,6 +117246,12 @@
     "TagType": "Analog"
   },
   {
+    "FQN": "ThermaRoute.TT1140",
+    "Description": "",
+    "EngUnit": "°F",
+    "TagType": "Analog"
+  },
+  {
     "FQN": "ThermaRoute.TT1240",
     "Description": "Filler 2 inlet Temps",
     "EngUnit": "None",
@@ -124426,6 +124606,90 @@
     "Description": "UHT1 Turbidiy SP",
     "EngUnit": "None",
     "TagType": "Analog"
+  },
+  {
+    "FQN": "UHT1.UHT_LR1",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT1.UHT_LR10",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT1.UHT_LR11",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT1.UHT_LR12",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT1.UHT_LR13",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT1.UHT_LR14",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT1.UHT_LR2",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT1.UHT_LR3",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT1.UHT_LR4",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT1.UHT_LR5",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT1.UHT_LR6",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT1.UHT_LR7",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT1.UHT_LR8",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT1.UHT_LR9",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
   },
   {
     "FQN": "UHT1.UP2201.Disconnect",
@@ -133404,6 +133668,90 @@
     "TagType": "Analog"
   },
   {
+    "FQN": "UHT2.UHT_LR1",
+    "Description": "Hold Tube Above Pasteurization Temp",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT2.UHT_LR10",
+    "Description": "Injector Differential Pressire OK",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT2.UHT_LR11",
+    "Description": "FDD-5101 In Divert Position",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT2.UHT_LR12",
+    "Description": "Timing Pump Running",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT2.UHT_LR13",
+    "Description": "UHT is in Legal Forward Flow",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT2.UHT_LR14",
+    "Description": "FDD-5102 in Divert",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT2.UHT_LR2",
+    "Description": "Hold Tube Above Steriliztion Temp LR-2",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT2.UHT_LR3",
+    "Description": "Condenser Above Pasteurization",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT2.UHT_LR4",
+    "Description": "Condenser Above Sterilization Temp",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT2.UHT_LR5",
+    "Description": "Flow Rate OK",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT2.UHT_LR6",
+    "Description": "Hold Tube Pressure OK",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT2.UHT_LR7",
+    "Description": "Pre FDD Above Pasteurization Temp",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT2.UHT_LR8",
+    "Description": "Pre FDD Above Sterilization Temp",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "UHT2.UHT_LR9",
+    "Description": "Regen Differential Pressure OK",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
     "FQN": "UHT2.UP2201_Disconnect",
     "Description": "Hot Set Pump Disconnect OFF",
     "EngUnit": "",
@@ -135198,6 +135546,54 @@
     "TagType": "Analog"
   },
   {
+    "FQN": "Utilities.BoilerBPSkid.Boost Pressure.PV",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Utilities.BoilerBPSkid.Discharge Pressure.PV",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Utilities.BoilerBPSkid.Flow.PV",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Utilities.BoilerBPSkid.Pump Status.PV",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "Utilities.BoilerBPSkid.Pump1Speed.PV",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Utilities.BoilerBPSkid.Pump2Speed.PV",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Utilities.BoilerBPSkid.Pump2Status.PV",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "Utilities.BoilerBPSkid.Suction Pressure.PV",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
     "FQN": "Utilities.BoilerFeedFdbk",
     "Description": "BoilerFeedFdbk",
     "EngUnit": "%",
@@ -136002,15 +136398,57 @@
     "TagType": "Analog"
   },
   {
-    "FQN": "Utilities.ProcessBoostPressure",
-    "Description": "Process Boost Pressure",
-    "EngUnit": "PSI",
-    "TagType": "Analog"
-  },
-  {
     "FQN": "Utilities.ProcessBPSkid.Flow",
     "Description": "Boost Skid Flow",
     "EngUnit": "GPM",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Utilities.ProcessBPSkid.ProcessBoostPressure",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Utilities.ProcessBPSkid.Pump1Speed",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Utilities.ProcessBPSKid.Pump1Status",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "Utilities.ProcessBPSkid.Pump2Speed",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Utilities.ProcessBPSkid.Pump2Status",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "Utilities.ProcessBPSkid.Pump3Speed",
+    "Description": "",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "Utilities.ProcessBPSkid.Pump3Status",
+    "Description": "",
+    "EngUnit": "",
+    "TagType": "Discrete"
+  },
+  {
+    "FQN": "Utilities.ProcessBPSkid.RemotePressure",
+    "Description": "",
+    "EngUnit": "None",
     "TagType": "Analog"
   },
   {
@@ -137178,6 +137616,12 @@
     "TagType": "Analog"
   },
   {
+    "FQN": "WasteWater.Effluent_GPM_from_PT",
+    "Description": "",
+    "EngUnit": "GPM",
+    "TagType": "Analog"
+  },
+  {
     "FQN": "WasteWater.EFFLUENT_MONTHLY_TOTAL",
     "Description": "EFFLUENT_MONTHLY_TOTAL",
     "EngUnit": "None",
@@ -137216,6 +137660,12 @@
   {
     "FQN": "WasteWater.EFFLUENT_TOTAL",
     "Description": "EFFLUENT_TOTAL",
+    "EngUnit": "None",
+    "TagType": "Analog"
+  },
+  {
+    "FQN": "WasteWater.Effluent_Total_from_pt",
+    "Description": "",
     "EngUnit": "None",
     "TagType": "Analog"
   },

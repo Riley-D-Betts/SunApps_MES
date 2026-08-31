@@ -21,6 +21,7 @@ const state = {
   silos: null,                     // { silos: [...], pollDurationMs, pollAt }
   uhts: null,                      // { uhts: [...], pollDurationMs, pollAt }
   surgeTanks: null,                // { tanks: [...], pollDurationMs, pollAt }
+  fillers: null,                   // { fillers: [...], pollDurationMs, pollAt }
   lastPoll: {
     separator: null,
     blendTank: null,
@@ -74,6 +75,11 @@ function setUhts(snapshot) {
 function setSurgeTanks(snapshot) {
   state.surgeTanks = { ...snapshot, pollAt: now() }
   state.lastPoll.equipment = state.surgeTanks.pollAt
+}
+
+function setFillers(snapshot) {
+  state.fillers = { ...snapshot, pollAt: now() }
+  state.lastPoll.equipment = state.fillers.pollAt
 }
 
 /**
@@ -149,6 +155,14 @@ async function hydrateTickState(MesBlendTankBatch, MesPipeIssueState, MesSurgeTa
         concurrentFillDrain: !!b.concurrentFillDrain,
         concurrentTickCount: Number(b.concurrentTickCount) || 0,
         drainFillerLines: b.drainFillerLines || null,
+        meteredDrainLbs: parseFloat(b.meteredDrainLbs) || 0,
+        meteredDrainTickCount: Number(b.meteredDrainTickCount) || 0,
+        outputWithDrainLbs: b.outputWithDrainLbs != null ? parseFloat(b.outputWithDrainLbs) : null,
+        lastDrainTotalizerGal: b.lastDrainTotalizerGal != null ? parseFloat(b.lastDrainTotalizerGal) : null,
+        lastDrainObservedAt: b.lastDrainObservedAt || null,
+        consecutiveIssueFailures: Number(b.consecutiveIssueFailures) || 0,
+        lastIssueError: b.lastIssueError || null,
+        lastIssueErrorAt: b.lastIssueErrorAt || null,
         lastIssueAt: b.lastIssueAt,
         lastCompletionAt: b.lastCompletionAt,
         detectedAt: b.detectedAt,
@@ -312,6 +326,11 @@ function surgeBatchSummary(b) {
     concurrentFillDrain: !!b.concurrentFillDrain,
     concurrentTickCount: Number(b.concurrentTickCount) || 0,
     drainFillerLines: b.drainFillerLines || null,
+    meteredDrainLbs: parseFloat(b.meteredDrainLbs) || 0,
+    meteredDrainTickCount: Number(b.meteredDrainTickCount) || 0,
+    outputWithDrainLbs: b.outputWithDrainLbs != null ? parseFloat(b.outputWithDrainLbs) : null,
+    consecutiveIssueFailures: Number(b.consecutiveIssueFailures) || 0,
+    lastIssueError: b.lastIssueError || null,
     detectedAt: b.detectedAt,
     completedAt: b.completedAt,
     errorMessage: b.errorMessage,
@@ -520,6 +539,7 @@ function snapshot() {
     silos: combineSilos(),
     uhts: state.uhts,
     surgeTanks: state.surgeTanks,
+    fillers: state.fillers,
     // Errors are kept in the ring so operators can see *why* a transfer
     // failed. Pre-fix they were hidden; surfacing them is more useful.
     recentBatches: state.recentBatches,
@@ -548,6 +568,7 @@ function clear() {
   state.silos = null
   state.uhts = null
   state.surgeTanks = null
+  state.fillers = null
   state.lastPoll = { separator: null, blendTank: null, bulkMilk: null, equipment: null }
   state.events.length = 0
   state.recentBatches.length = 0
@@ -564,6 +585,7 @@ module.exports = {
   setSilos,
   setUhts,
   setSurgeTanks,
+  setFillers,
   pushSeparationBatch,
   pushSeparationBatchFromDbRow,
   hydrateSeparationBatches,

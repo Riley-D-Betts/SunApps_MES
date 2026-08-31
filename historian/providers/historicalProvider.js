@@ -60,6 +60,28 @@ class HistoricalProvider extends RestProvider {
     return clock.simNow()
   }
 
+  /**
+   * Replay override (SD-708): the inherited implementation would read the
+   * FT1140 tags through the sim-pinned ProcessValues lookup, but the AVEVA
+   * server emits interpolated boundary rows stamped OpcQuality 192 for these
+   * deadbanded tags — near-fabricated linear-ramp values that would pass the
+   * quality gate and masquerade as real meter reads. The designed replay
+   * behavior is the unmeasured degradation; only the RunMode step bit (a
+   * genuinely delta-stored discrete, for which the boundary row is the true
+   * last-known value) is derived from replay data.
+   */
+  async getFiller1InletFlow() {
+    const runPv = await this._getCurrentValue(RestProvider.TAGS.FILLER1_RUN_MODE, { verbose: false })
+      .catch(() => null)
+    return {
+      gpm: null,
+      totalizerGal: null,
+      measured: false,
+      running: runPv?.Value != null ? runPv.Value === 1 : null,
+      sampleAt: null,
+    }
+  }
+
   async _acquire() {
     if (this._inflight < MAX_INFLIGHT) {
       this._inflight++
