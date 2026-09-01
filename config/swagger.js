@@ -49,6 +49,7 @@ const options = {
       { name: 'BOM Admin', description: 'Read/preview/commit NetSuite assembly BOM revisions' },
       { name: 'Filler Hours', description: 'Historical filler time-in-state for the Machine Efficiency report' },
       { name: 'Filler Flow', description: 'Filler 1 inlet flow meter (TR11_FT1140) — run volumes, flow trend points, and totalizer deltas over a window' },
+      { name: 'Costs Config', description: 'Audited cost constants (milk $/lb, FG $/case) that price waste and shrink — append-only price history' },
       { name: 'Replay', description: 'Time-travel simulation control (replay mode, sim clock, dev reset)' },
     ],
   },

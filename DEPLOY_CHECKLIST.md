@@ -141,3 +141,23 @@ environment with no extra secret needed.
 2. **First-deploy PM2** — `pm2 restart` fails with no existing process; do the one-time `pm2 start` first (§3).
 3. **Unmapped cron/threshold secrets** silently fall back to config defaults (§2).
 4. **DB DDL perms** — boot creates/alters tables; insufficient rights = failed startup (§4).
+
+---
+
+### SD-717: seed the cost constants (once per environment)
+
+The costs table (`{env}_MesCostConfigs`) auto-creates on boot but ships EMPTY —
+$ figures across SunApps/Portal stay hidden until seeded. After deploying, POST
+the genesis row (append-only; later price changes go through the SunApps Cost
+Settings page or another POST):
+
+```bash
+curl -X POST http://<host>:4005/api/mes/config/costs \
+  -H 'Content-Type: application/json' \
+  -d '{"milkCostPerLb": 0.34, "fgCasePrice": 10.35, "note": "initial seed — ops-provided Aug 2026"}'
+```
+
+- [ ] Seed dev after the dev deploy; verify `GET /api/mes/config/costs` returns the values.
+- [ ] Seed prod after the prod release.
+- [ ] SunApps side: create the `MES_COST_ADMIN` control key in the admin ControlKeys UI
+      and grant it to the right group — the Cost Settings page is route-denied until then.

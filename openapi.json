@@ -66,6 +66,10 @@
       "description": "Filler 1 inlet flow meter (TR11_FT1140) — run volumes, flow trend points, and totalizer deltas over a window"
     },
     {
+      "name": "Costs Config",
+      "description": "Audited cost constants (milk $/lb, FG $/case) that price waste and shrink — append-only price history"
+    },
+    {
       "name": "Replay",
       "description": "Time-travel simulation control (replay mode, sim clock, dev reset)"
     }
@@ -2528,6 +2532,91 @@
           },
           "500": {
             "description": "Reset failed before the response was sent."
+          }
+        }
+      }
+    },
+    "/api/mes/config/costs": {
+      "get": {
+        "tags": [
+          "Costs Config"
+        ],
+        "summary": "Current cost constants (newest price row)",
+        "description": "Returns the current cost constants used to price waste/shrink. An unseeded environment returns 200 with explicit nulls (consumers hide their $ figures) — never a 404. Pass `history=N` to also receive the most recent N price rows (max 100), newest first.\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "history",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "description": "Also return the most recent N price rows."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current constants (plus optional history).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "milkCostPerLb ($/lb), fgCasePrice ($/case, nullable), effectiveFrom, note; history[] when requested."
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Costs Config"
+        ],
+        "summary": "Append a new cost row (becomes the current price)",
+        "description": "Appends a price row — rows are never updated or deleted, so every change is audited. Also the post-deploy seed mechanism (see DEPLOY_CHECKLIST).\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "milkCostPerLb"
+                ],
+                "properties": {
+                  "milkCostPerLb": {
+                    "type": "number",
+                    "minimum": 0,
+                    "exclusiveMinimum": true,
+                    "example": 0.34
+                  },
+                  "fgCasePrice": {
+                    "type": "number",
+                    "minimum": 0,
+                    "example": 10.35
+                  },
+                  "note": {
+                    "type": "string",
+                    "maxLength": 200
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Row created; body is the new current constants."
+          },
+          "400": {
+            "description": "Invalid milkCostPerLb / fgCasePrice."
+          },
+          "500": {
+            "description": "Insert failed."
           }
         }
       }

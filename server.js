@@ -26,6 +26,7 @@ const analyticsRoutes = require('./routes/analyticsRoutes')
 const bomAdminRoutes = require('./routes/bomAdminRoutes')
 const fillerHoursRoutes = require('./routes/fillerHoursRoutes')
 const fillerFlowRoutes = require('./routes/fillerFlowRoutes')
+const costsConfigRoutes = require('./routes/costsConfigRoutes')
 const { openapiSpec } = require('./config/swagger')
 const clock = require('./sim/clock')
 
@@ -233,6 +234,7 @@ app.use('/api/mes/analytics', analyticsRoutes)
 app.use('/api/mes/bom-admin', bomAdminRoutes)
 app.use('/api/mes/filler-hours', fillerHoursRoutes)
 app.use('/api/mes/filler-flow', fillerFlowRoutes)
+app.use('/api/mes/config/costs', costsConfigRoutes)
 
 app.listen(config.PORT, () => {
   bootLog(`SunApps MES Service running on port ${config.PORT} [env=${config.ENVIRONMENT}, tablePrefix=${config.TABLE_PREFIX}]`)

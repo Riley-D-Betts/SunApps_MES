@@ -13,6 +13,9 @@ const SURGE_SORT_FIELDS = [
   'detectedAt', 'completedAt', 'cumulativeIssuedLbs', 'cumulativeOutputLbs',
   'cumulativeCompletedLbs', 'wastePercent', 'wasteLbs', 'tankId', 'productName',
   'feedingUhtId', 'feedingFromEntName', 'status',
+  // SD-717: the metered-drain columns are sortable in the analytics UI —
+  // without these entries buildOrder silently falls back to detectedAt.
+  'meteredDrainLbs', 'outputWithDrainLbs',
 ]
 const SEPARATION_SORT_FIELDS = [
   'batchStart', 'batchEnd', 'createdAt', 'inputVolume', 'creamVolume', 'skimVolume',
@@ -72,7 +75,7 @@ function buildOrder(sortBy, sortDir, validFields) {
   return [[field, dir]]
 }
 
-async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', outputField = 'cumulativeOutputLbs', completedField = 'cumulativeCompletedLbs', skimField = null, concurrentField = null, meteredDrainField = null } = {}) {
+async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', outputField = 'cumulativeOutputLbs', completedField = 'cumulativeCompletedLbs', skimField = null, concurrentField = null, meteredDrainField = null, wasteField = null } = {}) {
   const attrs = [
     [fn('COUNT', col('id')), 'batchCount'],
     [fn('AVG', col('wastePercent')), 'avgWastePercent'],
@@ -87,6 +90,8 @@ async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', o
   // Raw metered Filler-1 drain credit (SD-708) — pre-floor/pre-clamp diagnostic
   // sum, NOT the applied arrival effect (that's outputWithDrainLbs per batch).
   if (meteredDrainField) attrs.push([fn('SUM', col(meteredDrainField)), 'totalMeteredDrainLbs'])
+  // Total waste over the filtered range (SD-717) — feeds the Waste-$ cards.
+  if (wasteField) attrs.push([fn('SUM', col(wasteField)), 'totalWasteLbs'])
 
   const [result] = await Model.findAll({ where, attributes: attrs, raw: true })
   return {
@@ -98,6 +103,7 @@ async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', o
     totalSkimLbs:      result?.totalSkimLbs      != null ? Number(result.totalSkimLbs)      : null,
     ...(concurrentField ? { concurrentCount: Number(result?.concurrentCount) || 0 } : {}),
     ...(meteredDrainField ? { totalMeteredDrainLbs: result?.totalMeteredDrainLbs != null ? Number(result.totalMeteredDrainLbs) : 0 } : {}),
+    ...(wasteField ? { totalWasteLbs: result?.totalWasteLbs != null ? Number(result.totalWasteLbs) : 0 } : {}),
   }
 }
 
@@ -173,7 +179,7 @@ async function getBlendBatches({ from, to, tankId, status, product, sortBy, sort
 
   const [rows, summary] = await Promise.all([
     db.MesBlendTankBatch.findAll({ where, order, limit: safeLimit, offset: safeOffset }),
-    getSummary(db.MesBlendTankBatch, where),
+    getSummary(db.MesBlendTankBatch, where, { wasteField: 'wasteLbs' }),
   ])
   return { total: summary.batchCount, batches: rows, summary }
 }
@@ -193,7 +199,7 @@ async function getSurgeBatches({ from, to, tankId, status, product, sortBy, sort
 
   const [rows, summary] = await Promise.all([
     db.MesSurgeTankBatch.findAll({ where, order, limit: safeLimit, offset: safeOffset }),
-    getSummary(db.MesSurgeTankBatch, where, { concurrentField: 'concurrentFillDrain', meteredDrainField: 'meteredDrainLbs' }),
+    getSummary(db.MesSurgeTankBatch, where, { concurrentField: 'concurrentFillDrain', meteredDrainField: 'meteredDrainLbs', wasteField: 'wasteLbs' }),
   ])
   return { total: summary.batchCount, batches: rows, summary }
 }
