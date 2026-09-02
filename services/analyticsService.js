@@ -188,11 +188,35 @@ async function getBlendBatches({ from, to, tankId, status, product, sortBy, sort
   const safeLimit  = Math.min(Number(limit)  || 200, 500)
   const safeOffset = Math.max(Number(offset) || 0, 0)
 
+  // Pricing (SD-717): blend batches have no componentItemId column — mesItem
+  // (a raw-FG id) both classifies the milk family and, via the raw-FG→FG
+  // alias map, reaches the FG revenue rates.
+  const [ctx, fgRates] = await Promise.all([
+    rawMilkPriceService.getPricingContext(),
+    fgRevenueRateService.getCurrentRates(),
+  ])
+  const blendFgRates = fgRevenueRateService.expandRatesWithRawFg(fgRates)
+  const wasteUsdExpr = rawMilkPriceService.wasteUsdCaseExpr(ctx.prices, ctx.globalPrice, { cols: ['mesItem'] })
+  const lostRevenueUsdExpr = fgRevenueRateService.lostRevenueCaseExpr(blendFgRates)
+
   const [rows, summary] = await Promise.all([
     db.MesBlendTankBatch.findAll({ where, order, limit: safeLimit, offset: safeOffset }),
-    getSummary(db.MesBlendTankBatch, where, { wasteField: 'wasteLbs' }),
+    getSummary(db.MesBlendTankBatch, where, { wasteField: 'wasteLbs', wasteUsdExpr, lostRevenueUsdExpr }),
   ])
-  return { total: summary.batchCount, batches: rows, summary }
+  const batches = rows.map(r => {
+    const plain = r.get({ plain: true })
+    const { family, pricePerLb } = rawMilkPriceService.priceForBatch(null, plain.mesItem, ctx)
+    plain.costFamily = family
+    plain.wasteUsd = plain.wasteLbs != null && pricePerLb != null
+      ? Math.round(Number(plain.wasteLbs) * pricePerLb * 100) / 100
+      : null
+    const revRate = fgRevenueRateService.rateForItem(plain.mesItem, blendFgRates)
+    plain.lostRevenueUsd = plain.wasteLbs != null && revRate != null
+      ? Math.round(Number(plain.wasteLbs) * revRate * 100) / 100
+      : null
+    return plain
+  })
+  return { total: summary.batchCount, batches, summary }
 }
 
 async function getBlendTrend({ from, to, groupBy, tankId, status, product }) {
@@ -252,6 +276,12 @@ async function getSeparationBatches({ from, to, sourceSilo, status, sortBy, sort
   const safeLimit  = Math.min(Number(limit)  || 200, 500)
   const safeOffset = Math.max(Number(offset) || 0, 0)
 
+  // Waste-$ only (SD-717): separation waste is raw milk, classified by the
+  // batch's itemId. NO lost-revenue here — separation is too far upstream to
+  // honestly attribute a finished good.
+  const ctx = await rawMilkPriceService.getPricingContext()
+  const wasteUsdExpr = rawMilkPriceService.wasteUsdCaseExpr(ctx.prices, ctx.globalPrice, { cols: ['itemId'], wasteCol: 'wasteVolume' })
+
   const [rows, summary] = await Promise.all([
     db.MesSeparationBatch.findAll({ where, order, limit: safeLimit, offset: safeOffset }),
     getSummary(db.MesSeparationBatch, where, {
@@ -259,9 +289,20 @@ async function getSeparationBatches({ from, to, sourceSilo, status, sortBy, sort
       outputField: 'creamVolume',
       completedField: null,
       skimField: 'skimVolume',
+      wasteField: 'wasteVolume',
+      wasteUsdExpr,
     }),
   ])
-  return { total: summary.batchCount, batches: rows, summary }
+  const batches = rows.map(r => {
+    const plain = r.get({ plain: true })
+    const { family, pricePerLb } = rawMilkPriceService.priceForBatch(plain.itemId, null, ctx)
+    plain.costFamily = family
+    plain.wasteUsd = plain.wasteVolume != null && pricePerLb != null
+      ? Math.round(Number(plain.wasteVolume) * pricePerLb * 100) / 100
+      : null
+    return plain
+  })
+  return { total: summary.batchCount, batches, summary }
 }
 
 async function getSeparationTrend({ from, to, groupBy, sourceSilo, status }) {

@@ -639,11 +639,14 @@ async function getBatchDetail({ kind, id }) {
       console.warn(`[AdjustmentCorrelation] batch pricing failed: ${err.message}`)
     }
   }
-  // Forgone FG revenue — surge only (blend mesItem is a raw-FG id, not a
-  // bulk FG the revenue rates are keyed on).
-  if (kind === 'surge') {
+  // Forgone FG revenue — surge directly; blend through the raw-FG → FG alias
+  // map (blend mesItem is a raw-FG id). Separation stays unpriced here: too
+  // far upstream to honestly attribute a finished good.
+  if (kind === 'surge' || kind === 'blend') {
     try {
-      const fgRates = await fgRevenueRateService.getCurrentRates()
+      const fgRates = fgRevenueRateService.expandRatesWithRawFg(
+        await fgRevenueRateService.getCurrentRates()
+      )
       const rate = fgRevenueRateService.rateForItem(row.mesItem, fgRates)
       if (rate != null) lostRevenueUsd = round2(wasteWithAdjLbs * rate)
     } catch (err) {

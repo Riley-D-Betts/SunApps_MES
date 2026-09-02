@@ -263,13 +263,13 @@ function sqlIdList(ids) {
  * Returns null when no per-family prices exist AND there is no global price
  * (callers then omit totalWasteUsd entirely).
  */
-function wasteUsdCaseExpr(prices, globalPrice, { wasteCol = 'wasteLbs' } = {}) {
+function wasteUsdCaseExpr(prices, globalPrice, { wasteCol = 'wasteLbs', cols = ['componentItemId', 'mesItem'] } = {}) {
   const familyIds = {}
   for (const [id, fam] of Object.entries(RAW_ID_FAMILY)) (familyIds[fam] ||= []).push(id)
   for (const [id, fam] of Object.entries(CATALOG_ID_FAMILY)) (familyIds[fam] ||= []).push(id)
 
   const branches = []
-  for (const col of ['componentItemId', 'mesItem']) {
+  for (const col of cols) {
     for (const family of FAMILIES) {
       const p = prices[family]
       if (!p || !familyIds[family] || !familyIds[family].length) continue

@@ -3,6 +3,7 @@ const config = require('../config')
 const db = require('../models')
 const statusStore = require('./statusStore')
 const surgeParser = require('./surgeTankProductParser')
+const { RAW_FG_TO_FG_MAP } = require('./mesItemConfig')
 
 /**
  * FG revenue rate service (SD-717) — what a pound of bulk finished goods
@@ -155,6 +156,21 @@ function rateForItem(mesItem, rates) {
   return r ? r.revenuePerLb : null
 }
 
+/**
+ * Rates re-keyed to also answer for raw-FG ids (blend batches' mesItem, e.g.
+ * 8352 Raw DG Half & Half): each raw-FG aliases to its bulk FG's rate via
+ * RAW_FG_TO_FG_MAP. A direct rate on the raw-FG id (manual) wins.
+ */
+function expandRatesWithRawFg(rates) {
+  const out = { ...rates }
+  for (const [rawFg, fg] of Object.entries(RAW_FG_TO_FG_MAP)) {
+    if (out[String(rawFg)] === undefined && rates[String(fg)]) {
+      out[String(rawFg)] = rates[String(fg)]
+    }
+  }
+  return out
+}
+
 function appendManual({ fgItemId, revenuePerLb, note }) {
   return db.MesFgRevenueRate.create({
     fgItemId: String(fgItemId),
@@ -221,6 +237,7 @@ module.exports = {
   deriveRevenueRates,
   getCurrentRates,
   rateForItem,
+  expandRatesWithRawFg,
   appendManual,
   syncTick,
   lostRevenueCaseExpr,
