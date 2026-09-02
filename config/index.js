@@ -84,6 +84,14 @@ module.exports = {
   // matches the 5-min average window the sweep service uses to denoise the
   // ~±800 lb level sensor jitter on idle tanks.
   INVENTORY_ADJUSTMENT_CRON: cronEnv('INVENTORY_ADJUSTMENT_CRON', '*/5 * * * *'),
+  // Daily NS-derived raw milk price sync (SD-717) — 5:10 AM, after NetSuite's
+  // overnight posting settles. Also runs once at boot, so this cadence only
+  // governs how quickly a mid-day NS price change is picked up.
+  PRICE_SYNC_CRON: cronEnv('PRICE_SYNC_CRON', '10 5 * * *'),
+  // Trailing window for the qty-weighted purchase-price average. 30d per
+  // Andrew (2026-09-02). Sandbox NS (dev) can lag a refresh by months — widen
+  // this on dev if derived prices come up empty.
+  PRICE_SYNC_WINDOW_DAYS: parseInt(process.env.PRICE_SYNC_WINDOW_DAYS || '30', 10) || 30,
   // Min delta (lbs) to actually fire a workOrderIssue / workOrderCompletion. Below
   // this we just defer to the next tick so we don't spam NS with sub-pound noise.
   MES_MIN_ISSUE_LBS: parseFloat(process.env.MES_MIN_ISSUE_LBS || '10'),

@@ -23,6 +23,10 @@ const DEFAULT_REPLAY_CRONS = {
   equipment: '*/10 * * * * *',
   tick: '*/30 * * * * *',
   invAdjust: '*/30 * * * * *',
+  // Price sync is meaningless in replay (prices come from live NS, not the
+  // historian) but the key must exist or applyCrons passes undefined to
+  // cron.schedule. Hourly is harmlessly rare.
+  priceSync: '0 * * * *',
 }
 
 let cached = null

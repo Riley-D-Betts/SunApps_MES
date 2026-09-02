@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "SunApps MES",
-    "version": "1.0.11",
+    "version": "1.0.12",
     "description": "Plant-floor MES service for the IdaMilk creamery. Cron jobs poll the AVEVA Historian for separator batches, bulk milk intake, blend tanks, surge tanks and equipment state, turn them into NetSuite work orders / issues / completions / inventory adjustments, and record every batch locally. On top of that it exposes a rich read-only /api/historian query gateway over the plant historian, live status and analytics feeds for the SunApps UI, operator review endpoints for batches that failed to post to NetSuite, a BOM admin surface, and a replay (time-travel simulation) control panel."
   },
   "servers": [
@@ -2542,7 +2542,7 @@
           "Costs Config"
         ],
         "summary": "Current cost constants (newest price row)",
-        "description": "Returns the current cost constants used to price waste/shrink. An unseeded environment returns 200 with explicit nulls (consumers hide their $ figures) — never a 404. Pass `history=N` to also receive the most recent N price rows (max 100), newest first.\n",
+        "description": "Returns the current cost constants used to price waste/shrink. An unseeded environment returns 200 with explicit nulls (consumers hide their $ figures) — never a 404. Pass `history=N` to also receive the most recent N price rows (max 100), newest first.\nAlso returns `families` — the current per-family raw milk prices (organic / conventional / a2 / cream_organic / cream_conventional), each `{ pricePerLb, source, basis, effectiveFrom }` where source is 'ns' (derived daily from NetSuite purchase transactions) or 'manual' (POST /raw-milk). Families with no price row yet are omitted. `history=N` additionally returns `familyHistory` (flat, newest first). The flat milkCostPerLb remains the fallback for batches no family classifies.\n",
         "parameters": [
           {
             "in": "query",
@@ -2614,6 +2614,62 @@
           },
           "400": {
             "description": "Invalid milkCostPerLb / fgCasePrice."
+          },
+          "500": {
+            "description": "Insert failed."
+          }
+        }
+      }
+    },
+    "/api/mes/config/costs/raw-milk": {
+      "post": {
+        "tags": [
+          "Costs Config"
+        ],
+        "summary": "Append a manual per-family raw milk price row",
+        "description": "Manual override / seed for one raw milk family — the only pricing path for families NetSuite can't derive (A2 has no priced purchase transactions). Append-only, like the flat costs. NOTE — for families the daily NS sync CAN derive, a manual row stands only until the next sync finds a differing NS price and re-asserts it.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "family",
+                  "pricePerLb"
+                ],
+                "properties": {
+                  "family": {
+                    "type": "string",
+                    "enum": [
+                      "organic",
+                      "conventional",
+                      "a2",
+                      "cream_organic",
+                      "cream_conventional"
+                    ]
+                  },
+                  "pricePerLb": {
+                    "type": "number",
+                    "minimum": 0,
+                    "exclusiveMinimum": true,
+                    "example": 0.39
+                  },
+                  "note": {
+                    "type": "string",
+                    "maxLength": 200
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Row created; body is the new current row for that family."
+          },
+          "400": {
+            "description": "Unknown family or invalid pricePerLb."
           },
           "500": {
             "description": "Insert failed."
