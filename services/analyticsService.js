@@ -3,6 +3,7 @@
 const db = require('../models')
 const { Op, fn, col, cast, literal } = require('sequelize')
 const rawMilkPriceService = require('./rawMilkPriceService')
+const fgRevenueRateService = require('./fgRevenueRateService')
 
 // ── Sort field whitelists (guard against SQL injection via ORDER BY) ──────────
 
@@ -76,7 +77,7 @@ function buildOrder(sortBy, sortDir, validFields) {
   return [[field, dir]]
 }
 
-async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', outputField = 'cumulativeOutputLbs', completedField = 'cumulativeCompletedLbs', skimField = null, concurrentField = null, meteredDrainField = null, wasteField = null, wasteUsdExpr = null } = {}) {
+async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', outputField = 'cumulativeOutputLbs', completedField = 'cumulativeCompletedLbs', skimField = null, concurrentField = null, meteredDrainField = null, wasteField = null, wasteUsdExpr = null, lostRevenueUsdExpr = null } = {}) {
   const attrs = [
     [fn('COUNT', col('id')), 'batchCount'],
     [fn('AVG', col('wastePercent')), 'avgWastePercent'],
@@ -97,6 +98,9 @@ async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', o
   // from rawMilkPriceService.wasteUsdCaseExpr — values are our own price rows
   // and constant id lists, never request input.
   if (wasteUsdExpr) attrs.push([literal(wasteUsdExpr), 'totalWasteUsd'])
+  // Forgone FG revenue on wasted lbs (SD-717) — SUM only over batches whose
+  // bulk FG item has a derived/manual rate (no fallback; NULLs drop out).
+  if (lostRevenueUsdExpr) attrs.push([literal(lostRevenueUsdExpr), 'totalLostRevenueUsd'])
 
   const [result] = await Model.findAll({ where, attributes: attrs, raw: true })
   return {
@@ -110,6 +114,7 @@ async function getSummary(Model, where, { issuedField = 'cumulativeIssuedLbs', o
     ...(meteredDrainField ? { totalMeteredDrainLbs: result?.totalMeteredDrainLbs != null ? Number(result.totalMeteredDrainLbs) : 0 } : {}),
     ...(wasteField ? { totalWasteLbs: result?.totalWasteLbs != null ? Number(result.totalWasteLbs) : 0 } : {}),
     ...(wasteUsdExpr ? { totalWasteUsd: result?.totalWasteUsd != null ? Math.round(Number(result.totalWasteUsd) * 100) / 100 : 0 } : {}),
+    ...(lostRevenueUsdExpr ? { totalLostRevenueUsd: result?.totalLostRevenueUsd != null ? Math.round(Number(result.totalLostRevenueUsd) * 100) / 100 : 0 } : {}),
   }
 }
 
@@ -207,12 +212,16 @@ async function getSurgeBatches({ from, to, tankId, status, product, sortBy, sort
   // over componentItemId/mesItem; each row gets costFamily + wasteUsd. When no
   // prices are configured at all, both are simply absent and the frontend
   // falls back to its flat-price math.
-  const ctx = await rawMilkPriceService.getPricingContext()
+  const [ctx, fgRates] = await Promise.all([
+    rawMilkPriceService.getPricingContext(),
+    fgRevenueRateService.getCurrentRates(),
+  ])
   const wasteUsdExpr = rawMilkPriceService.wasteUsdCaseExpr(ctx.prices, ctx.globalPrice)
+  const lostRevenueUsdExpr = fgRevenueRateService.lostRevenueCaseExpr(fgRates)
 
   const [rows, summary] = await Promise.all([
     db.MesSurgeTankBatch.findAll({ where, order, limit: safeLimit, offset: safeOffset }),
-    getSummary(db.MesSurgeTankBatch, where, { concurrentField: 'concurrentFillDrain', meteredDrainField: 'meteredDrainLbs', wasteField: 'wasteLbs', wasteUsdExpr }),
+    getSummary(db.MesSurgeTankBatch, where, { concurrentField: 'concurrentFillDrain', meteredDrainField: 'meteredDrainLbs', wasteField: 'wasteLbs', wasteUsdExpr, lostRevenueUsdExpr }),
   ])
   const batches = rows.map(r => {
     const plain = r.get({ plain: true })
@@ -220,6 +229,10 @@ async function getSurgeBatches({ from, to, tankId, status, product, sortBy, sort
     plain.costFamily = family
     plain.wasteUsd = plain.wasteLbs != null && pricePerLb != null
       ? Math.round(Number(plain.wasteLbs) * pricePerLb * 100) / 100
+      : null
+    const revRate = fgRevenueRateService.rateForItem(plain.mesItem, fgRates)
+    plain.lostRevenueUsd = plain.wasteLbs != null && revRate != null
+      ? Math.round(Number(plain.wasteLbs) * revRate * 100) / 100
       : null
     return plain
   })

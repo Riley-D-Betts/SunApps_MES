@@ -185,3 +185,24 @@ curl -X POST http://<host>:4005/api/mes/config/costs/raw-milk \
       means the gateway/SuiteQL path failed — prices stay stale, nothing breaks.
 - [ ] Optional: `PRICE_SYNC_CRON` secret per environment (unmapped = the 5:10 AM
       code default, which is fine).
+
+### SD-717: FG revenue rates (automatic)
+
+The same daily sync also derives **revenue-per-lb per bulk FG item** (what a
+pound would have earned as invoiced finished goods): packaging WorkOrd lines
+give the SKU mix + lb-per-case, CustInvc lines give $/case, over a trailing
+`FG_REVENUE_WINDOW_DAYS` (default 90). Rows land in `{env}_MesFgRevenueRates`;
+no seeding needed. An item only derives when the window holds ≥1 packaging WO
+AND ≥1 invoice for a resulting SKU — patch gaps manually:
+
+```bash
+curl -X POST http://<host>:4005/api/mes/config/costs/fg-revenue \
+  -H 'Content-Type: application/json' \
+  -d '{"fgItemId": "6420", "revenuePerLb": 0.86, "note": "manual — no packaging WO in window"}'
+```
+
+- [ ] Verify after boot: `GET /api/mes/config/costs` shows `fgRevenue` rows
+      (`source: "ns"`) and the event stream shows `fgRevenue.updated`.
+      `fgRevenue.error` = the derive query failed; rates stay stale, nothing breaks.
+- [ ] Dev note: the sandbox's transaction data lags refreshes — widen
+      `FG_REVENUE_WINDOW_DAYS` (and `PRICE_SYNC_WINDOW_DAYS`) on dev if nothing derives.

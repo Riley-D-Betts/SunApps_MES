@@ -2,6 +2,15 @@ const express = require('express')
 const router = express.Router()
 const db = require('../models')
 const rawMilkPriceService = require('../services/rawMilkPriceService')
+const fgRevenueRateService = require('../services/fgRevenueRateService')
+const { getProductByNsId } = require('../services/surgeTankProductParser')
+
+// Bulk FG item display name from the parser catalog (no NS call) — null for
+// ids the catalog doesn't know (manual rows for new items).
+function fgItemName(fgItemId) {
+  const p = getProductByNsId(Number(fgItemId))
+  return p ? p.name : null
+}
 
 /**
  * Costs config API (SD-717) — the single audited source for the cost
@@ -41,6 +50,13 @@ function toDto(row) {
  *       `history=N` additionally returns `familyHistory` (flat, newest
  *       first). The flat milkCostPerLb remains the fallback for batches no
  *       family classifies.
+ *
+ *       Also returns `fgRevenue` — current FG revenue rates per bulk FG item
+ *       (what a pound would have earned as invoiced finished goods, derived
+ *       daily from packaging WOs + invoices), each
+ *       `{ revenuePerLb, source, basis, effectiveFrom, itemName }`.
+ *       `history=N` adds `fgRevenueHistory`. No flat fallback exists for
+ *       lost revenue — unpriced items simply hide the figure.
  *     parameters:
  *       - in: query
  *         name: history
@@ -64,6 +80,10 @@ router.get('/', async (req, res) => {
       ? toDto(latest)
       : { milkCostPerLb: null, fgCasePrice: null, effectiveFrom: null, note: null }
     out.families = await rawMilkPriceService.getCurrentPrices()
+    const rates = await fgRevenueRateService.getCurrentRates()
+    out.fgRevenue = Object.fromEntries(Object.entries(rates).map(([id, r]) => [
+      id, { ...r, itemName: fgItemName(id) },
+    ]))
     const historyN = parseInt(req.query.history)
     if (Number.isFinite(historyN) && historyN > 0) {
       const limit = Math.min(historyN, 100)
@@ -73,6 +93,15 @@ router.get('/', async (req, res) => {
       out.familyHistory = famRows.map(r => ({
         family: r.family,
         pricePerLb: num(r.pricePerLb),
+        source: r.source,
+        basis: r.basis || null,
+        effectiveFrom: r.effectiveFrom,
+      }))
+      const fgRows = await db.MesFgRevenueRate.findAll({ order, limit })
+      out.fgRevenueHistory = fgRows.map(r => ({
+        fgItemId: r.fgItemId,
+        itemName: fgItemName(r.fgItemId),
+        revenuePerLb: num(r.revenuePerLb),
         source: r.source,
         basis: r.basis || null,
         effectiveFrom: r.effectiveFrom,
@@ -185,6 +214,60 @@ router.post('/raw-milk', async (req, res) => {
     })
   } catch (err) {
     console.error('[CostsConfigRoutes] POST /raw-milk error:', err.message)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+/**
+ * @openapi
+ * /api/mes/config/costs/fg-revenue:
+ *   post:
+ *     tags: [Costs Config]
+ *     summary: Append a manual FG revenue rate for one bulk FG item
+ *     description: >
+ *       Manual override / seed for a bulk FG item's revenue-per-lb (what a
+ *       pound would have earned as invoiced finished goods). fgItemId is NOT
+ *       restricted to the parser catalog, so items the parser doesn't know
+ *       yet can still be priced. Append-only. For items the daily NS sync
+ *       CAN derive, a manual row stands only until the next sync finds a
+ *       differing rate.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [fgItemId, revenuePerLb]
+ *             properties:
+ *               fgItemId: { type: string, example: "6420", description: Bulk FG assembly NS internal id. }
+ *               revenuePerLb: { type: number, minimum: 0, exclusiveMinimum: true, example: 0.86 }
+ *               note: { type: string, maxLength: 200 }
+ *     responses:
+ *       201: { description: Row created; body is the new current rate for that item. }
+ *       400: { description: Invalid fgItemId / revenuePerLb. }
+ *       500: { description: Insert failed. }
+ */
+router.post('/fg-revenue', async (req, res) => {
+  try {
+    const { fgItemId, revenuePerLb, note } = req.body || {}
+    if (!/^\d+$/.test(String(fgItemId ?? ''))) {
+      return res.status(400).json({ error: 'fgItemId is required and must be a NetSuite internal id (digits only)' })
+    }
+    const rate = Number(revenuePerLb)
+    if (!Number.isFinite(rate) || rate <= 0) {
+      return res.status(400).json({ error: 'revenuePerLb is required and must be a positive number' })
+    }
+    const row = await fgRevenueRateService.appendManual({ fgItemId, revenuePerLb: rate, note })
+    res.status(201).json({
+      fgItemId: row.fgItemId,
+      itemName: fgItemName(row.fgItemId),
+      revenuePerLb: num(row.revenuePerLb),
+      source: row.source,
+      basis: row.basis || null,
+      effectiveFrom: row.effectiveFrom,
+    })
+  } catch (err) {
+    console.error('[CostsConfigRoutes] POST /fg-revenue error:', err.message)
     res.status(500).json({ error: err.message })
   }
 })

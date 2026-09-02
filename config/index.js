@@ -92,6 +92,9 @@ module.exports = {
   // Andrew (2026-09-02). Sandbox NS (dev) can lag a refresh by months — widen
   // this on dev if derived prices come up empty.
   PRICE_SYNC_WINDOW_DAYS: parseInt(process.env.PRICE_SYNC_WINDOW_DAYS || '30', 10) || 30,
+  // Window for FG revenue-per-lb derivation (packaging WO mix + invoice
+  // prices). Longer than the milk window — packaging/invoicing is chunkier.
+  FG_REVENUE_WINDOW_DAYS: parseInt(process.env.FG_REVENUE_WINDOW_DAYS || '90', 10) || 90,
   // Min delta (lbs) to actually fire a workOrderIssue / workOrderCompletion. Below
   // this we just defer to the next tick so we don't spam NS with sub-pound noise.
   MES_MIN_ISSUE_LBS: parseFloat(process.env.MES_MIN_ISSUE_LBS || '10'),

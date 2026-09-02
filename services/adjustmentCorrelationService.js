@@ -26,6 +26,7 @@ const { Op } = require('sequelize')
 const db = require('../models')
 const core = require('../clients/coreClient')
 const rawMilkPriceService = require('./rawMilkPriceService')
+const fgRevenueRateService = require('./fgRevenueRateService')
 
 // "blend WO 12345", "surge WO 12345 top up lot …" → the NS internal WO id.
 const WO_RE = /\bWO\s+(\d+)/i
@@ -627,6 +628,7 @@ async function getBatchDetail({ kind, id }) {
   // the batch (frontend falls back to its flat-price math).
   let costFamily = null
   let wasteUsd = null
+  let lostRevenueUsd = null
   if (kind === 'surge' || kind === 'blend') {
     try {
       const ctx = await rawMilkPriceService.getPricingContext()
@@ -637,12 +639,24 @@ async function getBatchDetail({ kind, id }) {
       console.warn(`[AdjustmentCorrelation] batch pricing failed: ${err.message}`)
     }
   }
+  // Forgone FG revenue — surge only (blend mesItem is a raw-FG id, not a
+  // bulk FG the revenue rates are keyed on).
+  if (kind === 'surge') {
+    try {
+      const fgRates = await fgRevenueRateService.getCurrentRates()
+      const rate = fgRevenueRateService.rateForItem(row.mesItem, fgRates)
+      if (rate != null) lostRevenueUsd = round2(wasteWithAdjLbs * rate)
+    } catch (err) {
+      console.warn(`[AdjustmentCorrelation] FG revenue pricing failed: ${err.message}`)
+    }
+  }
 
   return {
     kind, id: row.id,
     batch: row.get({ plain: true }),
     costFamily,
     wasteUsd,
+    lostRevenueUsd,
     summary,
     issuedMinusCompletedLbs,
     wasteWithAdjLbs,

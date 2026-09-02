@@ -39,6 +39,7 @@ jobs:
             "EQUIPMENT_CRON=${{ secrets.EQUIPMENT_CRON }}"
             "PRICE_SYNC_CRON=${{ secrets.PRICE_SYNC_CRON }}"
             "PRICE_SYNC_WINDOW_DAYS=${{ secrets.PRICE_SYNC_WINDOW_DAYS }}"
+            "FG_REVENUE_WINDOW_DAYS=${{ secrets.FG_REVENUE_WINDOW_DAYS }}"
             "SQL_USER=${{ secrets.SQL_USER }}"
             "SQL_PASSWORD=${{ secrets.SQL_PASSWORD }}"
             "SQL_DATABASE=${{ secrets.SQL_DATABASE }}"

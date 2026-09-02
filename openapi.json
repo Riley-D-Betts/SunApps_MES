@@ -2542,7 +2542,7 @@
           "Costs Config"
         ],
         "summary": "Current cost constants (newest price row)",
-        "description": "Returns the current cost constants used to price waste/shrink. An unseeded environment returns 200 with explicit nulls (consumers hide their $ figures) — never a 404. Pass `history=N` to also receive the most recent N price rows (max 100), newest first.\nAlso returns `families` — the current per-family raw milk prices (organic / conventional / a2 / cream_organic / cream_conventional), each `{ pricePerLb, source, basis, effectiveFrom }` where source is 'ns' (derived daily from NetSuite purchase transactions) or 'manual' (POST /raw-milk). Families with no price row yet are omitted. `history=N` additionally returns `familyHistory` (flat, newest first). The flat milkCostPerLb remains the fallback for batches no family classifies.\n",
+        "description": "Returns the current cost constants used to price waste/shrink. An unseeded environment returns 200 with explicit nulls (consumers hide their $ figures) — never a 404. Pass `history=N` to also receive the most recent N price rows (max 100), newest first.\nAlso returns `families` — the current per-family raw milk prices (organic / conventional / a2 / cream_organic / cream_conventional), each `{ pricePerLb, source, basis, effectiveFrom }` where source is 'ns' (derived daily from NetSuite purchase transactions) or 'manual' (POST /raw-milk). Families with no price row yet are omitted. `history=N` additionally returns `familyHistory` (flat, newest first). The flat milkCostPerLb remains the fallback for batches no family classifies.\nAlso returns `fgRevenue` — current FG revenue rates per bulk FG item (what a pound would have earned as invoiced finished goods, derived daily from packaging WOs + invoices), each `{ revenuePerLb, source, basis, effectiveFrom, itemName }`. `history=N` adds `fgRevenueHistory`. No flat fallback exists for lost revenue — unpriced items simply hide the figure.\n",
         "parameters": [
           {
             "in": "query",
@@ -2670,6 +2670,57 @@
           },
           "400": {
             "description": "Unknown family or invalid pricePerLb."
+          },
+          "500": {
+            "description": "Insert failed."
+          }
+        }
+      }
+    },
+    "/api/mes/config/costs/fg-revenue": {
+      "post": {
+        "tags": [
+          "Costs Config"
+        ],
+        "summary": "Append a manual FG revenue rate for one bulk FG item",
+        "description": "Manual override / seed for a bulk FG item's revenue-per-lb (what a pound would have earned as invoiced finished goods). fgItemId is NOT restricted to the parser catalog, so items the parser doesn't know yet can still be priced. Append-only. For items the daily NS sync CAN derive, a manual row stands only until the next sync finds a differing rate.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "fgItemId",
+                  "revenuePerLb"
+                ],
+                "properties": {
+                  "fgItemId": {
+                    "type": "string",
+                    "example": "6420",
+                    "description": "Bulk FG assembly NS internal id."
+                  },
+                  "revenuePerLb": {
+                    "type": "number",
+                    "minimum": 0,
+                    "exclusiveMinimum": true,
+                    "example": 0.86
+                  },
+                  "note": {
+                    "type": "string",
+                    "maxLength": 200
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Row created; body is the new current rate for that item."
+          },
+          "400": {
+            "description": "Invalid fgItemId / revenuePerLb."
           },
           "500": {
             "description": "Insert failed."
