@@ -25,6 +25,8 @@
 const { Op } = require('sequelize')
 const db = require('../models')
 const core = require('../clients/coreClient')
+const rawMilkPriceService = require('./rawMilkPriceService')
+const fgRevenueRateService = require('./fgRevenueRateService')
 
 // "blend WO 12345", "surge WO 12345 top up lot …" → the NS internal WO id.
 const WO_RE = /\bWO\s+(\d+)/i
@@ -621,9 +623,43 @@ async function getBatchDetail({ kind, id }) {
   const issuedMinusCompletedLbs = round2(issued - completed)
   const wasteWithAdjLbs = round2(issued + adjustmentRollup.exactNetLbs - completed)
 
+  // Per-family raw milk pricing (SD-717) — priced from wasteWithAdjLbs, the
+  // headline waste figure this view leads with. Absent when nothing prices
+  // the batch (frontend falls back to its flat-price math).
+  let costFamily = null
+  let wasteUsd = null
+  let lostRevenueUsd = null
+  if (kind === 'surge' || kind === 'blend') {
+    try {
+      const ctx = await rawMilkPriceService.getPricingContext()
+      const priced = rawMilkPriceService.priceForBatch(row.componentItemId, row.mesItem, ctx)
+      costFamily = priced.family
+      if (priced.pricePerLb != null) wasteUsd = round2(wasteWithAdjLbs * priced.pricePerLb)
+    } catch (err) {
+      console.warn(`[AdjustmentCorrelation] batch pricing failed: ${err.message}`)
+    }
+  }
+  // Forgone FG revenue — surge directly; blend through the raw-FG → FG alias
+  // map (blend mesItem is a raw-FG id). Separation stays unpriced here: too
+  // far upstream to honestly attribute a finished good.
+  if (kind === 'surge' || kind === 'blend') {
+    try {
+      const fgRates = fgRevenueRateService.expandRatesWithRawFg(
+        await fgRevenueRateService.getCurrentRates()
+      )
+      const rate = fgRevenueRateService.rateForItem(row.mesItem, fgRates)
+      if (rate != null) lostRevenueUsd = round2(wasteWithAdjLbs * rate)
+    } catch (err) {
+      console.warn(`[AdjustmentCorrelation] FG revenue pricing failed: ${err.message}`)
+    }
+  }
+
   return {
     kind, id: row.id,
     batch: row.get({ plain: true }),
+    costFamily,
+    wasteUsd,
+    lostRevenueUsd,
     summary,
     issuedMinusCompletedLbs,
     wasteWithAdjLbs,

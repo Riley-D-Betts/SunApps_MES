@@ -141,3 +141,68 @@ environment with no extra secret needed.
 2. **First-deploy PM2** — `pm2 restart` fails with no existing process; do the one-time `pm2 start` first (§3).
 3. **Unmapped cron/threshold secrets** silently fall back to config defaults (§2).
 4. **DB DDL perms** — boot creates/alters tables; insufficient rights = failed startup (§4).
+
+---
+
+### SD-717: seed the cost constants (once per environment)
+
+The costs table (`{env}_MesCostConfigs`) auto-creates on boot but ships EMPTY —
+$ figures across SunApps/Portal stay hidden until seeded. After deploying, POST
+the genesis row (append-only; later price changes go through the SunApps Cost
+Settings page or another POST):
+
+```bash
+curl -X POST http://<host>:4005/api/mes/config/costs \
+  -H 'Content-Type: application/json' \
+  -d '{"milkCostPerLb": 0.34, "fgCasePrice": 10.35, "note": "initial seed — ops-provided Aug 2026"}'
+```
+
+- [ ] Seed dev after the dev deploy; verify `GET /api/mes/config/costs` returns the values.
+- [ ] Seed prod after the prod release.
+- [ ] SunApps side: create the `MES_COST_ADMIN` control key in the admin ControlKeys UI
+      and grant it to the right group — the Cost Settings page is route-denied until then.
+
+### SD-717: per-family raw milk prices (mostly automatic)
+
+The daily price-sync job (boot + `PRICE_SYNC_CRON`, default 5:10 AM) derives
+$/lb per family (organic / conventional / cream_organic / cream_conventional)
+from NetSuite VendBill/ItemRcpt lines over a trailing 30 days and appends rows
+to `{env}_MesRawMilkPrices` — **no seeding needed for those families**. Two
+manual items remain:
+
+- [ ] **A2 has no priced purchase transactions in NS** — seed it manually per
+      environment (also doable from the SunApps Cost Settings page):
+
+```bash
+curl -X POST http://<host>:4005/api/mes/config/costs/raw-milk \
+  -H 'Content-Type: application/json' \
+  -d '{"family": "a2", "pricePerLb": 0.39, "note": "manual — no priced A2 purchase lines in NS"}'
+```
+
+- [ ] Verify after boot: `GET /api/mes/config/costs` shows a `families` object
+      with `source: "ns"` rows (organic ≈ 0.39, conventional ≈ 0.18 as of Aug 2026),
+      and the event stream shows `priceSync.updated`. A `priceSync.error` event
+      means the gateway/SuiteQL path failed — prices stay stale, nothing breaks.
+- [ ] Optional: `PRICE_SYNC_CRON` secret per environment (unmapped = the 5:10 AM
+      code default, which is fine).
+
+### SD-717: FG revenue rates (automatic)
+
+The same daily sync also derives **revenue-per-lb per bulk FG item** (what a
+pound would have earned as invoiced finished goods): packaging WorkOrd lines
+give the SKU mix + lb-per-case, CustInvc lines give $/case, over a trailing
+`FG_REVENUE_WINDOW_DAYS` (default 90). Rows land in `{env}_MesFgRevenueRates`;
+no seeding needed. An item only derives when the window holds ≥1 packaging WO
+AND ≥1 invoice for a resulting SKU — patch gaps manually:
+
+```bash
+curl -X POST http://<host>:4005/api/mes/config/costs/fg-revenue \
+  -H 'Content-Type: application/json' \
+  -d '{"fgItemId": "6420", "revenuePerLb": 0.86, "note": "manual — no packaging WO in window"}'
+```
+
+- [ ] Verify after boot: `GET /api/mes/config/costs` shows `fgRevenue` rows
+      (`source: "ns"`) and the event stream shows `fgRevenue.updated`.
+      `fgRevenue.error` = the derive query failed; rates stay stale, nothing breaks.
+- [ ] Dev note: the sandbox's transaction data lags refreshes — widen
+      `FG_REVENUE_WINDOW_DAYS` (and `PRICE_SYNC_WINDOW_DAYS`) on dev if nothing derives.

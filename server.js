@@ -14,6 +14,7 @@ const surgeTankJob = require('./jobs/surgeTankJob')
 const equipmentJob = require('./jobs/equipmentJob')
 const issueCompletionJob = require('./jobs/issueCompletionJob')
 const inventoryAdjustmentJob = require('./jobs/inventoryAdjustmentJob')
+const priceSyncJob = require('./jobs/priceSyncJob')
 const statusStore = require('./services/statusStore')
 const runtimeConfigService = require('./services/runtimeConfigService')
 const historianRoutes = require('./routes/historianRoutes')
@@ -26,6 +27,7 @@ const analyticsRoutes = require('./routes/analyticsRoutes')
 const bomAdminRoutes = require('./routes/bomAdminRoutes')
 const fillerHoursRoutes = require('./routes/fillerHoursRoutes')
 const fillerFlowRoutes = require('./routes/fillerFlowRoutes')
+const costsConfigRoutes = require('./routes/costsConfigRoutes')
 const { openapiSpec } = require('./config/swagger')
 const clock = require('./sim/clock')
 
@@ -93,6 +95,7 @@ function applyCrons(crons) {
   cronTasks.equipment  = cron.schedule(crons.equipment,  guarded('equipment',  () => equipmentJob.run(providerHolder.current)))
   cronTasks.tick       = cron.schedule(crons.tick,       guarded('tick',       () => issueCompletionJob.run(providerHolder.current)))
   cronTasks.invAdjust  = cron.schedule(crons.invAdjust,  guarded('invAdjust',  () => inventoryAdjustmentJob.run(providerHolder.current)))
+  cronTasks.priceSync  = cron.schedule(crons.priceSync,  guarded('priceSync',  () => priceSyncJob.run()))
   console.log('[Server] Cron schedule applied:', JSON.stringify(crons))
 }
 
@@ -104,6 +107,7 @@ const PROD_CRONS = {
   equipment:  config.EQUIPMENT_CRON,
   tick:       config.TICK_CRON,
   invAdjust:  config.INVENTORY_ADJUSTMENT_CRON,
+  priceSync:  config.PRICE_SYNC_CRON,
 }
 
 // Reconcile provider + cron + sim clock to the persisted runtime config.
@@ -130,6 +134,7 @@ function reconcileMode(rtConfig) {
       issueCompletionJob.reset()
       separationJob.reset()
       inventoryAdjustmentJob.reset()
+      priceSyncJob.reset()
     }
     applyCrons(rtConfig.replayCrons)
     console.log(`[Server] Replay mode ON — provider=historical, simStart=${rtConfig.simStart}, speedup=${rtConfig.speedup}x`)
@@ -144,6 +149,7 @@ function reconcileMode(rtConfig) {
       issueCompletionJob.reset()
       separationJob.reset()
       inventoryAdjustmentJob.reset()
+      priceSyncJob.reset()
     }
     applyCrons(PROD_CRONS)
     console.log(`[Server] Replay mode OFF — provider=${baseProviderType}, env CRONs`)
@@ -167,6 +173,10 @@ sequelize.sync().then(async () => {
   await runtimeConfigService.load()
   reconcileMode(runtimeConfigService.get())
   runtimeConfigService.onChange(reconcileMode)
+
+  // Prices at boot — a fresh deploy shouldn't wait for the 5 AM cron. run()
+  // swallows its own errors (a dead gateway must never block startup).
+  priceSyncJob.run()
 })
 
 app.use(bodyParser.json({ limit: '50mb' }))
@@ -233,6 +243,7 @@ app.use('/api/mes/analytics', analyticsRoutes)
 app.use('/api/mes/bom-admin', bomAdminRoutes)
 app.use('/api/mes/filler-hours', fillerHoursRoutes)
 app.use('/api/mes/filler-flow', fillerFlowRoutes)
+app.use('/api/mes/config/costs', costsConfigRoutes)
 
 app.listen(config.PORT, () => {
   bootLog(`SunApps MES Service running on port ${config.PORT} [env=${config.ENVIRONMENT}, tablePrefix=${config.TABLE_PREFIX}]`)
