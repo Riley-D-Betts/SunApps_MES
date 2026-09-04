@@ -546,6 +546,45 @@ class RestProvider extends BaseProvider {
     }
   }
 
+  /** Receiving bays 1 and 2 — see BaseProvider.getReceivingStatus. 8 tags per bay. */
+  async getReceivingStatus() {
+    const bays = ['RecBay1', 'RecBay2']
+    const tagsFor = (bay) => ({
+      source: `Ingr_Rec_${bay}_IO.XFR.Source`,
+      dest0: `Ingr_Rec_${bay}_IO.XFR.Destination#.0`,
+      dest1: `Ingr_Rec_${bay}_IO.XFR.Destination#.1`,
+      itemId: `Ingr_Rec_${bay}_IO.XFR.ItemID`,
+      qtyActual: `Ingr_Rec_${bay}_IO.XFR.QTYActual`,
+      qtyTarget: `Ingr_Rec_${bay}_IO.XFR.QTYTarget`,
+      intakeQty: `Ingr_Rec_${bay}_IO.IntakeQty`,
+      ready: `Ingr_Rec_${bay}_IO.XFR.TransferReadyC.0`,
+      complete: `Ingr_Rec_${bay}_IO.XFR.TransferCompleteS.0`,
+    })
+    const perBay = bays.map(tagsFor)
+    const fqns = perBay.flatMap((t) => Object.values(t))
+    const values = await Promise.all(fqns.map((fqn) => this._getCurrentValue(fqn, { verbose: false })))
+    const map = {}
+    fqns.forEach((fqn, i) => { map[fqn] = values[i] })
+    const txt = (tag) => String(map[tag]?.Text ?? '').trim()
+    const val = (tag) => Number(map[tag]?.Value ?? 0) || 0
+
+    return bays.map((bayId, i) => {
+      const t = perBay[i]
+      const itemId = txt(t.itemId)
+      return {
+        bayId,
+        source: txt(t.source),
+        itemId: itemId === '0' ? '' : itemId,
+        destinations: [txt(t.dest0), txt(t.dest1)].filter(Boolean),
+        qtyActualLbs: val(t.qtyActual),
+        qtyTargetLbs: val(t.qtyTarget),
+        intakeQtyLbs: val(t.intakeQty),
+        transferReady: val(t.ready) === 1,
+        transferComplete: val(t.complete) === 1,
+      }
+    })
+  }
+
   /**
    * Read all batch-related tags at the TransferComplete timestamp.
    * Volume tags reset to 0 between batches, so the value at this moment

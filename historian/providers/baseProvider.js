@@ -130,6 +130,30 @@ class BaseProvider {
   }
 
   /**
+   * Live state of the two milk receiving bays (Ingr_Rec_RecBay{1,2}_IO XFR
+   * objects — same shape as the separator's transfer object). `source` is the
+   * TRUCK NUMBER the operator keyed in (joins customrecord_milk_truck
+   * custrecord_mt_truck_number), `itemId` the Standardization product index
+   * (15 raw conventional, 16 raw organic …), `destinations` the silo(s) the
+   * load pumps into. `transferReady` is the permissive: 1 while a transfer is
+   * set up/running; QTYActual climbs during the unload and resets per load.
+   * @returns {Promise<Array<{
+   *   bayId: 'RecBay1' | 'RecBay2',
+   *   source: string,
+   *   itemId: string,
+   *   destinations: string[],
+   *   qtyActualLbs: number,
+   *   qtyTargetLbs: number,
+   *   intakeQtyLbs: number,
+   *   transferReady: boolean,
+   *   transferComplete: boolean
+   * }>>}
+   */
+  async getReceivingStatus() {
+    throw new Error('getReceivingStatus() not implemented')
+  }
+
+  /**
    * Get live status for both UHT pasteurizers.
    * @returns {Promise<Array<{
    *   uhtId: string,

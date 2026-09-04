@@ -12,6 +12,10 @@ const bulkMilkJob = require('./jobs/bulkMilkJob')
 const blendTankJob = require('./jobs/blendTankJob')
 const surgeTankJob = require('./jobs/surgeTankJob')
 const equipmentJob = require('./jobs/equipmentJob')
+const facilityStateJob = require('./jobs/facilityStateJob')
+const facilityLinesJob = require('./jobs/facilityLinesJob')
+const facilityTrucksJob = require('./jobs/facilityTrucksJob')
+const receivingJob = require('./jobs/receivingJob')
 const issueCompletionJob = require('./jobs/issueCompletionJob')
 const inventoryAdjustmentJob = require('./jobs/inventoryAdjustmentJob')
 const priceSyncJob = require('./jobs/priceSyncJob')
@@ -21,6 +25,8 @@ const historianRoutes = require('./routes/historianRoutes')
 const milkMesRoutes = require('./routes/milkMesRoutes')
 const milkRoutes = require('./routes/milkRoutes')
 const liveStatusRoutes = require('./routes/liveStatusRoutes')
+const facilityRoutes = require('./routes/facilityRoutes')
+const facilitySettingsService = require('./services/facilitySettingsService')
 const fgPairingRoutes = require('./routes/fgPairingRoutes')
 const devRoutes = require('./routes/devRoutes')
 const analyticsRoutes = require('./routes/analyticsRoutes')
@@ -93,6 +99,10 @@ function applyCrons(crons) {
   cronTasks.blendTank  = cron.schedule(crons.blendTank,  guarded('blendTank',  () => blendTankJob.run(providerHolder.current)))
   cronTasks.surgeTank  = cron.schedule(crons.surgeTank,  guarded('surgeTank',  () => surgeTankJob.run(providerHolder.current)))
   cronTasks.equipment  = cron.schedule(crons.equipment,  guarded('equipment',  () => equipmentJob.run(providerHolder.current)))
+  cronTasks.facilityState = cron.schedule(crons.facilityState, guarded('facilityState', () => facilityStateJob.run()))
+  cronTasks.facilityLines = cron.schedule(crons.facilityLines, guarded('facilityLines', () => facilityLinesJob.run()))
+  cronTasks.facilityTrucks = cron.schedule(crons.facilityTrucks, guarded('facilityTrucks', () => facilityTrucksJob.run()))
+  cronTasks.receiving  = cron.schedule(crons.receiving,  guarded('receiving',  () => receivingJob.run(providerHolder.current)))
   cronTasks.tick       = cron.schedule(crons.tick,       guarded('tick',       () => issueCompletionJob.run(providerHolder.current)))
   cronTasks.invAdjust  = cron.schedule(crons.invAdjust,  guarded('invAdjust',  () => inventoryAdjustmentJob.run(providerHolder.current)))
   cronTasks.priceSync  = cron.schedule(crons.priceSync,  guarded('priceSync',  () => priceSyncJob.run()))
@@ -105,6 +115,10 @@ const PROD_CRONS = {
   blendTank:  config.BLEND_TANK_CRON,
   surgeTank:  config.SURGE_TANK_CRON,
   equipment:  config.EQUIPMENT_CRON,
+  facilityState: config.FACILITY_STATE_CRON,
+  facilityLines: config.FACILITY_LINES_CRON,
+  facilityTrucks: config.FACILITY_TRUCKS_CRON,
+  receiving:  config.RECEIVING_CRON,
   tick:       config.TICK_CRON,
   invAdjust:  config.INVENTORY_ADJUSTMENT_CRON,
   priceSync:  config.PRICE_SYNC_CRON,
@@ -131,6 +145,10 @@ function reconcileMode(rtConfig) {
       blendTankJob.reset()
       surgeTankJob.reset()
       equipmentJob.reset()
+      facilityStateJob.reset()
+      facilityLinesJob.reset()
+      facilityTrucksJob.reset()
+      receivingJob.reset()
       issueCompletionJob.reset()
       separationJob.reset()
       inventoryAdjustmentJob.reset()
@@ -170,6 +188,7 @@ sequelize.sync().then(async () => {
 
   // Load persisted runtime config and reconcile. devRoutes will register a
   // change listener so subsequent updates also reconcile.
+  await facilitySettingsService.load()
   await runtimeConfigService.load()
   reconcileMode(runtimeConfigService.get())
   runtimeConfigService.onChange(reconcileMode)
@@ -236,6 +255,7 @@ app.get('/health', (req, res) => {
 app.use('/api/historian', historianRoutes)
 app.use('/api/mes/milk', milkMesRoutes)
 app.use('/api/mes/live-status', liveStatusRoutes)
+app.use('/api/mes/facility', facilityRoutes)
 app.use('/api/mes/fg-pairings', fgPairingRoutes)
 app.use('/api/milk', milkRoutes)
 app.use('/api/mes/dev/replay', devRoutes)

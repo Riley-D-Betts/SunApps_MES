@@ -21,6 +21,10 @@ const DEFAULT_REPLAY_CRONS = {
   blendTank: '*/5 * * * * *',
   surgeTank: '*/5 * * * * *',
   equipment: '*/10 * * * * *',
+  facilityState: '*/10 * * * * *',
+  facilityLines: '*/30 * * * * *',
+  receiving: '*/10 * * * * *',
+  facilityTrucks: '0 * * * * *',
   tick: '*/30 * * * * *',
   invAdjust: '*/30 * * * * *',
   // Price sync is meaningless in replay (prices come from live NS, not the

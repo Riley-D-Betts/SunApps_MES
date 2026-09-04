@@ -77,6 +77,15 @@ module.exports = {
   // step, halving the trapezoidal error vs the old 15 s default.  The equipment
   // job is a parallel batch OData fetch — 12 polls/min is fine for AVEVA.
   EQUIPMENT_CRON: cronEnv('EQUIPMENT_CRON', '*/5 * * * * *'),
+  // Facility-map state diff + broadcast. Pure in-memory; runs right behind the equipment poll.
+  FACILITY_STATE_CRON: cronEnv('FACILITY_STATE_CRON', '*/5 * * * * *'),
+  // Facility-map line status: reads the scheduler service's cached window through
+  // the Gateway (cheap) and the six staging queues once a minute.
+  FACILITY_LINES_CRON: cronEnv('FACILITY_LINES_CRON', '*/15 * * * * *'),
+  // Milk receiving bays (8 tags per bay) — status only, feeds the map and live-status.
+  RECEIVING_CRON: cronEnv('RECEIVING_CRON', '*/10 * * * * *'),
+  // NetSuite milk-truck queue for the map (one SuiteQL a minute through the Gateway).
+  FACILITY_TRUCKS_CRON: cronEnv('FACILITY_TRUCKS_CRON', '0 * * * * *'),
   // Tick that fires periodic blend-tank WO issues + completions. Production cadence
   // is once every 5 minutes; sandbox can override to e.g. '*/30 * * * * *' for testing.
   TICK_CRON: cronEnv('TICK_CRON', '*/5 * * * *'),

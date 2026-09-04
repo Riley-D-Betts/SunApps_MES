@@ -55,7 +55,25 @@ function sendStagingNotification(title, message) {
   return request('POST', '/internal/notify/staging', { title, message })
 }
 
+/** Hydrated Production Scheduler window (the scheduler service's cache; no SuiteQL of our own). */
+function getSchedulerState(start, end) {
+  return request('GET', `/api/scheduler/state?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`)
+}
+
+/** A packaging line's pending consumption queue (Manufacturing service). */
+function getStagingQueue(lineId) {
+  return request('GET', `/api/staging/queue/${encodeURIComponent(lineId)}`)
+}
+
+/** Push a facility-map change-set to socket room `facility-map` via the Gateway. */
+function broadcastFacilityState(payload = {}) {
+  return request('POST', '/internal/broadcast/facility-state', payload)
+}
+
 module.exports = {
+  broadcastFacilityState,
+  getSchedulerState,
+  getStagingQueue,
   netsuiteGet,
   netsuitePost,
   netsuitePatch,

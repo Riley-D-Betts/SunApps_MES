@@ -22,11 +22,13 @@ const state = {
   uhts: null,                      // { uhts: [...], pollDurationMs, pollAt }
   surgeTanks: null,                // { tanks: [...], pollDurationMs, pollAt }
   fillers: null,                   // { fillers: [...], pollDurationMs, pollAt }
+  receiving: null,                 // { bays: [...], pollDurationMs, pollAt } — receiving bays 1/2 (receivingJob)
   lastPoll: {
     separator: null,
     blendTank: null,
     bulkMilk: null,
     equipment: null,
+    receiving: null,
   },
   events: [],                      // newest first
   recentBatches: [],               // newest first; each entry is a processed separator batch
@@ -80,6 +82,11 @@ function setSurgeTanks(snapshot) {
 function setFillers(snapshot) {
   state.fillers = { ...snapshot, pollAt: now() }
   state.lastPoll.equipment = state.fillers.pollAt
+}
+
+function setReceiving(snapshot) {
+  state.receiving = { ...snapshot, pollAt: now() }
+  state.lastPoll.receiving = state.receiving.pollAt
 }
 
 /**
@@ -491,6 +498,14 @@ function deriveSilos() {
     }
   }
 
+  // A truck unloading through a receiving bay is silo activity too (see receivingJob).
+  for (const bay of state.receiving?.bays || []) {
+    if (!bay.transferReady || bay.transferComplete) continue
+    for (const d of bay.destinations || []) {
+      touch(d, 'receiving', { bay: bay.bayId, truckNumber: bay.source, itemId: bay.itemId, qtyActualLbs: bay.qtyActualLbs })
+    }
+  }
+
   for (const line of state.blendTanks?.lines || []) {
     if (line.siloName && (line.active || line.totalizerLbs > 0)) {
       touch(line.siloName, 'line_source', {
@@ -540,6 +555,7 @@ function snapshot() {
     uhts: state.uhts,
     surgeTanks: state.surgeTanks,
     fillers: state.fillers,
+    receiving: state.receiving,
     // Errors are kept in the ring so operators can see *why* a transfer
     // failed. Pre-fix they were hidden; surfacing them is more useful.
     recentBatches: state.recentBatches,
@@ -569,7 +585,8 @@ function clear() {
   state.uhts = null
   state.surgeTanks = null
   state.fillers = null
-  state.lastPoll = { separator: null, blendTank: null, bulkMilk: null, equipment: null }
+  state.receiving = null
+  state.lastPoll = { separator: null, blendTank: null, bulkMilk: null, equipment: null, receiving: null }
   state.events.length = 0
   state.recentBatches.length = 0
   state.recentBlendBatches.length = 0
@@ -586,6 +603,7 @@ module.exports = {
   setUhts,
   setSurgeTanks,
   setFillers,
+  setReceiving,
   pushSeparationBatch,
   pushSeparationBatchFromDbRow,
   hydrateSeparationBatches,

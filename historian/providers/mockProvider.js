@@ -175,6 +175,22 @@ class MockProvider extends BaseProvider {
     })
   }
 
+  async getReceivingStatus() {
+    // Bay 1 unloads a truck most of the time; bay 2 sits idle with its last
+    // load's intake total on the counter — the shape the prod tags showed.
+    if (this._recQty == null) this._recQty = 12000
+    const unloading = Math.random() > 0.25
+    this._recQty = unloading ? Math.min(62000, this._recQty + 400 + Math.random() * 300) : 0
+    return [
+      {
+        bayId: 'RecBay1', source: unloading ? '991' : '', itemId: unloading ? '16' : '',
+        destinations: unloading ? ['MSilo1'] : [], qtyActualLbs: this._recQty, qtyTargetLbs: 0,
+        intakeQtyLbs: this._recQty || 61240, transferReady: unloading, transferComplete: false,
+      },
+      { bayId: 'RecBay2', source: '', itemId: '', destinations: [], qtyActualLbs: 0, qtyTargetLbs: 0, intakeQtyLbs: 59237, transferReady: false, transferComplete: false },
+    ]
+  }
+
   async getUhtStatus() {
     return ['UHT1', 'UHT2'].map((uhtId, i) => {
       const running = Math.random() > 0.3
