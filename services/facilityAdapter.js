@@ -478,7 +478,8 @@ function buildLines(e, lines, nowMs, packaging, chain = null) {
       primary = `Producing · ${evidence} · scheduler unavailable`
     } else {
       status = P?.hasCounters ? 'idle' : 'stale'
-      primary = P?.lastMovementAt ? `No movement for ${ago(P.lastMovementAt, nowMs)} · scheduler unavailable` : `Scheduler unavailable${lines?.error ? ` · ${lines.error}` : ''}`
+      // the error text itself stays in /health — it can be a whole HTML error page
+      primary = P?.lastMovementAt ? `No movement for ${ago(P.lastMovementAt, nowMs)} · scheduler unavailable` : 'Scheduler unavailable'
     }
     if (L?.movedFrom) primary += ` · scheduled on line ${L.movedFrom}`
     if (status === 'running' && P?.hasCounters && !P.moving && P.lastMovementAt) primary += ` · ⚠ no movement for ${ago(P.lastMovementAt, nowMs)}`
