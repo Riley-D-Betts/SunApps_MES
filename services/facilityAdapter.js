@@ -435,8 +435,16 @@ function buildLines(e, lines, nowMs, packaging, chain = null) {
   const painted = {}   // digit → { status, group, primary }
   for (const d of ['1', '2', '3', '4', '5', '6']) {
     const L = schedOk ? byLine[d] : null
-    const P = pk?.lines?.[d] || null
+    let P = pk?.lines?.[d] || null
     if (!L && !P) continue
+    // shared 5/6 counters moving with neither filler showing flow: if the scheduler has a
+    // WO on the twin and none here, the movement is the twin's — drop it from this line
+    if (P?.sharedAmbiguous && schedOk) {
+      const twin = d === '5' ? '6' : d === '6' ? '5' : null
+      const Lt = twin ? byLine[twin] : null
+      const hasWo = (x) => !!(x && (x.current || x.planned))
+      if (twin && hasWo(Lt) && !hasWo(L)) P = { ...P, moving: !!(P.filler1?.moving || (P.fillerFlow != null && P.fillerFlow >= 5)), movement: null, casePacker: P.casePacker && { ...P.casePacker, attributed: false }, palletizer: P.palletizer && { ...P.palletizer, attributed: false }, casesToday: null }
+    }
     const fillerId = J.LINE_FILLER[d]
     const legFlowing = e[J.LINE_LEG[d]]?.status === 'flowing'
     const fillerRunning = meterGpm(d) > 1   // Filler 1 inlet meter (the only filler statused before this)

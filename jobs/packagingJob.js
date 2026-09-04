@@ -77,11 +77,15 @@ function derive(raw, nowMs) {
     const shared = d === '5' || d === '6'
     const mk = shared ? '5' : d
     const pall = pallOf(mk), cs = csOf(mk)
-    // shared 5/6: attribute to the filler with flow; both when neither flow tag reads
+    // shared 5/6: attribute to the filler with flow; when neither filler shows flow the
+    // movement is real but the owner is unknown — both lines get it, flagged ambiguous,
+    // and the adapter lets the scheduler break the tie
     let share = true
+    let ambiguous = false
     if (shared) {
-      const f5 = flowOf('5'), f6 = flowOf('6')
-      if (f5 != null || f6 != null) share = flowing(d) || (!flowing('5') && !flowing('6') && false)
+      const f5on = flowing('5'), f6on = flowing('6')
+      if (f5on || f6on) share = flowing(d)
+      else ambiguous = true
     }
     const casesToday = shared && share ? raw.casesToday56 ?? null : null
     const fl = raw.fillerFlow?.[d] || null
@@ -95,8 +99,8 @@ function derive(raw, nowMs) {
     const signals = []
     if (fl && flowing(d)) signals.push({ what: 'product flowing', at: nowMs })
     if (filler1?.moving) signals.push({ what: 'cartons moving', at: filler1.movedAt })
-    if (share && cs?.moving) signals.push({ what: 'cases moving', at: cs.movedAt })
-    if (share && pall?.moving) signals.push({ what: 'pallets moving', at: pall.movedAt })
+    if (share && cs?.moving) signals.push({ what: ambiguous ? 'cases moving (shared 5/6)' : 'cases moving', at: cs.movedAt })
+    if (share && pall?.moving) signals.push({ what: ambiguous ? 'pallets moving (shared 5/6)' : 'pallets moving', at: pall.movedAt })
     const lastMovementAt = [filler1?.movedAt, share ? cs?.movedAt : null, share ? pall?.movedAt : null].filter((x) => x != null).sort((a, b) => b - a)[0] ?? null
     const moving = signals.length > 0 || (lastMovementAt != null && nowMs - lastMovementAt <= LINE_MOVE_MS && share)
     lines[d] = {
@@ -104,6 +108,7 @@ function derive(raw, nowMs) {
       movement: signals[0]?.what || null,
       lastMovementAt: lastMovementAt != null ? new Date(lastMovementAt).toISOString() : null,
       hasCounters: !!(pall || cs || filler1 || fl),
+      sharedAmbiguous: shared && ambiguous && !!((cs && cs.moving) || (pall && pall.moving)),
       fillerFlow: fl ? fl.rate : null,
       fillerFlowUnit: fl ? fl.unit : null,
       filler1,
