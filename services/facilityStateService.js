@@ -36,6 +36,8 @@ const state = {
 }
 const prev = new Map() // id → JSON string of the entity minus volatile fields
 let lastRefreshAt = null
+let lastHeartbeatAt = 0
+const HEARTBEAT_MS = 15_000   // when nothing changes, tell clients we are still polling (their "polled Xs ago")
 let lastChangeSetSize = 0
 let lastBroadcastError = null
 let lastError = null
@@ -72,7 +74,15 @@ async function execRefresh(reason) {
     state.stale = false
     lastError = null
     lastRefreshAt = now()
-    if (changeSet) broadcast(changeSet)
+    if (changeSet) {
+      changeSet.refreshedAt = lastRefreshAt
+      broadcast(changeSet)
+      lastHeartbeatAt = Date.now()
+    } else if (state.seeded && Date.now() - lastHeartbeatAt >= HEARTBEAT_MS) {
+      // empty change-set at the current version: clients treat it as a duplicate but refresh their age
+      broadcast({ version: state.version, baseVersion: state.version, reason: 'heartbeat', updatedAt: state.updatedAt, refreshedAt: lastRefreshAt, upserted: [], removedIds: [] })
+      lastHeartbeatAt = Date.now()
+    }
     return changeSet
   } catch (err) {
     state.stale = true
@@ -168,7 +178,7 @@ function broadcast(changeSet) {
 async function getState() {
   if (!state.seeded) await requestRefresh('hydrate')
   return {
-    entities: state.entities, updatedAt: state.updatedAt, version: state.version, stale: state.stale,
+    entities: state.entities, updatedAt: state.updatedAt, refreshedAt: lastRefreshAt, version: state.version, stale: state.stale,
     assignments: mergeAssignments(settings.get('assignments', {})),
     overrides: activeOverrides(clock.now()),
   }
