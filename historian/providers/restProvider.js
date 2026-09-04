@@ -2,6 +2,7 @@ const BaseProvider = require('./baseProvider')
 const config = require('../../config')
 const httpntlm = require('httpntlm')
 const { PROCESS_STEP_NAMES, CIP_STEP_NAMES } = require('./uhtStepNames')
+const PK = require('../../services/packagingTags')
 
 /**
  * REST provider for the on-premise AVEVA Historian OData v2 API.
@@ -543,6 +544,37 @@ class RestProvider extends BaseProvider {
       destinations,
       creamTotalLbs: creamTotalGal * CREAM_DENSITY_PPG,
       skimTotalLbs: skimTotalGal * SKIM_DENSITY_PPG,
+    }
+  }
+
+  /** Packaging lines — see BaseProvider.getPackagingStatus. ~46 tags, every value null when quality is bad. */
+  async getPackagingStatus() {
+    const fqns = PK.allFqns()
+    const values = await Promise.all(fqns.map((fqn) => this._getCurrentValue(fqn, { verbose: false })))
+    const map = {}
+    fqns.forEach((fqn, i) => { map[fqn] = values[i] })
+    const good = (t) => map[t] && map[t].OpcQuality === 192
+    const num = (t) => (good(t) && map[t].Value != null && Number.isFinite(Number(map[t].Value)) ? Number(map[t].Value) : null)
+    const bool = (t) => (good(t) && map[t].Value != null ? Number(map[t].Value) === 1 : null)
+    const txt = (t) => (good(t) ? String(map[t].Text ?? '').trim() || null : null)
+
+    const palletizers = {}
+    for (const [line, b] of Object.entries(PK.PALLETIZERS)) {
+      palletizers[line] = { palletsToday: num(`${b}.Day_Counts`), lifetimeCases: num(`${b}.UCO.Mcounts#.0`), state: num(`${b}.UCO.MUtilState`), reason: num(`${b}.UCO.MUtilReasonCd`), palletComplete: bool(`${b}.Pallet_Complete`) }
+    }
+    const casePackers = {}
+    for (const [line, b] of Object.entries(PK.CASE_PACKERS)) {
+      casePackers[line] = { lifetimeCases: num(`${b}.UCO.Mcounts#.0`), state: num(`${b}.UCO.MUtilState`), reason: num(`${b}.UCO.MUtilReasonCd`), recipe: txt(`${b}.RMS.RecipeName_Active`) }
+    }
+    const fillerFlow = {}
+    for (const [line, f] of Object.entries(PK.FILLER_FLOW)) fillerFlow[line] = { rate: num(f.fqn), unit: f.unit }
+    const sterile = { fillers: {}, legs: {} }
+    for (const [n, t] of Object.entries(PK.STERILE_FILLERS)) sterile.fillers[n] = bool(t)
+    for (const [leg, t] of Object.entries(PK.STERILE_LEGS)) sterile.legs[leg] = bool(t)
+    return {
+      palletizers, casePackers, casesToday56: num(PK.CASES_TODAY_56), fillerFlow,
+      filler1: { lane1Good: num(PK.FILLER1.lane1Good), lane2Good: num(PK.FILLER1.lane2Good), runMode: bool(PK.FILLER1.runMode), cipRunning: bool(PK.FILLER1.cipRunning), sipRunning: bool(PK.FILLER1.sipRunning) },
+      sterile,
     }
   }
 

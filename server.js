@@ -16,6 +16,7 @@ const facilityStateJob = require('./jobs/facilityStateJob')
 const facilityLinesJob = require('./jobs/facilityLinesJob')
 const facilityTrucksJob = require('./jobs/facilityTrucksJob')
 const receivingJob = require('./jobs/receivingJob')
+const packagingJob = require('./jobs/packagingJob')
 const issueCompletionJob = require('./jobs/issueCompletionJob')
 const inventoryAdjustmentJob = require('./jobs/inventoryAdjustmentJob')
 const priceSyncJob = require('./jobs/priceSyncJob')
@@ -103,6 +104,7 @@ function applyCrons(crons) {
   cronTasks.facilityLines = cron.schedule(crons.facilityLines, guarded('facilityLines', () => facilityLinesJob.run()))
   cronTasks.facilityTrucks = cron.schedule(crons.facilityTrucks, guarded('facilityTrucks', () => facilityTrucksJob.run()))
   cronTasks.receiving  = cron.schedule(crons.receiving,  guarded('receiving',  () => receivingJob.run(providerHolder.current)))
+  cronTasks.packaging  = cron.schedule(crons.packaging,  guarded('packaging',  () => packagingJob.run(providerHolder.current)))
   cronTasks.tick       = cron.schedule(crons.tick,       guarded('tick',       () => issueCompletionJob.run(providerHolder.current)))
   cronTasks.invAdjust  = cron.schedule(crons.invAdjust,  guarded('invAdjust',  () => inventoryAdjustmentJob.run(providerHolder.current)))
   cronTasks.priceSync  = cron.schedule(crons.priceSync,  guarded('priceSync',  () => priceSyncJob.run()))
@@ -119,6 +121,7 @@ const PROD_CRONS = {
   facilityLines: config.FACILITY_LINES_CRON,
   facilityTrucks: config.FACILITY_TRUCKS_CRON,
   receiving:  config.RECEIVING_CRON,
+  packaging:  config.PACKAGING_CRON,
   tick:       config.TICK_CRON,
   invAdjust:  config.INVENTORY_ADJUSTMENT_CRON,
   priceSync:  config.PRICE_SYNC_CRON,
@@ -149,6 +152,7 @@ function reconcileMode(rtConfig) {
       facilityLinesJob.reset()
       facilityTrucksJob.reset()
       receivingJob.reset()
+      packagingJob.reset()
       issueCompletionJob.reset()
       separationJob.reset()
       inventoryAdjustmentJob.reset()

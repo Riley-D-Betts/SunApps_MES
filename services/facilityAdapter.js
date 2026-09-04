@@ -217,7 +217,7 @@ function buildEntities(snapshot, assignments, nowMs = Date.now(), lines = null, 
   buildReceiving(e, snapshot, trucks, nowMs)
 
   // ── packaging lines 1–6 (scheduler + staging queue + physical evidence) ──
-  if (lines) buildLines(e, lines, nowMs)
+  buildLines(e, lines, nowMs, snapshot.packaging)
 
   return e
 }
@@ -315,7 +315,7 @@ function buildReceiving(e, snapshot, trucks, nowMs) {
 }
 
 // ─── lines ───────────────────────────────────────────────────────────────────
-const LINE_STALE_MS = 5 * 60_000        // our scheduler reads failing this long → stale
+const LINE_STALE_MS = 5 * 60_000        // our scheduler reads failing this long → scheduler unavailable
 const CHANGEOVER_MS = 45 * 60_000       // within this of a planned start → changeover
 const SHARED_RANK = { running: 5, down: 4, hold: 3, changeover: 2, cip: 1, idle: 0, stale: -1 }
 
@@ -331,53 +331,99 @@ function when(ms, nowMs) {
 }
 const fmtDur = (ms) => { const m = Math.round(ms / 60_000); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min` }
 const shortItem = (s) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 48)
+const ago = (iso, nowMs) => (iso ? fmtDur(Math.max(0, nowMs - Date.parse(iso))) : null)
 
 /**
  * Line status, in this order of trust:
  *   1. a work order with a logged start and no end → running
  *   2. a CIP / downtime / maintenance event covering now → cip / down / hold
- *   3. the WO planned for now, backed by evidence (NetSuite says In Process, product
- *      on the line's surge leg, Filler 1's meter) → running, "no start logged"
+ *   3. the WO planned for now, backed by evidence (counters or flow moving on the
+ *      packaging poll, NetSuite In Process, product on the line's surge leg,
+ *      Filler 1's meter) → running, "no start logged"
  *   4. the WO planned for now with no evidence → changeover just after its start, idle (late) after that
  *   5. the next WO within 45 min → changeover
  *   6. idle, naming the next WO
- * The scheduler is the source for what is being made; the historian only confirms.
+ * Without the scheduler the historian decides alone: movement → running.
+ * The case packer and palletizer then take their own colour from their own
+ * counters, and the filler from its flow.
  */
-function buildLines(e, lines, nowMs) {
-  const stale = !lines.pollAt || nowMs - Date.parse(lines.pollAt) > LINE_STALE_MS
+/** Lines 3/4 and 5/6 are one physical line scheduled as one row: a WO sitting on the idle twin while the other twin moves belongs to the moving twin. */
+const PAIRS = [['3', '4'], ['5', '6']]
+function reattributePairs(byLine, ownEvidence) {
+  const out = { ...byLine }
+  for (const [a, b] of PAIRS) {
+    for (const [x, y] of [[a, b], [b, a]]) {
+      const Lx = out[x], Ly = out[y]
+      if (!Lx || !Ly) continue
+      const woX = Lx.current || Lx.planned
+      const woY = Ly.current || Ly.planned
+      if (woX && !woY && !ownEvidence(x) && ownEvidence(y)) {
+        out[y] = { ...Ly, current: Lx.current, planned: Lx.planned, event: Ly.event || Lx.event, movedFrom: x }
+        out[x] = { ...Lx, current: null, planned: null, movedTo: y, movedWo: woX }
+      }
+    }
+  }
+  return out
+}
+
+function buildLines(e, lines, nowMs, packaging) {
+  const schedOk = !!(lines?.pollAt && nowMs - Date.parse(lines.pollAt) <= LINE_STALE_MS && lines.lines)
+  const pk = packaging?.pollAt && nowMs - Date.parse(packaging.pollAt) <= STALE_MS ? packaging : null
+  // evidence that belongs to ONE line (packaging counters, Filler 1's meter) — a surge leg feeds both twins, so it never moves a WO
+  const ownEvidence = (d) => !!(pk?.lines?.[d]?.moving || e[J.LINE_FILLER[d]]?.status === 'running')
+  const byLine = schedOk ? reattributePairs(lines.lines, ownEvidence) : {}
   const painted = {}   // digit → { status, group, primary }
-  for (const [d, L] of Object.entries(lines.lines || {})) {
-    const fillerId = `line${d}filler`
+  for (const d of ['1', '2', '3', '4', '5', '6']) {
+    const L = schedOk ? byLine[d] : null
+    const P = pk?.lines?.[d] || null
+    if (!L && !P) continue
+    const fillerId = J.LINE_FILLER[d]
     const legFlowing = e[J.LINE_LEG[d]]?.status === 'flowing'
-    const fillerRunning = e[fillerId]?.status === 'running'   // only Filler 1 is metered; nothing else sets a filler status before this
-    const evidence = fillerRunning ? 'filler meter' : legFlowing ? 'product on leg' : null
+    const fillerRunning = e[fillerId]?.status === 'running'   // Filler 1 inlet meter (the only filler statused before this)
+    const evidence = P?.moving ? P.movement || 'movement on the line' : fillerRunning ? 'filler meter' : legFlowing ? 'product on leg' : null
     let status = 'idle'
     let wo = null
     let primary = ''
-    if (L.current) {
-      status = 'running'; wo = L.current
-      primary = `${wo.number} · ${shortItem(wo.item)} · since ${when(wo.start, nowMs)}`
-    } else if (L.event) {
-      status = L.event.status; wo = L.planned
-      primary = [L.event.name, L.event.memo, `until ${when(L.event.end, nowMs)}`].filter(Boolean).join(' · ')
-    } else if (L.planned && (L.planned.nsInProcess || evidence)) {
-      status = 'running'; wo = L.planned
-      primary = `${wo.number} · ${shortItem(wo.item)} · ${L.planned.nsInProcess ? 'in process' : evidence} (no start logged)`
-    } else if (L.planned) {
-      wo = L.planned
-      const late = nowMs - wo.start
-      if (late < CHANGEOVER_MS) { status = 'changeover'; primary = `Changeover → ${wo.number} · ${shortItem(wo.item)} · planned ${when(wo.start, nowMs)}` }
-      else { status = 'idle'; primary = `${wo.number} not started · planned ${when(wo.start, nowMs)} (${fmtDur(late)} late)` }
-    } else if (L.next && L.next.start - nowMs < CHANGEOVER_MS) {
-      status = 'changeover'; wo = L.next
-      primary = `Changeover → ${wo.number} · ${shortItem(wo.item)} · ${when(wo.start, nowMs)}`
+    if (L?.movedTo) {
+      status = 'idle'; wo = null
+      primary = `${L.movedWo.number} · ${shortItem(L.movedWo.item)} · running on line ${L.movedTo}`
+    } else if (L) {
+      if (L.current) {
+        status = 'running'; wo = L.current
+        primary = `${wo.number} · ${shortItem(wo.item)} · since ${when(wo.start, nowMs)}`
+      } else if (L.event) {
+        status = L.event.status; wo = L.planned
+        primary = [L.event.name, L.event.memo, `until ${when(L.event.end, nowMs)}`].filter(Boolean).join(' · ')
+      } else if (L.planned && (L.planned.nsInProcess || evidence)) {
+        status = 'running'; wo = L.planned
+        primary = `${wo.number} · ${shortItem(wo.item)} · ${evidence || 'in process'} (no start logged)`
+      } else if (L.planned) {
+        wo = L.planned
+        const late = nowMs - wo.start
+        if (late < CHANGEOVER_MS) { status = 'changeover'; primary = `Changeover → ${wo.number} · ${shortItem(wo.item)} · planned ${when(wo.start, nowMs)}` }
+        else { status = 'idle'; primary = `${wo.number} not started · planned ${when(wo.start, nowMs)} (${fmtDur(late)} late)` }
+        if (P?.sterile === false) primary += ' · filler not sterile'
+      } else if (L.next && L.next.start - nowMs < CHANGEOVER_MS) {
+        status = 'changeover'; wo = L.next
+        primary = `Changeover → ${wo.number} · ${shortItem(wo.item)} · ${when(wo.start, nowMs)}`
+      } else if (evidence) {
+        status = 'running'
+        primary = `Producing · ${evidence} · nothing scheduled`
+      } else {
+        status = 'idle'
+        primary = L.next ? `Next ${L.next.number} · ${shortItem(L.next.item)} · ${when(L.next.start, nowMs)}` : 'No WO scheduled'
+      }
+    } else if (evidence) {
+      status = 'running'
+      primary = `Producing · ${evidence} · scheduler unavailable`
     } else {
-      status = 'idle'
-      primary = L.next ? `Next ${L.next.number} · ${shortItem(L.next.item)} · ${when(L.next.start, nowMs)}` : 'No WO scheduled'
+      status = P?.hasCounters ? 'idle' : 'stale'
+      primary = P?.lastMovementAt ? `No movement for ${ago(P.lastMovementAt, nowMs)} · scheduler unavailable` : `Scheduler unavailable${lines?.error ? ` · ${lines.error}` : ''}`
     }
-    if (stale) { status = evidence ? 'running' : 'stale'; if (!evidence) primary = `Scheduler unavailable${lines.error ? ` · ${lines.error}` : ''}` }
+    if (L?.movedFrom) primary += ` · scheduled on line ${L.movedFrom}`
+    if (status === 'running' && P?.hasCounters && !P.moving && P.lastMovementAt) primary += ` · ⚠ no movement for ${ago(P.lastMovementAt, nowMs)}`
 
-    const q = L.queue
+    const q = L?.queue
     const queueFull = !!q && !q.error && q.pending >= q.cap
     if (queueFull) primary += ` · ⚠ consumption queue ${q.pending}/${q.cap} — completions blocked`
     const group = wo && (status === 'running' || status === 'changeover') ? wo.number : null
@@ -385,15 +431,23 @@ function buildLines(e, lines, nowMs) {
     const metrics = [
       { label: 'WO', value: wo?.number },
       { label: 'item', value: wo ? shortItem(wo.item) : null },
+      { label: 'pallets today', value: P?.palletizer?.attributed ? P.palletizer.palletsToday : null },
+      { label: 'cases/min', value: P?.casePacker?.attributed ? P.casePacker.casesPerMin : null },
+      { label: 'cartons/min', value: P?.filler1?.cartonsPerMin ?? null },
+      { label: P?.fillerFlowUnit || 'flow', value: P?.fillerFlow != null ? round(P.fillerFlow, 0) : null },
+      { label: 'cases today', value: P?.casesToday ?? null },
       { label: 'qty', value: wo?.quantity },
       { label: 'NS', value: wo?.nsStatusLabel || null },
       { label: 'started', value: wo?.actualStart ? when(wo.actualStart, nowMs) : null },
       { label: 'ends', value: status === 'running' && wo ? when(wo.end, nowMs) : null },
-      { label: 'next', value: L.next && L.next !== wo ? `${L.next.number} ${when(L.next.start, nowMs)}` : null },
+      { label: 'sterile', value: P?.sterile == null ? null : P.sterile ? 'yes' : 'NO' },
+      { label: 'pack', value: P?.casePacker?.attributed ? P.casePacker.recipe : null },
+      { label: 'next', value: L?.next && L.next !== wo ? `${L.next.number} ${when(L.next.start, nowMs)}` : null },
       { label: 'queue', value: q && !q.error ? `${q.pending}/${q.cap}` : null },
     ].filter((m) => m.value != null && m.value !== '')
 
-    e[`line${d}`] = { status, primary, metrics, group, stale: stale || !!lines.schedulerStale, source: 'scheduler', link: '/production-scheduler' }
+    const stale = !schedOk || !!lines?.schedulerStale
+    e[`line${d}`] = { status, primary, metrics, group, stale, source: L ? 'scheduler' : 'mes', link: '/production-scheduler' }
     painted[d] = { status, group, primary }
 
     for (const m of J.LINE_MEMBERS[d] || []) {
@@ -404,12 +458,63 @@ function buildLines(e, lines, nowMs) {
         e[m] = { ...prev, status: prev.status === 'running' ? 'running' : status, primary: `${prev.primary} · ${primary}`, group: group || prev.group || null }
         continue
       }
-      e[m] = { ...prev, status, primary, group: group || prev.group || null, source: 'scheduler', stale }
+      e[m] = { ...prev, status, primary, group: group || prev.group || null, source: L ? 'scheduler' : 'mes', stale }
     }
+    if (P) paintMachines(e, d, P, status, group, nowMs)
   }
-  // shared 5/6 palletizer follows whichever line is doing more
+  // shared 5/6 palletizer follows whichever line is doing more, then its own counters
   const sh = ['5', '6'].map((d) => painted[d]).filter(Boolean).sort((a, b) => (SHARED_RANK[b.status] ?? 0) - (SHARED_RANK[a.status] ?? 0))[0]
-  if (sh) e.line56pallet = { ...(e.line56pallet || {}), status: sh.status, primary: sh.primary, group: sh.group, source: 'scheduler', stale }
+  if (sh) e.line56pallet = { ...(e.line56pallet || {}), status: sh.status, primary: sh.primary, group: sh.group, source: 'scheduler' }
+  const shP = pk?.lines?.['6']?.palletizer || pk?.lines?.['5']?.palletizer
+  if (shP) paintPalletizer(e, 'line56pallet', shP, e.line56pallet?.status || 'idle', e.line56pallet?.group || null, nowMs)
+  // sterile flags on the drawn surge-to-filler legs
+  for (const [tr, pipe] of Object.entries(J.LEG_TR)) {
+    const st = pk?.legs?.[tr]
+    if (st == null || !e[pipe]) continue
+    e[pipe].metrics = [...(e[pipe].metrics || []).filter((m) => m.label !== 'sterile'), { label: 'sterile', value: st ? 'yes' : 'NO' }]
+    if (!st) e[pipe].primary = `${e[pipe].primary ? e[pipe].primary + ' · ' : ''}${tr} not sterile`
+  }
+}
+
+/** Filler, case packer and palletizer take their own colour from their own counters. */
+function paintMachines(e, d, P, lineStatus, group, nowMs) {
+  const fillerId = J.LINE_FILLER[d]
+  const f = e[fillerId]
+  if (f) {
+    const flowing = P.fillerFlow != null && P.fillerFlow >= 5
+    const f1 = P.filler1
+    const meterGpm = (f.metrics || []).find((m) => m.label === 'gpm')?.value
+    const mode = f1 ? (f1.moving || f1.runMode ? 'Filling' : f1.sipRunning ? 'SIP running' : f1.cipRunning ? 'CIP running' : 'Not filling') : flowing ? 'Filling' : P.fillerFlow != null ? 'No flow' : null
+    const bits = [
+      mode,
+      P.fillerFlow != null ? `${round(P.fillerFlow, 0)} ${P.fillerFlowUnit}` : null,
+      meterGpm ? `${meterGpm} gpm inlet` : null,
+      f1?.cartonsPerMin != null ? `${f1.cartonsPerMin} cartons/min` : null,
+      f1 ? `lanes ${f1.lane1Good ?? '?'} / ${f1.lane2Good ?? '?'}` : null,
+      P.sterile != null ? (P.sterile ? 'sterile' : 'NOT sterile') : null,
+      lineStatus === 'running' || lineStatus === 'changeover' ? null : e[`line${d}`]?.primary || null,
+    ].filter(Boolean)
+    const fillerStatus = flowing || f1?.moving || (f1?.runMode && f.status === 'running') ? 'running' : f1?.cipRunning || f1?.sipRunning ? 'cip' : lineStatus === 'running' ? 'idle' : f.status
+    e[fillerId] = { ...f, status: fillerStatus, primary: bits.join(' · '), metrics: [...(f.metrics || []), { label: 'sterile', value: P.sterile == null ? null : P.sterile ? 'yes' : 'NO' }, { label: P.fillerFlowUnit || 'flow', value: P.fillerFlow != null ? round(P.fillerFlow, 0) : null }].filter((m) => m.value != null) }
+  }
+  const cs = P.casePacker
+  const caseId = J.LINE_CASE[d]
+  if (cs && cs.attributed && e[caseId]) {
+    const st = cs.moving ? 'running' : lineStatus === 'running' ? 'idle' : lineStatus
+    e[caseId] = { ...e[caseId], status: st, group: st === 'running' ? group : null,
+      primary: [cs.moving ? 'Packing' : cs.movedAt ? `No cases for ${fmtDur(nowMs - cs.movedAt)}` : 'No cases', cs.casesPerMin != null ? `${cs.casesPerMin} cases/min` : null, cs.recipe ? `pattern ${cs.recipe}` : null, cs.shared ? 'shared 5/6' : null].filter(Boolean).join(' · '),
+      metrics: [{ label: 'cases/min', value: cs.casesPerMin }, { label: 'lifetime', value: cs.lifetimeCases }, { label: 'pack', value: cs.recipe }, { label: 'state', value: cs.state != null ? `${cs.state}/${cs.reason ?? '-'}` : null }].filter((m) => m.value != null) }
+  }
+  const palletId = J.LINE_PALLET[d]
+  if (P.palletizer && P.palletizer.attributed && palletId !== 'line56pallet') paintPalletizer(e, palletId, P.palletizer, lineStatus, group, nowMs)
+}
+
+function paintPalletizer(e, palletId, pl, lineStatus, group, nowMs) {
+  if (!e[palletId]) return
+  const st = pl.moving ? 'running' : lineStatus === 'running' ? 'idle' : lineStatus
+  e[palletId] = { ...e[palletId], status: st, group: st === 'running' ? group : null,
+    primary: [pl.moving ? 'Palletizing' : pl.movedAt ? `No cases for ${fmtDur(nowMs - pl.movedAt)}` : 'No cases', pl.palletsToday != null ? `${pl.palletsToday} pallets today` : null, pl.casesPerMin != null ? `${pl.casesPerMin} cases/min` : null, pl.palletComplete ? 'pallet waiting at exit' : null, pl.shared ? 'shared 5/6' : null].filter(Boolean).join(' · '),
+    metrics: [{ label: 'pallets today', value: pl.palletsToday }, { label: 'cases/min', value: pl.casesPerMin }, { label: 'lifetime', value: pl.lifetimeCases }, { label: 'state', value: pl.state != null ? `${pl.state}/${pl.reason ?? '-'}` : null }].filter((m) => m.value != null) }
 }
 
 module.exports = { buildEntities, buildLines, buildReceiving, parseProduct, STALE_MS }

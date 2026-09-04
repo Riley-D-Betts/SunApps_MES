@@ -53,6 +53,12 @@ const LINE_MEMBERS = {
 const REC_BAYS = { RecBay1: { tank: 'rectank1', line: 'recline1', label: 'Bay 1' }, RecBay2: { tank: 'rectank2', line: 'recline2', label: 'Bay 2' } }
 /** Receiving header → raw silo lines. */
 const REC_SILO_LINE = { MSilo1: 'recsiloline1', MSilo2: 'recsiloline2', MSilo3: 'recsiloline3', MSilo4: 'recsiloline4', MSilo5: 'recsiloline5' }
+/** Drawn case packer / palletizer / filler per line (5 and 6 share the palletizer). */
+const LINE_CASE = { 1: 'line1case', 2: 'line2case', 3: 'line3case', 4: 'line4case', 5: 'line5case', 6: 'line6case' }
+const LINE_PALLET = { 1: 'line1pallet', 2: 'line2pallet', 3: 'line3pallet', 4: 'line4pallet', 5: 'line56pallet', 6: 'line56pallet' }
+const LINE_FILLER = { 1: 'line1filler', 2: 'line2filler', 3: 'line3filler', 4: 'line4filler', 5: 'line5filler', 6: 'line6filler' }
+/** ThermaRoute legs TR11–14 ↔ drawn filler legs (TR1n = Sel n; Sel 1 → fillers 1&2, Sel 4 → 3&4, Sel 3 → 5&6; TR12 has no drawn leg). */
+const LEG_TR = { TR11: 'filler1filler2line', TR14: 'filler3filler4line', TR13: 'filler5filler6line' }
 /** Which drawn surge leg feeds each line (legs are paired). */
 const LINE_LEG = { 1: 'filler1filler2line', 2: 'filler1filler2line', 3: 'filler3filler4line', 4: 'filler3filler4line', 5: 'filler5filler6line', 6: 'filler5filler6line' }
 
@@ -94,6 +100,6 @@ function mergeAssignments(overrides = {}) {
 }
 
 module.exports = {
-  DEFAULT_ASSIGNMENTS, SILOS, UHTS, BLEND_LINES, MANIFOLD_TO_TANK, OUTLET_LINE, SURGE_IN, SURGE_OUT, SEL_LEG, LEG_FILLERS, SEP_LINE, SILO_TRANSLINE, LINE_MEMBERS, LINE_LEG, REC_BAYS, REC_SILO_LINE,
+  DEFAULT_ASSIGNMENTS, SILOS, UHTS, BLEND_LINES, MANIFOLD_TO_TANK, OUTLET_LINE, SURGE_IN, SURGE_OUT, SEL_LEG, LEG_FILLERS, SEP_LINE, SILO_TRANSLINE, LINE_MEMBERS, LINE_LEG, LINE_CASE, LINE_PALLET, LINE_FILLER, LEG_TR, REC_BAYS, REC_SILO_LINE,
   normalizeVessel, normalizeSilo, mergeAssignments,
 }

@@ -24,6 +24,7 @@ const DEFAULT_REPLAY_CRONS = {
   facilityState: '*/10 * * * * *',
   facilityLines: '*/30 * * * * *',
   receiving: '*/10 * * * * *',
+  packaging: '*/10 * * * * *',
   facilityTrucks: '0 * * * * *',
   tick: '*/30 * * * * *',
   invAdjust: '*/30 * * * * *',

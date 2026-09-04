@@ -154,6 +154,25 @@ class BaseProvider {
   }
 
   /**
+   * Packaging line readings for the facility map (services/packagingTags.js):
+   * palletizer and case-packer counters/states, filler flow rates, Filler 1's
+   * lane carton counters and mode flags, sterile flags. Raw values only — the
+   * packaging job tracks movement and rates. Any value that reads with bad
+   * OPC quality is null.
+   * @returns {Promise<{
+   *   palletizers: { [line]: { palletsToday, lifetimeCases, state, reason, palletComplete } },
+   *   casePackers: { [line]: { lifetimeCases, state, reason, recipe } },
+   *   casesToday56: number|null,
+   *   fillerFlow: { [line]: { rate, unit } },
+   *   filler1: { lane1Good, lane2Good, runMode, cipRunning, sipRunning },
+   *   sterile: { fillers: { [n]: boolean|null }, legs: { [TR1x]: boolean|null } }
+   * }>}
+   */
+  async getPackagingStatus() {
+    throw new Error('getPackagingStatus() not implemented')
+  }
+
+  /**
    * Get live status for both UHT pasteurizers.
    * @returns {Promise<Array<{
    *   uhtId: string,

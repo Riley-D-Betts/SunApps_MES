@@ -84,6 +84,8 @@ module.exports = {
   FACILITY_LINES_CRON: cronEnv('FACILITY_LINES_CRON', '*/15 * * * * *'),
   // Milk receiving bays (8 tags per bay) — status only, feeds the map and live-status.
   RECEIVING_CRON: cronEnv('RECEIVING_CRON', '*/10 * * * * *'),
+  // Packaging counters / flows / sterile flags (~55 tags) for the facility map's line evidence.
+  PACKAGING_CRON: cronEnv('PACKAGING_CRON', '*/10 * * * * *'),
   // NetSuite milk-truck queue for the map (one SuiteQL a minute through the Gateway).
   FACILITY_TRUCKS_CRON: cronEnv('FACILITY_TRUCKS_CRON', '0 * * * * *'),
   // Tick that fires periodic blend-tank WO issues + completions. Production cadence

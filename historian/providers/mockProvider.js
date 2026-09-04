@@ -175,6 +175,37 @@ class MockProvider extends BaseProvider {
     })
   }
 
+  async getPackagingStatus() {
+    // Sticky per-line "producing" flags so counters climb for minutes at a time,
+    // the way real lines do; line 2 stays dark, line 6 runs on the shared 5/6 units.
+    if (!this._pk) {
+      this._pk = {
+        run: { 1: true, 3: false, 4: false, 5: false, 6: true },
+        pall: { 1: [52, 6770436], 3: [55, 1548572], 4: [0, 670494], 5: [31, 1830663] },
+        cs: { 1: 6555511, 3: 1524830, 4: 636454, 5: 1622438 },
+        cases56: 3924, lane1: 24568, lane2: 23033,
+      }
+    }
+    const S = this._pk
+    for (const d of Object.keys(S.run)) if (Math.random() < 0.02) S.run[d] = !S.run[d]
+    const bump = (line) => S.run[line] ? Math.round(2 + Math.random() * 6) : 0
+    const running56 = S.run[5] || S.run[6]
+    for (const d of ['1', '3', '4']) { const c = bump(d); S.pall[d][1] += c; S.cs[d] += c; if (c && Math.random() < 0.08) S.pall[d][0] += 1 }
+    const c56 = running56 ? Math.round(2 + Math.random() * 6) : 0
+    S.pall[5][1] += c56; S.cs[5] += c56; S.cases56 += c56; if (c56 && Math.random() < 0.08) S.pall[5][0] += 1
+    if (S.run[1]) { S.lane1 += Math.round(Math.random() * 20); S.lane2 += Math.round(Math.random() * 20) }
+    const pall = (d) => ({ palletsToday: S.pall[d][0], lifetimeCases: S.pall[d][1], state: S.run[d] || (d === '5' && running56) ? 2 : 4, reason: S.run[d] ? 0 : 1, palletComplete: Math.random() < 0.1 })
+    const cs = (d) => ({ lifetimeCases: S.cs[d], state: S.run[d] || (d === '5' && running56) ? 1 : 4, reason: S.run[d] ? 0 : 1, recipe: { 1: '4x3', 3: '4x3', 4: '4x3', 5: '6x3' }[d] })
+    return {
+      palletizers: { 1: pall('1'), 3: pall('3'), 4: pall('4'), 5: pall('5') },
+      casePackers: { 1: cs('1'), 3: cs('3'), 4: cs('4'), 5: cs('5') },
+      casesToday56: S.cases56,
+      fillerFlow: { 3: { rate: S.run[3] ? 120 + Math.random() * 20 : 0, unit: 'l/h' }, 4: { rate: S.run[4] ? 400 + Math.random() * 80 : 0, unit: 'l/h' }, 5: { rate: S.run[5] ? 30 + Math.random() * 8 : 0, unit: 'l/min' }, 6: { rate: S.run[6] ? 34 + Math.random() * 8 : 0, unit: 'l/min' } },
+      filler1: { lane1Good: S.lane1, lane2Good: S.lane2, runMode: S.run[1], cipRunning: !S.run[1] && Math.random() < 0.5, sipRunning: false },
+      sterile: { fillers: { 1: S.run[1], 2: false, 3: true, 4: true, 5: S.run[5] }, legs: { TR11: S.run[1], TR12: false, TR13: running56, TR14: S.run[3] || S.run[4] } },
+    }
+  }
+
   async getReceivingStatus() {
     // Bay 1 unloads a truck most of the time; bay 2 sits idle with its last
     // load's intake total on the counter — the shape the prod tags showed.

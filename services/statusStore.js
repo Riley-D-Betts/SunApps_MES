@@ -23,12 +23,14 @@ const state = {
   surgeTanks: null,                // { tanks: [...], pollDurationMs, pollAt }
   fillers: null,                   // { fillers: [...], pollDurationMs, pollAt }
   receiving: null,                 // { bays: [...], pollDurationMs, pollAt } — receiving bays 1/2 (receivingJob)
+  packaging: null,                 // { lines: {digit: …}, legs, pollDurationMs, pollAt } — packaging counters/flows (packagingJob)
   lastPoll: {
     separator: null,
     blendTank: null,
     bulkMilk: null,
     equipment: null,
     receiving: null,
+    packaging: null,
   },
   events: [],                      // newest first
   recentBatches: [],               // newest first; each entry is a processed separator batch
@@ -87,6 +89,11 @@ function setFillers(snapshot) {
 function setReceiving(snapshot) {
   state.receiving = { ...snapshot, pollAt: now() }
   state.lastPoll.receiving = state.receiving.pollAt
+}
+
+function setPackaging(snapshot) {
+  state.packaging = { ...snapshot, pollAt: now() }
+  state.lastPoll.packaging = state.packaging.pollAt
 }
 
 /**
@@ -556,6 +563,7 @@ function snapshot() {
     surgeTanks: state.surgeTanks,
     fillers: state.fillers,
     receiving: state.receiving,
+    packaging: state.packaging,
     // Errors are kept in the ring so operators can see *why* a transfer
     // failed. Pre-fix they were hidden; surfacing them is more useful.
     recentBatches: state.recentBatches,
@@ -586,7 +594,8 @@ function clear() {
   state.surgeTanks = null
   state.fillers = null
   state.receiving = null
-  state.lastPoll = { separator: null, blendTank: null, bulkMilk: null, equipment: null, receiving: null }
+  state.packaging = null
+  state.lastPoll = { separator: null, blendTank: null, bulkMilk: null, equipment: null, receiving: null, packaging: null }
   state.events.length = 0
   state.recentBatches.length = 0
   state.recentBlendBatches.length = 0
@@ -604,6 +613,7 @@ module.exports = {
   setSurgeTanks,
   setFillers,
   setReceiving,
+  setPackaging,
   pushSeparationBatch,
   pushSeparationBatchFromDbRow,
   hydrateSeparationBatches,
