@@ -47,6 +47,13 @@ function buildEntities(snapshot, assignments, nowMs = Date.now(), lines = null, 
   const surgeIdOf = Object.fromEntries(Object.entries(assignments.surge).map(([svg, hid]) => [hid, svg]))
   const blendIdOf = Object.fromEntries(Object.entries(assignments.blend).map(([svg, hid]) => [hid, svg]))
 
+  // ── product chains: every active element joins a chain keyed by the vessel or
+  //    train it belongs to (BlendTank1A, TSTAT1, UHT1, ST81, line1); chains that
+  //    physically connect are linked and the whole chain takes ONE colour at the end
+  const chain = { of: {}, links: [], legTank: {} }
+  const tag = (id, key) => { if (id && key) chain.of[id] = key }
+  const link = (a, b) => { if (a && b && a !== b) chain.links.push([a, b]) }
+
   // ── work-order groups (from active batches in tick state) ──────────────
   const tick = snapshot.tick || {}
   const surgeWO = {}   // ST81 → WO number
@@ -115,11 +122,12 @@ function buildEntities(snapshot, assignments, nowMs = Date.now(), lines = null, 
     const destSvg = blendIdOf[dest] || null
     const group = blendWO[dest] || null
     light(pipe, { primary: `${ln.line} · ${silo || '?'} → ${dest || '?'} · ${round(ln.totalizerLbs, 0) ?? 0} lb`, metrics: [{ label: 'lb', value: round(ln.totalizerLbs, 0) }, { label: 'target lb', value: round(ln.requestedTargetLbs, 0) }].filter((m) => m.value != null), group })
-    if (J.SILO_TRANSLINE[silo]) light(J.SILO_TRANSLINE[silo], { group })
-    if (J.SILOS[silo] && e[J.SILOS[silo]]) { e[J.SILOS[silo]].status = 'running'; if (group) e[J.SILOS[silo]].group = group }
-    if (destSvg && J.MANIFOLD_TO_TANK[destSvg]) light(J.MANIFOLD_TO_TANK[destSvg], { group })
+    tag(pipe, dest)
+    if (J.SILO_TRANSLINE[silo]) { light(J.SILO_TRANSLINE[silo], { group }); tag(J.SILO_TRANSLINE[silo], dest) }
+    if (J.SILOS[silo] && e[J.SILOS[silo]]) { e[J.SILOS[silo]].status = 'running'; if (group) e[J.SILOS[silo]].group = group; tag(J.SILOS[silo], dest) }
+    if (destSvg && J.MANIFOLD_TO_TANK[destSvg]) { light(J.MANIFOLD_TO_TANK[destSvg], { group }); tag(J.MANIFOLD_TO_TANK[destSvg], dest) }
     const ts = dest && dest.match(/^TSTAT(\d)$/)
-    if (ts && J.UHTS[`UHT${ts[1]}`]) light(J.UHTS[`UHT${ts[1]}`].balanceline, { group, primary: `${ln.line} → TSTAT${ts[1]} (bypass)` })
+    if (ts && J.UHTS[`UHT${ts[1]}`]) { light(J.UHTS[`UHT${ts[1]}`].balanceline, { group, primary: `${ln.line} → TSTAT${ts[1]} (bypass)` }); tag(J.UHTS[`UHT${ts[1]}`].balanceline, dest) }
   }
 
   // ── blend tanks ─────────────────────────────────────────────────────────
@@ -138,6 +146,7 @@ function buildEntities(snapshot, assignments, nowMs = Date.now(), lines = null, 
       group,
       stale: blendStale,
     })
+    if (t.batchActive && !blendStale) tag(svgId, J.normalizeVessel(hid))
   }
 
   // ── UHTs, balance tanks, homogenizers ───────────────────────────────────
@@ -160,14 +169,18 @@ function buildEntities(snapshot, assignments, nowMs = Date.now(), lines = null, 
     if (cip) { light(j.homline, { status: 'cip' }); light(j.balanceline, { status: 'cip' }) }
     if (running) {
       light(j.homline, { group })
+      for (const id of [j.uht, j.balance, j.hom, j.homline]) tag(id, u.uhtId)
+      link(u.uhtId, `TSTAT${u.uhtId.replace(/\D/g, '')}`)   // the balance tank and the lines into it belong to this train
       const fromSvg = blendIdOf[from]
       if (fromSvg) {
-        if (J.OUTLET_LINE[fromSvg]) light(J.OUTLET_LINE[fromSvg], { group })
-        light(j.balanceline, { group })
+        if (J.OUTLET_LINE[fromSvg]) { light(J.OUTLET_LINE[fromSvg], { group }); tag(J.OUTLET_LINE[fromSvg], u.uhtId) }
+        light(j.balanceline, { group }); tag(j.balanceline, u.uhtId)
         if (e.vmatrix) e.vmatrix.status = 'running'; else ent('vmatrix', 'running', { primary: `${from} → ${u.uhtId}` })
+        link(u.uhtId, from)
       }
       const dest = u.destSurgeTankId && surgeIdOf[u.destSurgeTankId]
-      if (dest && J.SURGE_IN[dest]) light(J.SURGE_IN[dest], { group, primary: `${u.uhtId} → ${u.destSurgeTankId}` })
+      if (dest && J.SURGE_IN[dest]) { light(J.SURGE_IN[dest], { group, primary: `${u.uhtId} → ${u.destSurgeTankId}` }); tag(J.SURGE_IN[dest], u.uhtId) }
+      if (dest) link(u.uhtId, u.destSurgeTankId)
       if (dest && !e.surgemanifold1) ent('surgemanifold1', 'running')
     }
   }
@@ -189,14 +202,22 @@ function buildEntities(snapshot, assignments, nowMs = Date.now(), lines = null, 
       metrics: [{ label: '%', value: round(t.mainLevelPct, 0) }, { label: 'gal', value: round(t.mainGallons, 0) }, { label: 'lb/min', value: round(t.pollRateLbsPerMin, 0) }, { label: 'WO', value: group }].filter((m) => m.value != null),
       group, stale: surgeStale,
     })
+    if (!surgeStale && (t.activeFill || t.drainingToFiller)) tag(svgId, hid)
     if (t.drainingToFiller && !surgeStale) {
-      light(J.SURGE_OUT[svgId], { group })
+      light(J.SURGE_OUT[svgId], { group }); tag(J.SURGE_OUT[svgId], hid)
       if (!e.surgemanifold2) ent('surgemanifold2', 'running')
       for (const leg of legs) {
         light(leg, { group, primary: `${hid} → ${leg.replace('line', '').replace('filler', 'Filler ').replace('filler', ' & Filler ')}` })
+        tag(leg, hid); chain.legTank[leg] = hid
         for (const f of J.LEG_FILLERS[leg] || []) if (e[f]) e[f].group = e[f].group || group
       }
     }
+  }
+  // Filler 1's inlet meter (FT1140 on leg TR11) is proof of draw even when no tank has latched Sel 1
+  const f1meter = (snapshot.fillers?.fillers || []).find((f) => f.fillerId === 1 && f.measured)
+  if (f1meter && Number(f1meter.inletGpm) > 1 && !isStale(snapshot.fillers?.pollAt) && !e.filler1filler2line) {
+    light('filler1filler2line', { primary: `Filler 1 drawing ${round(f1meter.inletGpm)} gpm (no tank selected)` })
+    if (!e.surgemanifold2) ent('surgemanifold2', 'running')
   }
 
   // ── filler 1 (the only metered filler) ──────────────────────────────────
@@ -205,9 +226,10 @@ function buildEntities(snapshot, assignments, nowMs = Date.now(), lines = null, 
     const id = `line${f.fillerId}filler`
     const stale = isStale(snapshot.fillers?.pollAt)
     const prev = e[id] || {}
-    ent(id, stale ? 'stale' : f.running ? 'running' : 'idle', {
+    const drawing = Number(f.inletGpm) > 1
+    ent(id, stale ? 'stale' : drawing ? 'running' : 'idle', {
       ...prev,
-      primary: f.running ? `Running · ${round(f.inletGpm) ?? 0} gpm inlet` : 'Not running',
+      primary: drawing ? `Running · ${round(f.inletGpm)} gpm inlet` : f.running ? 'In production mode · no product yet' : 'Not running',
       metrics: [{ label: 'gpm', value: round(f.inletGpm) }, { label: 'gal', value: round(f.inletTotalizerGal, 0) }].filter((m) => m.value != null),
       stale,
     })
@@ -217,9 +239,46 @@ function buildEntities(snapshot, assignments, nowMs = Date.now(), lines = null, 
   buildReceiving(e, snapshot, trucks, nowMs)
 
   // ── packaging lines 1–6 (scheduler + staging queue + physical evidence) ──
-  buildLines(e, lines, nowMs, snapshot.packaging)
+  buildLines(e, lines, nowMs, snapshot.packaging, chain)
+
+  // ── one colour per connected product chain ──────────────────────────────
+  unifyChains(e, chain, { surgeWO, blendWO })
 
   return e
+}
+
+// ─── chains ──────────────────────────────────────────────────────────────────
+/**
+ * Union the chain keys that were linked while building, then give every tagged
+ * element of a connected chain the same group: the packaging work order if a
+ * line is in the chain, else the surge batch WO, else the blend batch WO, else
+ * a stable synthetic key anchored on the chain's surge tank / UHT / balance tank.
+ * This is what makes "silo → line → blend → UHT → surge → leg → filler" read as
+ * one thing even though NetSuite gives each stage its own work order.
+ */
+function unifyChains(e, chain, { surgeWO, blendWO }) {
+  const parent = {}
+  const find = (k) => { while (parent[k] != null && parent[k] !== k) k = parent[k]; return k }
+  const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[ra] = rb }
+  for (const k of Object.values(chain.of)) if (parent[k] == null) parent[k] = k
+  for (const [a, b] of chain.links) { if (parent[a] == null) parent[a] = a; if (parent[b] == null) parent[b] = b; union(a, b) }
+  const members = {}   // root → Set of keys
+  for (const k of Object.keys(parent)) (members[find(k)] ||= new Set()).add(k)
+  const rank = (k) => (/^ST8/.test(k) ? 0 : /^UHT/.test(k) ? 1 : /^TSTAT/.test(k) ? 2 : /^BlendTank|^CocoaTank/.test(k) ? 3 : /^line/.test(k) ? 4 : 5)
+  const groupOf = {}
+  for (const [root, keys] of Object.entries(members)) {
+    const sorted = [...keys].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+    const lineKey = sorted.find((k) => /^line\d$/.test(k))
+    const g = (lineKey && e[lineKey]?.group)
+      || sorted.map((k) => surgeWO[k]).find(Boolean)
+      || sorted.map((k) => blendWO[k]).find(Boolean)
+      || `chain:${sorted[0]}`
+    groupOf[root] = g
+  }
+  for (const [id, key] of Object.entries(chain.of)) {
+    if (!e[id]) continue
+    e[id].group = groupOf[find(key)]
+  }
 }
 
 // ─── receiving ───────────────────────────────────────────────────────────────
@@ -366,11 +425,12 @@ function reattributePairs(byLine, ownEvidence) {
   return out
 }
 
-function buildLines(e, lines, nowMs, packaging) {
+function buildLines(e, lines, nowMs, packaging, chain = null) {
   const schedOk = !!(lines?.pollAt && nowMs - Date.parse(lines.pollAt) <= LINE_STALE_MS && lines.lines)
   const pk = packaging?.pollAt && nowMs - Date.parse(packaging.pollAt) <= STALE_MS ? packaging : null
   // evidence that belongs to ONE line (packaging counters, Filler 1's meter) — a surge leg feeds both twins, so it never moves a WO
-  const ownEvidence = (d) => !!(pk?.lines?.[d]?.moving || e[J.LINE_FILLER[d]]?.status === 'running')
+  const meterGpm = (d) => Number((e[J.LINE_FILLER[d]]?.metrics || []).find((m) => m.label === 'gpm')?.value) || 0
+  const ownEvidence = (d) => !!(pk?.lines?.[d]?.moving || meterGpm(d) > 1)
   const byLine = schedOk ? reattributePairs(lines.lines, ownEvidence) : {}
   const painted = {}   // digit → { status, group, primary }
   for (const d of ['1', '2', '3', '4', '5', '6']) {
@@ -379,7 +439,7 @@ function buildLines(e, lines, nowMs, packaging) {
     if (!L && !P) continue
     const fillerId = J.LINE_FILLER[d]
     const legFlowing = e[J.LINE_LEG[d]]?.status === 'flowing'
-    const fillerRunning = e[fillerId]?.status === 'running'   // Filler 1 inlet meter (the only filler statused before this)
+    const fillerRunning = meterGpm(d) > 1   // Filler 1 inlet meter (the only filler statused before this)
     const evidence = P?.moving ? P.movement || 'movement on the line' : fillerRunning ? 'filler meter' : legFlowing ? 'product on leg' : null
     let status = 'idle'
     let wo = null
@@ -461,10 +521,16 @@ function buildLines(e, lines, nowMs, packaging) {
       e[m] = { ...prev, status, primary, group: group || prev.group || null, source: L ? 'scheduler' : 'mes', stale }
     }
     if (P) paintMachines(e, d, P, status, group, nowMs)
+    if (chain && (status === 'running' || status === 'changeover')) {
+      for (const m of [`line${d}`, ...(J.LINE_MEMBERS[d] || [])]) if (e[m] && m !== 'line56pallet') chain.of[m] = `line${d}`
+      const tank = chain.legTank[J.LINE_LEG[d]]
+      if (tank && (status === 'running')) chain.links.push([`line${d}`, tank])
+    }
   }
   // shared 5/6 palletizer follows whichever line is doing more, then its own counters
   const sh = ['5', '6'].map((d) => painted[d]).filter(Boolean).sort((a, b) => (SHARED_RANK[b.status] ?? 0) - (SHARED_RANK[a.status] ?? 0))[0]
   if (sh) e.line56pallet = { ...(e.line56pallet || {}), status: sh.status, primary: sh.primary, group: sh.group, source: 'scheduler' }
+  if (sh && chain && sh.status === 'running') { const d = painted['6']?.status === 'running' ? '6' : '5'; chain.of.line56pallet = `line${d}` }
   const shP = pk?.lines?.['6']?.palletizer || pk?.lines?.['5']?.palletizer
   if (shP) paintPalletizer(e, 'line56pallet', shP, e.line56pallet?.status || 'idle', e.line56pallet?.group || null, nowMs)
   // sterile flags on the drawn surge-to-filler legs
@@ -484,7 +550,7 @@ function paintMachines(e, d, P, lineStatus, group, nowMs) {
     const flowing = P.fillerFlow != null && P.fillerFlow >= 5
     const f1 = P.filler1
     const meterGpm = (f.metrics || []).find((m) => m.label === 'gpm')?.value
-    const mode = f1 ? (f1.moving || f1.runMode ? 'Filling' : f1.sipRunning ? 'SIP running' : f1.cipRunning ? 'CIP running' : 'Not filling') : flowing ? 'Filling' : P.fillerFlow != null ? 'No flow' : null
+    const mode = f1 ? (f1.moving || meterGpm ? 'Filling' : f1.sipRunning ? 'SIP running' : f1.cipRunning ? 'CIP running' : f1.runMode ? 'In production mode · no product yet' : 'Not filling') : flowing ? 'Filling' : P.fillerFlow != null ? 'No flow' : null
     const bits = [
       mode,
       P.fillerFlow != null ? `${round(P.fillerFlow, 0)} ${P.fillerFlowUnit}` : null,
@@ -494,7 +560,7 @@ function paintMachines(e, d, P, lineStatus, group, nowMs) {
       P.sterile != null ? (P.sterile ? 'sterile' : 'NOT sterile') : null,
       lineStatus === 'running' || lineStatus === 'changeover' ? null : e[`line${d}`]?.primary || null,
     ].filter(Boolean)
-    const fillerStatus = flowing || f1?.moving || (f1?.runMode && f.status === 'running') ? 'running' : f1?.cipRunning || f1?.sipRunning ? 'cip' : lineStatus === 'running' ? 'idle' : f.status
+    const fillerStatus = flowing || f1?.moving || meterGpm > 1 ? 'running' : f1?.cipRunning || f1?.sipRunning ? 'cip' : lineStatus === 'running' ? 'idle' : f.status
     e[fillerId] = { ...f, status: fillerStatus, primary: bits.join(' · '), metrics: [...(f.metrics || []), { label: 'sterile', value: P.sterile == null ? null : P.sterile ? 'yes' : 'NO' }, { label: P.fillerFlowUnit || 'flow', value: P.fillerFlow != null ? round(P.fillerFlow, 0) : null }].filter((m) => m.value != null) }
   }
   const cs = P.casePacker
