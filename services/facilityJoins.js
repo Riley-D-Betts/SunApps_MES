@@ -49,8 +49,13 @@ const LINE_MEMBERS = {
   5: ['line5filler', 'line5conveyor', 'line5caps', 'line5helix', 'line5case', 'line56pallet'],
   6: ['line6filler', 'line6conveyor', 'line6caps', 'line6helix', 'line6case', 'line56pallet'],
 }
-/** Receiving bays (historian XFR objects) → drawn bay tank + its line to the receiving header. */
-const REC_BAYS = { RecBay1: { tank: 'rectank1', line: 'recline1', label: 'Bay 1' }, RecBay2: { tank: 'rectank2', line: 'recline2', label: 'Bay 2' } }
+/**
+ * Receiving bays (historian XFR objects) → the drawn hose from the truck bridge to the
+ * receiving header. Both hoses leave `recbridge`; the two circles by the driver area
+ * (rectank1/2) are CIP chemical tanks and never carry milk.
+ */
+const REC_BRIDGE = 'recbridge'
+const REC_BAYS = { RecBay1: { line: 'recline1', label: 'Bay 1' }, RecBay2: { line: 'recline2', label: 'Bay 2' } }
 /** Receiving header → raw silo lines. */
 const REC_SILO_LINE = { MSilo1: 'recsiloline1', MSilo2: 'recsiloline2', MSilo3: 'recsiloline3', MSilo4: 'recsiloline4', MSilo5: 'recsiloline5' }
 /** Drawn case packer / palletizer / filler per line (5 and 6 share the palletizer). */
@@ -100,6 +105,6 @@ function mergeAssignments(overrides = {}) {
 }
 
 module.exports = {
-  DEFAULT_ASSIGNMENTS, SILOS, UHTS, BLEND_LINES, MANIFOLD_TO_TANK, OUTLET_LINE, SURGE_IN, SURGE_OUT, SEL_LEG, LEG_FILLERS, SEP_LINE, SILO_TRANSLINE, LINE_MEMBERS, LINE_LEG, LINE_CASE, LINE_PALLET, LINE_FILLER, LEG_TR, REC_BAYS, REC_SILO_LINE,
+  DEFAULT_ASSIGNMENTS, SILOS, UHTS, BLEND_LINES, MANIFOLD_TO_TANK, OUTLET_LINE, SURGE_IN, SURGE_OUT, SEL_LEG, LEG_FILLERS, SEP_LINE, SILO_TRANSLINE, LINE_MEMBERS, LINE_LEG, LINE_CASE, LINE_PALLET, LINE_FILLER, LEG_TR, REC_BRIDGE, REC_BAYS, REC_SILO_LINE,
   normalizeVessel, normalizeSilo, mergeAssignments,
 }

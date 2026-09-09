@@ -286,60 +286,79 @@ const TRUCKS_STALE_MS = 10 * 60_000
 const fmtLb = (v) => (v == null ? null : Math.round(v).toLocaleString('en-US'))
 
 /**
- * Receiving bays from the historian (what is physically unloading, into which
- * silo, how many pounds so far) joined by truck number to NetSuite's milk-truck
- * records (who it is, vendor, load, QC status). The receiving desk (`rec1`)
- * and the Receiving Bay room summarise the queue: unloading, checked in,
- * in QC, failed, next scheduled.
+ * Receiving from the historian: which bay hose is unloading, into which silo, how
+ * many pounds so far. Everything visible hangs off the drawn path: truck bridge →
+ * bay hose → receiving header → header-to-silo line → silo. XFR.Source is whatever
+ * the operator typed (a truck number, "Tanker: T-3", a carrier code, or nothing),
+ * so the NetSuite join is opportunistic. The receiving desk (`rec1`) and the room
+ * summarise the truck queue.
  */
 function buildReceiving(e, snapshot, trucks, nowMs) {
   const rec = snapshot.receiving
   const stale = !rec?.pollAt || nowMs - Date.parse(rec.pollAt) > STALE_MS
   const trucksStale = !trucks?.pollAt || nowMs - Date.parse(trucks.pollAt) > TRUCKS_STALE_MS
-  const truckOf = (no) => (no && trucks?.byTruckNo?.[no]) || null
+  const truckOf = (src) => {
+    if (!src || !trucks?.byTruckNo) return null
+    const key = String(src).replace(/^tanker:?\s*/i, '').trim()
+    return trucks.byTruckNo[key] || Object.values(trucks.byTruckNo).find((t) => t.truckNo && key.endsWith(t.truckNo)) || null
+  }
   const light = (id, extra = {}) => { if (id) e[id] = { status: 'flowing', source: 'mes', ...(e[id] || {}), ...extra } }
   const unloadingNames = []
+  const bridgeLines = []
+  let bridgeLevel = null
+  let bridgeGroup = null
 
   for (const bay of rec?.bays || []) {
     const drawn = J.REC_BAYS[bay.bayId]
     if (!drawn) continue
     const unloading = !stale && bay.transferReady && !bay.transferComplete && (bay.qtyActualLbs > 0 || !!bay.source)
-    // XFR.Source / destinations linger after a load finishes — only trust them while unloading
-    const truck = unloading ? truckOf(bay.source) : null
-    const product = unloading ? (bay.itemId && PRODUCT_INDEX_ITEM_MAP[Number(bay.itemId)]?.name) || truck?.item || null : null
+    if (!unloading) {
+      if (bay.intakeQtyLbs) bridgeLines.push(`${drawn.label} idle · last load ${fmtLb(bay.intakeQtyLbs)} lb`)
+      continue
+    }
+    // XFR.Source / destinations linger after a load — only trusted while unloading
+    const truck = truckOf(bay.source)
+    const product = (bay.itemId && PRODUCT_INDEX_ITEM_MAP[Number(bay.itemId)]?.name) || truck?.item || null
     const target = (bay.qtyTargetLbs > 0 ? bay.qtyTargetLbs : null) || truck?.netLb || truck?.farmLb || null
-    const dests = unloading ? (bay.destinations || []).map((d) => J.normalizeSilo(d)) : []
-    const who = bay.source ? `Truck ${bay.source}${truck ? ` · ${truck.name}` : ''}` : 'Truck'
-    const group = unloading ? (truck?.name || (bay.source ? `Truck ${bay.source}` : null)) : null
-    if (unloading) unloadingNames.push(truck?.name || `truck ${bay.source || '?'}`)
-    e[drawn.tank] = {
-      status: stale ? 'stale' : unloading ? 'running' : 'idle',
-      level: unloading && target ? Math.max(0, Math.min(1, bay.qtyActualLbs / target)) : null,
-      primary: unloading
-        ? [who, product, `${fmtLb(bay.qtyActualLbs)} lb${target ? ` of ${fmtLb(target)}` : ''}`, dests.length ? `→ ${dests.join(' + ')}` : null].filter(Boolean).join(' · ')
-        : `Idle${bay.intakeQtyLbs ? ` · last load ${fmtLb(bay.intakeQtyLbs)} lb` : ''}`,
-      product: product ? parseProduct(product, 'milk') : null,
+    const dests = (bay.destinations || []).map((d) => J.normalizeSilo(d)).filter(Boolean)
+    const who = truck ? `${truck.name}${bay.source ? ` (${bay.source})` : ''}` : bay.source ? String(bay.source).replace(/^tanker:?\s*/i, 'Tanker ') : 'Truck'
+    const group = truck?.name || `${drawn.label} load`
+    const text = [`${drawn.label}: ${who}`, product, `${fmtLb(bay.qtyActualLbs)} lb${target ? ` of ${fmtLb(target)}` : ''}`, dests.length ? `→ ${dests.join(' + ')}` : '→ destination not set'].filter(Boolean).join(' · ')
+    unloadingNames.push(`${drawn.label} ${who}`)
+    bridgeLines.push(text)
+    if (target) bridgeLevel = Math.max(bridgeLevel ?? 0, Math.min(1, bay.qtyActualLbs / target))
+    bridgeGroup = bridgeGroup || group
+
+    light(drawn.line, {
+      group, primary: text,
       metrics: [
-        { label: 'lb', value: unloading ? Math.round(bay.qtyActualLbs) : null },
+        { label: 'lb', value: Math.round(bay.qtyActualLbs) },
         { label: 'load lb', value: target ? Math.round(target) : null },
         { label: 'to', value: dests.join(' + ') || null },
         { label: 'vendor', value: truck?.vendor || null },
         { label: 'load', value: truck?.loadNo || null },
         { label: 'QC', value: truck?.status || null },
       ].filter((m) => m.value != null && m.value !== ''),
-      group, stale, source: 'mes', link: '/milk-trucks',
-    }
-    if (!unloading) continue
-    light(drawn.line, { group, primary: `${drawn.label} → receiving header` })
-    e.valves2 = { status: 'running', source: 'mes', primary: 'Receiving header' }
+      link: '/milk-trucks',
+    })
+    e.valves2 = { status: 'running', source: 'mes', primary: `Receiving header · ${drawn.label} → ${dests.join(' + ') || '?'}` }
     for (const silo of dests) {
-      light(J.REC_SILO_LINE[silo], { group, primary: `${who} → ${silo}` })
+      light(J.REC_SILO_LINE[silo], { group, primary: `${drawn.label} ${who} → ${silo}` })
       const sid = J.SILOS[silo]
       if (sid && e[sid]) {
         if (e[sid].status === 'idle') e[sid].status = 'running'
-        e[sid].primary = `${e[sid].primary} · ← ${drawn.label}, truck ${bay.source || '?'}${truck ? ` (${truck.name})` : ''}`
+        e[sid].primary = `${e[sid].primary} · ← receiving ${drawn.label.toLowerCase()}, ${who}`
         if (!e[sid].group) e[sid].group = group
       }
+    }
+  }
+
+  if (rec) {
+    e[J.REC_BRIDGE] = {
+      status: stale ? 'stale' : unloadingNames.length ? 'running' : 'idle',
+      level: bridgeLevel,
+      primary: bridgeLines.join(' · ') || 'Bays idle',
+      group: bridgeGroup, stale, source: 'mes', link: '/milk-trucks',
     }
   }
 
