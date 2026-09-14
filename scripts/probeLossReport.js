@@ -33,7 +33,7 @@ async function main() {
   await config.sequelize.authenticate()
   const from = plantTime.startOfPlantDay(fromDay)
   const to = plantTime.startOfPlantDay(toDayExcl)
-  console.log(`Tables ${P}* · window [${from.toISOString()}, ${to.toISOString()})`)
+  ;(asJson ? console.error : console.log)(`Tables ${P}* · window [${from.toISOString()}, ${to.toISOString()})`)
 
   const t0 = Date.now()
   const rep = await svc.getLossReport({ from: from.toISOString(), to: to.toISOString(), groupBy: 'week', compare: true })
