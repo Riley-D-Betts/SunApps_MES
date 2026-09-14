@@ -43,6 +43,11 @@ function buildCard(report, { fromDay, toDay }) {
     facts.push({ title: 'Unaccounted batches', value: `${report.unaccounted.zeroIssuedCount}${est > 0 ? ` (~${fmtLbs(est)} by the UHT totalizer)` : ''}` })
   }
   if (h.unpricedLbs > 0) facts.push({ title: 'Unpriced', value: fmtLbs(h.unpricedLbs) })
+  const ship = (report.chain || []).find(c => c.key === 'shipping')
+  if (ship && ship.shipping && ship.shipping.available) {
+    const sh = ship.shipping
+    facts.push({ title: 'Shipped vs produced', value: `${Math.round(sh.shippedCases).toLocaleString('en-US')} of ${Math.round(sh.producedCases).toLocaleString('en-US')} cases · written off ${Math.round(sh.writeOff.cases).toLocaleString('en-US')} (${fmtUsd(sh.writeOff.costUsd)} cost / ${fmtUsd(sh.writeOff.revenueUsd)} revenue)` })
+  }
   const blind = (report.chain || []).filter(c => c.status === 'not-measured').map(c => c.label)
   if (blind.length) facts.push({ title: 'Not measured yet', value: blind.join(' · ') })
   return {

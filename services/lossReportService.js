@@ -53,6 +53,7 @@ const rawMilkPriceService = require('./rawMilkPriceService')
 const fgRevenueRateService = require('./fgRevenueRateService')
 const itemConfig = require('./mesItemConfig')
 const plantTime = require('../utils/plantTime')
+const fgShipmentService = require('./fgShipmentService')
 
 const P = config.TABLE_PREFIX
 const T = {
@@ -68,8 +69,8 @@ const SQL_TZ = 'Mountain Standard Time'
 const MAX_WINDOW_DAYS = 400
 const ZERO_ISSUED_LBS = 100          // below this a "completed" batch never really issued
 const UNMETERED_INSIGHT_SHARE = 0.25 // upper-bound share of $ that earns a callout
-const STAGES = ['separation', 'blend', 'surge']
-const STAGE_LABEL = { separation: 'Separation', blend: 'Blend tanks', surge: 'UHT → Surge tanks' }
+const STAGES = ['separation', 'blend', 'surge', 'shipping']
+const STAGE_LABEL = { separation: 'Separation', blend: 'Blend tanks', surge: 'UHT → Surge tanks', shipping: 'Shipped vs produced' }
 
 // The whole product path, raw milk to shipped cases (Andrew, 2026-09-14).
 // Every step is ALWAYS present in the response so the report tells the full
@@ -95,9 +96,8 @@ const CHAIN = [
   { key: 'packaging', label: 'Packaging', stage: null, status: 'not-measured',
     what: 'Good cartons that did not become cases on a pallet (damage, case packer rejects).',
     howToMeasure: 'Compare filler good-carton counts with case-packer and palletizer counts (the historian already has most of these counters).' },
-  { key: 'shipping', label: 'Shipped vs produced', stage: null, status: 'not-measured',
-    what: 'Finished cases produced but never shipped or invoiced (rework, holds, write-offs).',
-    howToMeasure: 'NetSuite work-order completions vs item fulfillments / pallet details for the same period.' },
+  { key: 'shipping', label: 'Shipped vs produced', stage: 'shipping', status: 'measured',
+    what: 'Finished goods written off in NetSuite (QC samples, damage, destroyed). Produced vs shipped cases are shown for context — the gap between them is inventory and timing, not loss.' },
 ]
 
 const num = v => (v == null ? 0 : Number(v))
@@ -388,6 +388,54 @@ function finish(a) {
   }
 }
 
+/** Monday (plant date) of a 'YYYY-MM-DD' day. */
+function mondayOf(day) {
+  const [y, m, d] = day.split('-').map(Number)
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay()
+  return plantTime.addPlantDays(day, -((dow + 6) % 7))
+}
+
+/** NetSuite write-offs → the same row shape computeStages returns (stage 'shipping'). */
+function shippingRows(step, groupBy) {
+  if (!step || !step.available) return []
+  return step.lossRows.map(r => ({
+    stage: 'shipping', measurable: true,
+    bucket: groupBy === 'week' ? mondayOf(r.day) : r.day,
+    equipment: 'Finished goods', group: null, family: r.family || 'unclassified',
+    productName: r.name, mesItem: r.item,
+    batches: 0, lbsIn: 0,
+    wasteLbs: num(r.lbs), wasteMeasuredLbs: num(r.lbs), wasteUpperBoundLbs: 0, unmeasuredBatches: 0,
+    wasteUsd: r.costUsd, wasteMeasuredUsd: r.costUsd,
+    unpricedLbs: r.costUsd == null ? num(r.lbs) : 0,
+    lostRevenueUsd: r.revenueUsd, lostRevenueMeasuredUsd: r.revenueUsd,
+    unpricedRevenueLbs: r.revenueUsd == null ? num(r.lbs) : 0,
+    pricePerLb: r.pricePerLb, revenuePerLb: r.revenuePerLb,
+    heldCount: 0, heldLbs: 0, negativeBalanceCount: 0,
+  }))
+}
+
+/** Plant-day span of a half-open UTC window. */
+function windowDays(win) {
+  return { fromDay: plantTime.plantDateString(win.from), toDay: plantTime.plantDateString(new Date(win.to.getTime() - 1)) }
+}
+
+/** The shipped-vs-produced detail block carried on the chain's shipping step. */
+function shippingDetail(step) {
+  if (!step) return null
+  if (!step.available) return { available: false, error: step.error }
+  return {
+    available: true,
+    producedCases: step.producedCases, shippedCases: step.shippedCases, invoicedCases: step.invoicedCases, gapCases: step.gapCases,
+    shippedPctOfProduced: step.producedCases > 0 ? round2((step.shippedCases / step.producedCases) * 100) : null,
+    writeOff: { cases: step.writeOff.cases, lbs: step.writeOff.lbs, costUsd: step.writeOff.costUsd, revenueUsd: step.writeOff.revenueUsd,
+      pctOfProduced: step.producedCases > 0 ? round2((step.writeOff.cases / step.producedCases) * 100) : null,
+      unpricedCostLbs: step.writeOff.unpricedCostLbs, byKind: step.writeOff.byKind, topItems: step.writeOff.byItem.slice(0, 10) },
+    bookkeeping: step.bookkeeping,
+    topItems: step.byItem.slice(0, 15),
+    definition: step.definition,
+  }
+}
+
 /** What "Ignore upper bounds" leaves out: batches whose loss is upper-bound only. Always computed. */
 function summariseExcluded(rows) {
   const out = rows.filter(r => !r.measurable)
@@ -407,7 +455,7 @@ function summariseExcluded(rows) {
  * copied from the measured stage; combined/unmeasured steps carry nulls and
  * a warning. `shareOfMeasured*` feed the donut (measured steps only).
  */
-function buildChain(stages) {
+function buildChain(stages, shipping) {
   const byKey = Object.fromEntries(stages.map(s => [s.key, s]))
   const totalUsd = stages.reduce((t, s) => t + (s.wasteUsd || 0), 0)
   const totalRev = stages.reduce((t, s) => t + (s.lostRevenueUsd || 0), 0)
@@ -421,6 +469,12 @@ function buildChain(stages) {
       warning: c.status === 'measured' ? (s && s.confidence !== 'measured' ? 'partly-estimated' : null) : (c.status === 'combined' ? 'combined' : 'not-measured'),
       what: c.what, howToMeasure: c.howToMeasure || null,
     }
+    if (c.key === 'shipping') base.shipping = shippingDetail(shipping)
+    if (c.key === 'shipping' && (!shipping || !shipping.available)) {
+      return { ...base, warning: 'unavailable', lbsIn: null, wasteLbs: null, wasteLbsMeasured: null, wasteLbsUpperBound: null, pct: null,
+        wasteUsd: null, wasteUsdMeasured: null, wasteUsdUpperBound: null, lostRevenueUsd: null, lostRevenueUsdMeasured: null, lostRevenueUsdUpperBound: null,
+        batches: null, confidence: null, shareOfMeasuredUsd: null, shareOfMeasuredRevenueUsd: null, shareOfMeasuredLbs: null }
+    }
     if (!s) {
       return { ...base, lbsIn: null, wasteLbs: null, wasteLbsMeasured: null, wasteLbsUpperBound: null, pct: null,
         wasteUsd: null, wasteUsdMeasured: null, wasteUsdUpperBound: null,
@@ -429,7 +483,8 @@ function buildChain(stages) {
     }
     return {
       ...base,
-      lbsIn: s.lbsIn, wasteLbs: s.wasteLbs, wasteLbsMeasured: s.wasteLbsMeasured, wasteLbsUpperBound: s.wasteLbsUpperBoundOnly, pct: s.pct,
+      lbsIn: s.lbsIn, wasteLbs: s.wasteLbs, wasteLbsMeasured: s.wasteLbsMeasured, wasteLbsUpperBound: s.wasteLbsUpperBoundOnly,
+      pct: c.key === 'shipping' ? (base.shipping && base.shipping.writeOff ? base.shipping.writeOff.pctOfProduced : null) : s.pct,
       wasteUsd: s.wasteUsd, wasteUsdMeasured: s.wasteUsdMeasured, wasteUsdUpperBound: s.wasteUsdUpperBound,
       lostRevenueUsd: s.lostRevenueUsd, lostRevenueUsdMeasured: s.lostRevenueUsdMeasured, lostRevenueUsdUpperBound: s.lostRevenueUsdUpperBound,
       batches: s.batches, confidence: s.confidence,
@@ -729,7 +784,14 @@ async function getLossReport(params = {}) {
   const ignoreUpperBounds = truthyParam(params.ignoreUpperBounds)
   const ctx = await pricingContext()
 
-  const allRows = await computeStages({ from: win.from, to: win.to, groupBy: win.groupBy }, ctx)
+  const len = win.to - win.from
+  const priorWin = { from: new Date(win.from.getTime() - len), to: win.from, groupBy: win.groupBy }
+  const [mesRows, shipping, priorShipping] = await Promise.all([
+    computeStages({ from: win.from, to: win.to, groupBy: win.groupBy }, ctx),
+    fgShipmentService.getShippingStep({ ...windowDays(win), prices: ctx.prices }),
+    compare ? fgShipmentService.getShippingStep({ ...windowDays(priorWin), prices: ctx.prices }) : Promise.resolve(null),
+  ])
+  const allRows = [...mesRows, ...shippingRows(shipping, win.groupBy)]
   const excluded = summariseExcluded(allRows)
   const rows = ignoreUpperBounds ? allRows.filter(r => r.measurable) : allRows
   const stages = buildStages(rows)
@@ -758,9 +820,8 @@ async function getLossReport(params = {}) {
 
   let prior = null
   if (compare) {
-    const len = win.to - win.from
-    const pw = { from: new Date(win.from.getTime() - len), to: win.from, groupBy: win.groupBy }
-    const prowsAll = await computeStages(pw, ctx)
+    const pw = priorWin
+    const prowsAll = [...await computeStages(pw, ctx), ...shippingRows(priorShipping, win.groupBy)]
     const prows = ignoreUpperBounds ? prowsAll.filter(r => r.measurable) : prowsAll
     const pstages = buildStages(prows)
     const pheadline = buildHeadline(prows, pstages)
@@ -780,11 +841,18 @@ async function getLossReport(params = {}) {
     insights.unshift({ kind: 'upper-bounds-excluded', usd: excluded.wasteUsdUpperBound,
       text: `Upper bounds ignored: ${excluded.batches} batch(es) whose loss could only be estimated are left out — ${fmtLbs(excluded.lbsIn)} of milk in and up to ${fmtUsd(excluded.wasteUsdUpperBound)} (cost) / ${fmtUsd(excluded.lostRevenueUsdUpperBound)} (revenue) of loss. Every figure on this page is measured.` })
   }
-  const chain = buildChain(stages)
+  const chain = buildChain(stages, shipping)
+  if (shipping && shipping.available) {
+    const recon = shipping.bookkeeping.find(b => b.kind === 'reconciliation')
+    insights.push({ kind: 'shipping', usd: shipping.writeOff.revenueUsd,
+      text: `Shipped ${Math.round(shipping.shippedCases).toLocaleString('en-US')} of ${Math.round(shipping.producedCases).toLocaleString('en-US')} cases produced; ${Math.round(shipping.writeOff.cases).toLocaleString('en-US')} cases were written off (${shipping.writeOff.byKind.map(k => `${k.label} ${Math.round(k.downCases)}`).join(', ') || 'none'}). The ${Math.round(Math.abs(shipping.gapCases)).toLocaleString('en-US')}-case gap is inventory and timing, not loss${recon ? `; a pallet-sync inventory true-up (net ${Math.round(recon.netCases).toLocaleString('en-US')} cases) is bookkeeping and not counted` : ''}.` })
+  } else if (shipping && !shipping.available) {
+    insights.push({ kind: 'shipping-unavailable', usd: null, text: 'Shipped vs produced could not be loaded from NetSuite for this window; that step is missing from the totals.' })
+  }
   const unmeasuredSteps = chain.filter(c => c.status === 'not-measured').map(c => c.label)
   if (unmeasuredSteps.length) {
     insights.push({ kind: 'not-measured', usd: null,
-      text: `${unmeasuredSteps.join(', ')} ${unmeasuredSteps.length > 1 ? 'are' : 'is'} not measured yet, so ${unmeasuredSteps.length > 1 ? 'their' : 'its'} loss is not in these totals. UHT loss is included in the surge-tank figure.` })
+      text: `${unmeasuredSteps.join(' and ')} ${unmeasuredSteps.length > 1 ? 'are' : 'is'} not measured yet, so ${unmeasuredSteps.length > 1 ? 'their' : 'its'} loss is not in these totals. UHT loss is included in the surge-tank figure.` })
   }
 
   return {
@@ -828,7 +896,11 @@ async function rollupDaily({ fromDay, toDay }) {
   const from = plantTime.startOfPlantDay(fromDay)
   const to = plantTime.startOfPlantDay(plantTime.addPlantDays(toDay, 1))
   const ctx = await pricingContext()
-  const rows = await computeStages({ from, to, groupBy: 'day' }, ctx)
+  const [mesRows, shipping] = await Promise.all([
+    computeStages({ from, to, groupBy: 'day' }, ctx),
+    fgShipmentService.getShippingStep({ fromDay, toDay, prices: ctx.prices }),
+  ])
+  const rows = [...mesRows, ...shippingRows(shipping, 'day')]
   const zero = await queryUnaccounted({ from, to }, ctx)
 
   // Collapse products: key = day|stage|equipment|family.
@@ -858,11 +930,14 @@ async function rollupDaily({ fromDay, toDay }) {
   }))
 
   await db.sequelize.transaction(async (transaction) => {
-    await db.MesLossDaily.destroy({ where: { day: { [db.Sequelize.Op.between]: [fromDay, toDay] } }, transaction })
+    // NetSuite down → keep the shipping rows already stored rather than wiping them.
+    const where = { day: { [db.Sequelize.Op.between]: [fromDay, toDay] } }
+    if (!shipping.available) where.stage = { [db.Sequelize.Op.ne]: 'shipping' }
+    await db.MesLossDaily.destroy({ where, transaction })
     if (records.length) await db.MesLossDaily.bulkCreate(records, { transaction })
   })
   const days = new Set(records.map(r => r.day))
-  return { fromDay, toDay, rows: records.length, daysWithData: days.size, computedAt: computedAt.toISOString() }
+  return { fromDay, toDay, rows: records.length, daysWithData: days.size, shipping: shipping.available ? 'included' : 'unavailable (existing rows kept)', computedAt: computedAt.toISOString() }
 }
 
 /** Frozen history from MesLossDaily, bucketed by day|week|month and split by stage|equipment|family. */
@@ -913,10 +988,21 @@ async function getLossHistory({ from, to, groupBy = 'week', by = 'stage', ignore
     t.wasteLbs = round2(t.wasteLbs + p.wasteLbs); t.wasteLbsMeasured = round2(t.wasteLbsMeasured + p.wasteLbsMeasured)
     if (p.series === 'surge' || String(p.series).startsWith('surge|')) t.surgeLbsIn = round2(t.surgeLbsIn + (p.lbsIn || 0))
   }
+  // Every bucket in the range is present, so a daily chart has no collapsed gaps:
+  // a bucket with no closed batches and no write-offs is zero loss, marked empty.
+  const filled = []
+  const startBucket = groupBy === 'week' ? mondayOf(fromDay) : groupBy === 'month' ? `${fromDay.slice(0, 7)}-01` : fromDay
+  for (let b = startBucket; b <= toDay; ) {
+    const t = totals.get(b)
+    filled.push(t ? { ...t, empty: false } : { bucket: b, wasteUsd: 0, wasteUsdMeasured: 0, lostRevenueUsd: 0, lostRevenueUsdMeasured: 0, wasteLbs: 0, wasteLbsMeasured: 0, surgeLbsIn: 0, empty: true })
+    if (groupBy === 'day') b = plantTime.addPlantDays(b, 1)
+    else if (groupBy === 'week') b = plantTime.addPlantDays(b, 7)
+    else { const [y, m] = b.split('-').map(Number); b = `${m === 12 ? y + 1 : y}-${String(m === 12 ? 1 : m + 1).padStart(2, '0')}-01` }
+  }
   return {
     period: { fromDay, toDay, groupBy, by, tz: plantTime.PLANT_TZ, ignoreUpperBounds },
     points,
-    totals: [...totals.values()].map(t => ({ ...t, pct: t.surgeLbsIn > 0 ? round2((t.wasteLbs / t.surgeLbsIn) * 100) : null })),
+    totals: filled.map(t => ({ ...t, pct: t.surgeLbsIn > 0 ? round2((t.wasteLbs / t.surgeLbsIn) * 100) : null })),
     units: { canonical: 'lb', lbsPerGal: itemConfig.LBS_PER_GAL },
     source: 'history',
   }
