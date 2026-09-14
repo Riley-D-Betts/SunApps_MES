@@ -72,7 +72,7 @@ const MAX_WINDOW_DAYS = 400
 const ZERO_ISSUED_LBS = 100          // below this a "completed" batch never really issued
 const UNMETERED_INSIGHT_SHARE = 0.25 // upper-bound share of $ that earns a callout
 const STAGES = ['separation', 'blend', 'surge', 'shipping']
-const STAGE_LABEL = { separation: 'Separation', blend: 'Blend tanks', surge: 'UHT → Surge tanks', shipping: 'Shipped vs produced' }
+const STAGE_LABEL = { separation: 'Separation', blend: 'Blend tanks', surge: 'UHT → Surge tanks', shipping: 'Produced → shipped' }
 
 // The whole product path, raw milk to shipped cases (Andrew, 2026-09-14).
 // Every step is ALWAYS present in the response so the report tells the full
@@ -98,8 +98,8 @@ const CHAIN = [
   { key: 'packaging', label: 'Packaging', stage: null, status: 'not-measured',
     what: 'Good cartons that did not become cases on a pallet (damage, case packer rejects).',
     howToMeasure: 'Compare filler good-carton counts with case-packer and palletizer counts (the historian already has most of these counters).' },
-  { key: 'shipping', label: 'Shipped vs produced', stage: 'shipping', status: 'measured',
-    what: 'Finished goods written off in NetSuite (QC samples, damage, destroyed). Produced vs shipped cases are shown for context — the gap between them is inventory and timing, not loss.' },
+  { key: 'shipping', label: 'Produced → shipped', stage: 'shipping', status: 'measured',
+    what: 'Product made in the window, followed to today: pallets destroyed and cases written off are loss; failed pallets awaiting a decision are at risk; the rest has shipped or is still in QC hold or inventory.' },
 ]
 
 const num = v => (v == null ? 0 : Number(v))
