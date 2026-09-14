@@ -318,6 +318,9 @@ function groupRows(rows, keyFn) {
   }
   return map
 }
+function revenueRated(a) {
+  return a.wasteLbs > 0 && a.wasteLbs - a.unpricedRevenueLbs > 0.005
+}
 function confidenceOf(a) {
   if (a.wasteLbs <= 0) return 'measured'
   if (a.wasteUpperBoundLbs <= 0) return 'measured'
@@ -331,9 +334,11 @@ function finish(a) {
     lbsIn: round2(a.lbsIn), unpricedLbs: round2(a.unpricedLbs), heldLbs: round2(a.heldLbs),
     wasteUsd: round2(a.wasteUsd), wasteMeasuredUsd: round2(a.wasteMeasuredUsd),
     wasteUpperBoundUsd: round2(a.wasteUsd - a.wasteMeasuredUsd),
-    lostRevenueUsd: round2(a.lostRevenueUsd),
-    lostRevenueMeasuredUsd: round2(a.lostRevenueMeasuredUsd),
-    lostRevenueUpperBoundUsd: round2(a.lostRevenueUsd - a.lostRevenueMeasuredUsd),
+    // Revenue figures are null (not $0) when NONE of the lost pounds had an
+    // FG rate — $0 would read as "no loss" where the truth is "unrated".
+    lostRevenueUsd: revenueRated(a) ? round2(a.lostRevenueUsd) : null,
+    lostRevenueMeasuredUsd: revenueRated(a) ? round2(a.lostRevenueMeasuredUsd) : null,
+    lostRevenueUpperBoundUsd: revenueRated(a) ? round2(a.lostRevenueUsd - a.lostRevenueMeasuredUsd) : null,
     unpricedRevenueLbs: round2(a.unpricedRevenueLbs),
     pct: a.lbsIn > 0 ? round2((a.wasteLbs / a.lbsIn) * 100) : null,
     measuredShare: a.wasteLbs > 0 ? round2(a.wasteMeasuredLbs / a.wasteLbs) : 1,
@@ -385,7 +390,7 @@ function buildHeadline(rows, stages) {
     unpricedLbs: all.unpricedLbs,
     // Second $ basis (Andrew, 2026-09-14): forgone finished-goods revenue on
     // the same lost pounds. Shown as a peer of the raw-milk cost, never added.
-    lostRevenueUsd: all.lostRevenueUsd,
+    lostRevenueUsd: all.lostRevenueUsd,            // null when nothing in the window had a rate
     lostRevenueUsdMeasured: all.lostRevenueMeasuredUsd,
     lostRevenueUsdUpperBound: all.lostRevenueUpperBoundUsd,
     unpricedRevenueLbs: all.unpricedRevenueLbs,
@@ -646,7 +651,7 @@ async function getLossReport(params = {}) {
     separationNegativeBalance: { count: sepAgg.negativeBalanceCount },
     unpricedFamilies: byFamily.filter(f => !f.priced && f.wasteLbs > 0).map(f => ({ family: f.family, lbs: f.wasteLbs })),
     // Products with no FG revenue rate (their lb are in the cost figure but not the revenue one).
-    unpricedRevenueProducts: byProduct.filter(p => p.stage !== 'separation' && p.wasteLbs > 0 && !(p.lostRevenueUsd > 0)).map(p => ({ product: p.productName, stage: p.stage, lbs: p.wasteLbs })),
+    unpricedRevenueProducts: byProduct.filter(p => p.stage !== 'separation' && p.wasteLbs > 0 && p.lostRevenueUsd == null).map(p => ({ product: p.productName, stage: p.stage, lbs: p.wasteLbs })),
     unmeteredSurgeTanks: byEquipment.filter(e => e.stage === 'surge' && e.measuredShare < 1).map(e => e.equipment),
   }
 
@@ -663,8 +668,8 @@ async function getLossReport(params = {}) {
       lossLbs: round2(headline.lossLbs - pheadline.lossLbs),
       lossPct: headline.lossPct != null && pheadline.lossPct != null ? round2(headline.lossPct - pheadline.lossPct) : null,
       lossUsdPct: pheadline.lossUsd > 0 ? round2(((headline.lossUsd - pheadline.lossUsd) / pheadline.lossUsd) * 100) : null,
-      lostRevenueUsd: round2(headline.lostRevenueUsd - pheadline.lostRevenueUsd),
-      lostRevenueUsdPct: pheadline.lostRevenueUsd > 0 ? round2(((headline.lostRevenueUsd - pheadline.lostRevenueUsd) / pheadline.lostRevenueUsd) * 100) : null,
+      lostRevenueUsd: headline.lostRevenueUsd != null && pheadline.lostRevenueUsd != null ? round2(headline.lostRevenueUsd - pheadline.lostRevenueUsd) : null,
+      lostRevenueUsdPct: headline.lostRevenueUsd != null && pheadline.lostRevenueUsd > 0 ? round2(((headline.lostRevenueUsd - pheadline.lostRevenueUsd) / pheadline.lostRevenueUsd) * 100) : null,
     }
   }
 
@@ -732,8 +737,8 @@ async function rollupDaily({ fromDay, toDay }) {
     lbsIn: round2(k.agg.lbsIn), wasteLbs: round2(k.agg.wasteLbs), wasteMeasuredLbs: round2(k.agg.wasteMeasuredLbs), wasteUpperBoundLbs: round2(k.agg.wasteUpperBoundLbs),
     wasteUsd: k.pricePerLb != null ? round2(k.agg.wasteUsd) : null,
     wasteMeasuredUsd: k.pricePerLb != null ? round2(k.agg.wasteMeasuredUsd) : null,
-    lostRevenueUsd: k.stage === 'separation' ? null : round2(k.agg.lostRevenueUsd),
-    lostRevenueMeasuredUsd: k.stage === 'separation' ? null : round2(k.agg.lostRevenueMeasuredUsd),
+    lostRevenueUsd: k.stage === 'separation' || !revenueRated(k.agg) ? null : round2(k.agg.lostRevenueUsd),
+    lostRevenueMeasuredUsd: k.stage === 'separation' || !revenueRated(k.agg) ? null : round2(k.agg.lostRevenueMeasuredUsd),
     pricePerLb: k.pricePerLb, batchCount: k.agg.batches, unmeasuredBatchCount: k.agg.unmeasuredBatches,
     zeroIssuedCount: k.zeroIssuedCount, heldLbs: round2(k.agg.heldLbs), computedAt,
   }))
