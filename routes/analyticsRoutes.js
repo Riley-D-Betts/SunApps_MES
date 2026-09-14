@@ -533,4 +533,116 @@ router.post('/inventory-adjustments/:id/retry',  controller.retryInventoryAdjust
  */
 router.post('/inventory-adjustments/:id/reject', controller.rejectInventoryAdjustment)
 
+// ── Milk Loss executive report (SD-729) ──────────────────────────────────────
+
+/**
+ * @openapi
+ * /api/mes/analytics/loss-report:
+ *   get:
+ *     tags: [Loss Report]
+ *     summary: Milk Loss executive report
+ *     description: >
+ *       Where milk (and money) was lost over a window, by stage (separation, blend tanks, surge tanks),
+ *       equipment, product family and product, with the ten worst batches, a trend, and an honest
+ *       "what we can't measure" block. Every figure is split into a MEASURED part and an UPPER-BOUND part
+ *       (`wasteLbs = wasteLbsMeasured + wasteLbsUpperBoundOnly`). Pounds are canonical; `units.lbsPerGal`
+ *       converts for display. Never reads inventory adjustments. Batches that closed with under 100 lb issued
+ *       are listed under `unaccounted`, not counted as loss. Priced at CURRENT raw-milk prices with no global
+ *       fallback (unpriced families are reported in pounds).
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         schema: { type: string }
+ *         description: Window start — ISO 8601 instant, or a plant-local date `YYYY-MM-DD`. Default = 7 whole plant days ending yesterday.
+ *       - in: query
+ *         name: to
+ *         schema: { type: string }
+ *         description: Window end (exclusive instant; a bare date is INCLUSIVE of that plant day).
+ *       - in: query
+ *         name: groupBy
+ *         schema: { type: string, enum: [day, week], default: week }
+ *         description: Trend bucket. Weeks start Monday, plant time.
+ *       - in: query
+ *         name: compare
+ *         schema: { type: boolean, default: false }
+ *         description: Also compute the equal-length prior window (`prior` + `headline.delta`).
+ *     responses:
+ *       200: { description: The report. }
+ *       400: { description: Bad window (to <= from, > 400 days, unparseable dates). }
+ *       500: { description: Query failed. }
+ */
+router.get('/loss-report',                   controller.getLossReport)
+
+/**
+ * @openapi
+ * /api/mes/analytics/loss-report/digest-preview:
+ *   get:
+ *     tags: [Loss Report]
+ *     summary: Preview the weekly Teams digest card
+ *     description: The exact card jobs/lossDigestJob.js would post for the last ISO week (or the given window), plus whether this instance would actually post it.
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date-time }
+ *     responses:
+ *       200: { description: "{ card, wouldPost, period }" }
+ */
+router.get('/loss-report/digest-preview',    controller.getLossDigestPreview)
+
+/**
+ * @openapi
+ * /api/mes/analytics/loss-report/rollup:
+ *   post:
+ *     tags: [Loss Report]
+ *     summary: Recompute the persisted daily loss history for a range
+ *     description: >
+ *       Deletes and re-inserts MesLossDaily rows for every plant day in [from, to] (inclusive, YYYY-MM-DD) at
+ *       CURRENT prices. What the nightly lossRollupJob does for the last 3 days; use it after a price correction
+ *       or to backfill (scripts/backfillLossDaily.js wraps it).
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         required: true
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: to
+ *         required: true
+ *         schema: { type: string, format: date }
+ *     responses:
+ *       200: { description: "{ fromDay, toDay, rows, daysWithData, computedAt }" }
+ *       400: { description: Missing or malformed dates. }
+ */
+router.post('/loss-report/rollup',           controller.rollupLossHistory)
+
+/**
+ * @openapi
+ * /api/mes/analytics/loss-history:
+ *   get:
+ *     tags: [Loss Report]
+ *     summary: Long-range loss trend from the persisted daily history
+ *     description: >
+ *       Reads MesLossDaily only (frozen $/lb per day). Default = the last 26 weeks. Offers `month` bucketing,
+ *       which the live report does not. `points` are per bucket × series; `totals` are per bucket.
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: groupBy
+ *         schema: { type: string, enum: [day, week, month], default: week }
+ *       - in: query
+ *         name: by
+ *         schema: { type: string, enum: [stage, equipment, family], default: stage }
+ *     responses:
+ *       200: { description: "{ period, points[], totals[], units }" }
+ *       400: { description: Bad groupBy/by. }
+ */
+router.get('/loss-history',                  controller.getLossHistory)
+
 module.exports = router

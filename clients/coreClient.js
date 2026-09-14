@@ -70,6 +70,13 @@ function broadcastFacilityState(payload = {}) {
   return request('POST', '/internal/broadcast/facility-state', payload)
 }
 
+// Channel-keyed Teams Adaptive Card (SD-729). The Gateway maps `channel` to
+// a webhook (TEAMS_<CHANNEL>_HOOK) and answers { ok:true, skipped:true } when
+// that hook is unset — so an unconfigured environment is a silent no-op.
+function sendTeamsCard({ channel, title, subtitle, facts, lines, link }) {
+  return request('POST', '/internal/notify/teams', { channel, title, subtitle, facts, lines, link })
+}
+
 module.exports = {
   broadcastFacilityState,
   getSchedulerState,
@@ -80,4 +87,5 @@ module.exports = {
   suiteQL,
   callRestlet,
   sendStagingNotification,
+  sendTeamsCard,
 }

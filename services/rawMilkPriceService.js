@@ -2,7 +2,7 @@ const core = require('../clients/coreClient')
 const config = require('../config')
 const db = require('../models')
 const statusStore = require('./statusStore')
-const { RAW_ITEMS } = require('./mesItemConfig')
+const { RAW_ITEMS, PRODUCT_INDEX_ITEM_MAP } = require('./mesItemConfig')
 const surgeParser = require('./surgeTankProductParser')
 const blendParser = require('./blendTankProductParser')
 
@@ -248,26 +248,76 @@ async function syncTick() {
   return { derivedFamilies: Object.keys(derived), updated: changes.length }
 }
 
-// ── SQL expression for aggregate waste-$ ────────────────────────────────────
+// ── SQL expressions for aggregate waste-$ ───────────────────────────────────
 
 function sqlIdList(ids) {
   // componentItemId / mesItem are STRING columns holding numeric ids.
   return ids.map(id => `'${String(id).replace(/'/g, '')}'`).join(', ')
 }
 
-/**
- * A SUM(...) literal mirroring familyForBatch/priceForBatch for the analytics
- * summary: componentItemId branches first, then mesItem, ELSE the global
- * price. Only families with a current price get a branch. All interpolated
- * values are our own DECIMAL rows and constant id lists — no request input.
- * Returns null when no per-family prices exist AND there is no global price
- * (callers then omit totalWasteUsd entirely).
- */
-function wasteUsdCaseExpr(prices, globalPrice, { wasteCol = 'wasteLbs', cols = ['componentItemId', 'mesItem'] } = {}) {
+/** { family: [ids…] } over both the RAW_ITEMS taxonomy and the two catalogs. */
+function familyIdLists() {
   const familyIds = {}
   for (const [id, fam] of Object.entries(RAW_ID_FAMILY)) (familyIds[fam] ||= []).push(id)
   for (const [id, fam] of Object.entries(CATALOG_ID_FAMILY)) (familyIds[fam] ||= []).push(id)
+  return familyIds
+}
 
+/**
+ * { family: [HMI product indices…] } — separation batches store the HMI
+ * product index ('15' conventional bulk, '16' organic bulk, '21' A2…) in
+ * itemId, not an NS item id. Resolved through PRODUCT_INDEX_ITEM_MAP.
+ */
+function familyIndexLists() {
+  const out = {}
+  for (const [idx, item] of Object.entries(PRODUCT_INDEX_ITEM_MAP)) {
+    if (!item || item.id == null) continue
+    const fam = RAW_ID_FAMILY[String(item.id)]
+    if (fam) (out[fam] ||= []).push(String(idx))
+  }
+  return out
+}
+
+/** Family for an HMI product index (separation batches' itemId), or null. */
+function familyForProductIndex(idx) {
+  const item = PRODUCT_INDEX_ITEM_MAP[Number(idx)]
+  return item && item.id != null ? RAW_ID_FAMILY[String(item.id)] || null : null
+}
+
+/**
+ * CASE literal classifying a row into a family name (or NULL), mirroring
+ * familyForBatch: the first column in `cols` wins, then the next. `indexCols`
+ * are columns holding an HMI product index instead of an item id. All
+ * interpolated values are constant id lists — no request input.
+ */
+function familyCaseExpr({ cols = ['componentItemId', 'mesItem'], indexCols = [] } = {}) {
+  const familyIds = familyIdLists()
+  const familyIdx = familyIndexLists()
+  const branches = []
+  for (const col of cols) {
+    for (const family of FAMILIES) {
+      if (!familyIds[family] || !familyIds[family].length) continue
+      branches.push(`WHEN [${col}] IN (${sqlIdList(familyIds[family])}) THEN '${family}'`)
+    }
+  }
+  for (const col of indexCols) {
+    for (const family of FAMILIES) {
+      if (!familyIdx[family] || !familyIdx[family].length) continue
+      branches.push(`WHEN [${col}] IN (${sqlIdList(familyIdx[family])}) THEN '${family}'`)
+    }
+  }
+  return branches.length ? `CASE ${branches.join(' ')} ELSE NULL END` : 'NULL'
+}
+
+/**
+ * CASE literal yielding the $/lb for a row, mirroring priceForBatch: only
+ * families with a current price get a branch; ELSE the global price when
+ * given, else NULL. Returns null when nothing can price anything (callers
+ * then omit the $ column). Values are our own DECIMAL rows — no request input.
+ */
+function pricePerLbCaseExpr(prices, globalPrice, { cols = ['componentItemId', 'mesItem'], indexCols = [] } = {}) {
+  const familyIds = familyIdLists()
+  const familyIdx = familyIndexLists()
   const branches = []
   for (const col of cols) {
     for (const family of FAMILIES) {
@@ -276,11 +326,29 @@ function wasteUsdCaseExpr(prices, globalPrice, { wasteCol = 'wasteLbs', cols = [
       branches.push(`WHEN [${col}] IN (${sqlIdList(familyIds[family])}) THEN ${Number(p.pricePerLb)}`)
     }
   }
+  for (const col of indexCols) {
+    for (const family of FAMILIES) {
+      const p = prices[family]
+      if (!p || !familyIdx[family] || !familyIdx[family].length) continue
+      branches.push(`WHEN [${col}] IN (${sqlIdList(familyIdx[family])}) THEN ${Number(p.pricePerLb)}`)
+    }
+  }
   const elsePrice = globalPrice != null ? Number(globalPrice) : null
   if (!branches.length && elsePrice == null) return null
-  const caseExpr = branches.length
+  return branches.length
     ? `CASE ${branches.join(' ')} ELSE ${elsePrice != null ? elsePrice : 'NULL'} END`
     : `${elsePrice}`
+}
+
+/**
+ * A SUM(...) literal mirroring familyForBatch/priceForBatch for the analytics
+ * summary: componentItemId branches first, then mesItem, ELSE the global
+ * price. Returns null when no per-family prices exist AND there is no global
+ * price (callers then omit totalWasteUsd entirely).
+ */
+function wasteUsdCaseExpr(prices, globalPrice, { wasteCol = 'wasteLbs', cols = ['componentItemId', 'mesItem'] } = {}) {
+  const caseExpr = pricePerLbCaseExpr(prices, globalPrice, { cols })
+  if (caseExpr == null) return null
   return `SUM([${wasteCol}] * ${caseExpr})`
 }
 
@@ -297,5 +365,8 @@ module.exports = {
   appendManual,
   syncTick,
   wasteUsdCaseExpr,
+  familyCaseExpr,
+  pricePerLbCaseExpr,
+  familyForProductIndex,
   clearCache,
 }

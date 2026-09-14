@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "SunApps MES",
-    "version": "1.0.12",
+    "version": "1.0.13",
     "description": "Plant-floor MES service for the IdaMilk creamery. Cron jobs poll the AVEVA Historian for separator batches, bulk milk intake, blend tanks, surge tanks and equipment state, turn them into NetSuite work orders / issues / completions / inventory adjustments, and record every batch locally. On top of that it exposes a rich read-only /api/historian query gateway over the plant historian, live status and analytics feeds for the SunApps UI, operator review endpoints for batches that failed to post to NetSuite, a BOM admin surface, and a replay (time-travel simulation) control panel."
   },
   "servers": [
@@ -3936,6 +3936,136 @@
           },
           "400": {
             "description": "Adjustment not found or reject failed."
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/loss-report/digest-preview": {
+      "get": {
+        "tags": [
+          "Loss Report"
+        ],
+        "summary": "Preview the weekly Teams digest card",
+        "description": "The exact card jobs/lossDigestJob.js would post for the last ISO week (or the given window), plus whether this instance would actually post it.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{ card, wouldPost, period }"
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/loss-report/rollup": {
+      "post": {
+        "tags": [
+          "Loss Report"
+        ],
+        "summary": "Recompute the persisted daily loss history for a range",
+        "description": "Deletes and re-inserts MesLossDaily rows for every plant day in [from, to] (inclusive, YYYY-MM-DD) at CURRENT prices. What the nightly lossRollupJob does for the last 3 days; use it after a price correction or to backfill (scripts/backfillLossDaily.js wraps it).\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{ fromDay, toDay, rows, daysWithData, computedAt }"
+          },
+          "400": {
+            "description": "Missing or malformed dates."
+          }
+        }
+      }
+    },
+    "/api/mes/analytics/loss-history": {
+      "get": {
+        "tags": [
+          "Loss Report"
+        ],
+        "summary": "Long-range loss trend from the persisted daily history",
+        "description": "Reads MesLossDaily only (frozen $/lb per day). Default = the last 26 weeks. Offers `month` bucketing, which the live report does not. `points` are per bucket × series; `totals` are per bucket.\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "groupBy",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "day",
+                "week",
+                "month"
+              ],
+              "default": "week"
+            }
+          },
+          {
+            "in": "query",
+            "name": "by",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "stage",
+                "equipment",
+                "family"
+              ],
+              "default": "stage"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{ period, points[], totals[], units }"
+          },
+          "400": {
+            "description": "Bad groupBy/by."
           }
         }
       }

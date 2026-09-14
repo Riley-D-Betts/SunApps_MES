@@ -51,7 +51,8 @@ function withCompletionLock(woId, fn) {
 // UHT software totalizer is gallons; NS workOrder lines run in lbs. Use a
 // single density constant — UHT throughput is mixed during product changes,
 // and the FG mass-balance accounting doesn't need per-product precision.
-const GAL_TO_LBS = 8.6
+// Lives in mesItemConfig (SD-729) so the loss report converts with it too.
+const GAL_TO_LBS = itemConfig.LBS_PER_GAL
 
 // A genuine UHT totalizer reset (IDLE/CIP→PROCESS wipes the in-memory
 // _uhtMilkGal accumulator to 0) drops the reading by thousands of gallons.
