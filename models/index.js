@@ -32,6 +32,16 @@ db.ensureRuntimeSchema = async function () {
   // unprefixed DF_... would collide between the two environments' table sets.
   const P = config.TABLE_PREFIX
 
+  // ${P}MesLossDaily (SD-729): lostRevenueMeasuredUsd was added the same day
+  // the table was born, but dev's table had already been created by sync().
+  // Guarded on the table existing so a fresh DB (sync creates it complete)
+  // and an older one both end up identical.
+  await sequelize.query(`
+    IF OBJECT_ID(N'${P}MesLossDaily') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lostRevenueMeasuredUsd' AND Object_ID = Object_ID(N'${P}MesLossDaily'))
+      ALTER TABLE ${P}MesLossDaily ADD lostRevenueMeasuredUsd DECIMAL(14,2) NULL;
+  `)
+
   // ${P}MesBlendTankBatches: tick-driven cumulative totals + last-fire timestamps
   await sequelize.query(`
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'cumulativeIssuedLbs' AND Object_ID = Object_ID(N'${P}MesBlendTankBatches'))

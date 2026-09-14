@@ -70,8 +70,13 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.DECIMAL(14, 2),
       allowNull: true,
     },
-    // Forgone FG revenue on the wasted lb (opportunity, never added to wasteUsd).
+    // Forgone FG revenue on the wasted lb — the second $ basis, a peer of
+    // wasteUsd (never added to it). Null for separation / unrated items.
     lostRevenueUsd: {
+      type: DataTypes.DECIMAL(14, 2),
+      allowNull: true,
+    },
+    lostRevenueMeasuredUsd: {
       type: DataTypes.DECIMAL(14, 2),
       allowNull: true,
     },

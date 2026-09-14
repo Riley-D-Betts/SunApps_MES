@@ -545,7 +545,8 @@ router.post('/inventory-adjustments/:id/reject', controller.rejectInventoryAdjus
  *       Where milk (and money) was lost over a window, by stage (separation, blend tanks, surge tanks),
  *       equipment, product family and product, with the ten worst batches, a trend, and an honest
  *       "what we can't measure" block. Every figure is split into a MEASURED part and an UPPER-BOUND part
- *       (`wasteLbs = wasteLbsMeasured + wasteLbsUpperBoundOnly`). Pounds are canonical; `units.lbsPerGal`
+ *       (`wasteLbs = wasteLbsMeasured + wasteLbsUpperBoundOnly`). Dollars come in TWO bases as peers — raw-milk
+ *       cost (`wasteUsd*`) and forgone FG revenue (`lostRevenueUsd*`), never added. Pounds are canonical; `units.lbsPerGal`
  *       converts for display. Never reads inventory adjustments. Batches that closed with under 100 lb issued
  *       are listed under `unaccounted`, not counted as loss. Priced at CURRENT raw-milk prices with no global
  *       fallback (unpriced families are reported in pounds).
