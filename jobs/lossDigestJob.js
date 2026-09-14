@@ -47,7 +47,7 @@ function buildCard(report, { fromDay, toDay }) {
   if (ship && ship.shipping && ship.shipping.available) {
     const sh = ship.shipping
     const n = v => Math.round(v || 0).toLocaleString('en-US')
-    facts.push({ title: 'Produced this week → today', value: `${n(sh.producedCases)} cases / ${n(sh.producedPallets)} pallets · shipped ${n(sh.shippedCases)} (${sh.shippedPctOfProduced != null ? sh.shippedPctOfProduced.toFixed(0) : '—'}%) · lost ${n(sh.loss.cases)} (${fmtUsd(sh.loss.costUsd)} cost / ${fmtUsd(sh.loss.revenueUsd)} revenue) · at risk ${n(sh.atRisk.cases)}` })
+    facts.push({ title: 'Produced → shipped (this week, to today)', value: `${n(sh.producedCases)} cases / ${n(sh.producedPallets)} pallets · shipped ${n(sh.shippedCases)} (${sh.shippedPctOfProduced != null ? sh.shippedPctOfProduced.toFixed(0) : '—'}%) · lost ${n(sh.loss.cases)} (${fmtUsd(sh.loss.costUsd)} cost / ${fmtUsd(sh.loss.revenueUsd)} revenue) · at risk ${n(sh.atRisk.cases)}` })
   }
   const blind = (report.chain || []).filter(c => c.status === 'not-measured').map(c => c.label)
   if (blind.length) facts.push({ title: 'Not measured yet', value: blind.join(' · ') })
