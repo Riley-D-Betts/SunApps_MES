@@ -8,7 +8,8 @@
  *
  * Usage:  ENVIRONMENT=prod node scripts/probeLossReport.js 2026-09-07 2026-09-14 [--json]
  *         (dates are plant days; `to` is exclusive — the second arg is the
- *          first day NOT included)
+ *          first day NOT included). --json prints only the report JSON to
+ *          stdout (no tables, no cross-check) — pipe it to a file as a UI fixture.
  */
 const { QueryTypes } = require('sequelize')
 const config = require('../config')
@@ -37,7 +38,12 @@ async function main() {
   const t0 = Date.now()
   const rep = await svc.getLossReport({ from: from.toISOString(), to: to.toISOString(), groupBy: 'week', compare: true })
   const ms = Date.now() - t0
-  if (asJson) { console.log(JSON.stringify(rep, null, 2)); }
+  if (asJson) {
+    // JSON only on stdout (pipe it to a file); the human tables are skipped.
+    process.stdout.write(JSON.stringify({ success: true, ...rep }, null, 2) + '\n')
+    await config.sequelize.close()
+    return
+  }
 
   console.log(`\nHEADLINE (${ms} ms): loss ${usd(rep.headline.lossUsd)} = measured ${usd(rep.headline.lossUsdMeasured)} + upper-bound ${usd(rep.headline.lossUsdUpperBound)}; ${lbs(rep.headline.lossLbs)} lb of ${lbs(rep.headline.lbsProcessed)} lb (${rep.headline.lossPct}%), unpriced ${lbs(rep.headline.unpricedLbs)} lb, lost revenue ${usd(rep.headline.lostRevenueUsd)}`)
   if (rep.prior) console.log(`PRIOR: ${usd(rep.prior.headline.lossUsd)} · delta ${usd(rep.headline.delta.lossUsd)} (${rep.headline.delta.lossUsdPct}%)`)
