@@ -15,8 +15,10 @@
  *    part and an UPPER-BOUND-ONLY part and never blend them silently:
  *      wasteLbs = wasteMeasuredLbs + wasteUpperBoundLbs   (best estimate)
  *    The measured figure is correct in both MES_METERED_DRAIN regimes: it
- *    uses issued − COALESCE(outputWithDrainLbs, output), which is the
- *    with-credit output whether the credit was applied to NS or only shadowed.
+ *    uses issued − max(output, outputWithDrainLbs), which is the with-credit
+ *    output whether the credit was applied to NS or only shadowed. The max()
+ *    guards stale shadow values below output (seen on early dev rows) so the
+ *    credit can never make measured loss exceed the upper bound.
  *  - Closed batches with < 100 lb issued are UNACCOUNTED production (item
  *    mis-pin / layer skip), never "zero loss". They are excluded from every
  *    sum and listed under `unaccounted`.
@@ -192,7 +194,7 @@ async function querySurge({ from, to, groupBy }, ctx) {
     ), c AS (
       SELECT *,
              ${max0('issued - output')} AS wasteUpper,
-             CASE WHEN measurable = 1 THEN ${max0('issued - COALESCE(outputWD, output)')} END AS wasteMeasured,
+             CASE WHEN measurable = 1 THEN ${max0('issued - (CASE WHEN outputWD > output THEN outputWD ELSE output END)')} END AS wasteMeasured,
              ${ctx.familyCase(cols)} AS family,
              ${ctx.priceCase(cols)} AS price,
              ${ctx.revCase('mesItem')} AS revRate
@@ -419,21 +421,12 @@ function windowDays(win) {
   return { fromDay: plantTime.plantDateString(win.from), toDay: plantTime.plantDateString(new Date(win.to.getTime() - 1)) }
 }
 
-/** The shipped-vs-produced detail block carried on the chain's shipping step. */
+/** The shipped-vs-produced cohort block carried on the chain's shipping step. */
 function shippingDetail(step) {
   if (!step) return null
   if (!step.available) return { available: false, error: step.error }
-  return {
-    available: true,
-    producedCases: step.producedCases, shippedCases: step.shippedCases, invoicedCases: step.invoicedCases, gapCases: step.gapCases,
-    shippedPctOfProduced: step.producedCases > 0 ? round2((step.shippedCases / step.producedCases) * 100) : null,
-    writeOff: { cases: step.writeOff.cases, lbs: step.writeOff.lbs, costUsd: step.writeOff.costUsd, revenueUsd: step.writeOff.revenueUsd,
-      pctOfProduced: step.producedCases > 0 ? round2((step.writeOff.cases / step.producedCases) * 100) : null,
-      unpricedCostLbs: step.writeOff.unpricedCostLbs, byKind: step.writeOff.byKind, topItems: step.writeOff.byItem.slice(0, 10) },
-    bookkeeping: step.bookkeeping,
-    topItems: step.byItem.slice(0, 15),
-    definition: step.definition,
-  }
+  const { lossRows, ...rest } = step
+  return { ...rest, byItem: step.byItem.slice(0, 15) }
 }
 
 /** What "Ignore upper bounds" leaves out: batches whose loss is upper-bound only. Always computed. */
@@ -484,7 +477,7 @@ function buildChain(stages, shipping) {
     return {
       ...base,
       lbsIn: s.lbsIn, wasteLbs: s.wasteLbs, wasteLbsMeasured: s.wasteLbsMeasured, wasteLbsUpperBound: s.wasteLbsUpperBoundOnly,
-      pct: c.key === 'shipping' ? (base.shipping && base.shipping.writeOff ? base.shipping.writeOff.pctOfProduced : null) : s.pct,
+      pct: c.key === 'shipping' ? (base.shipping && base.shipping.loss ? base.shipping.loss.pctOfProduced : null) : s.pct,
       wasteUsd: s.wasteUsd, wasteUsdMeasured: s.wasteUsdMeasured, wasteUsdUpperBound: s.wasteUsdUpperBound,
       lostRevenueUsd: s.lostRevenueUsd, lostRevenueUsdMeasured: s.lostRevenueUsdMeasured, lostRevenueUsdUpperBound: s.lostRevenueUsdUpperBound,
       batches: s.batches, confidence: s.confidence,
@@ -626,7 +619,7 @@ async function queryTopEvents({ from, to }, ctx, { limit = 10, measuredOnly = fa
              CASE WHEN [concurrentFillDrain] = 0 OR ([concurrentTickCount] > 0 AND [meteredDrainTickCount] = [concurrentTickCount] AND [drainFillerLines] = '1') THEN 1 ELSE 0 END AS measured,
              CAST([cumulativeIssuedLbs] AS float) AS issued,
              CASE WHEN [concurrentFillDrain] = 0 OR ([concurrentTickCount] > 0 AND [meteredDrainTickCount] = [concurrentTickCount] AND [drainFillerLines] = '1')
-                  THEN ${max0('CAST([cumulativeIssuedLbs] AS float) - COALESCE(CAST([outputWithDrainLbs] AS float), CAST([cumulativeOutputLbs] AS float))')}
+                  THEN ${max0('CAST([cumulativeIssuedLbs] AS float) - (CASE WHEN CAST([outputWithDrainLbs] AS float) > CAST([cumulativeOutputLbs] AS float) THEN CAST([outputWithDrainLbs] AS float) ELSE CAST([cumulativeOutputLbs] AS float) END)')}
                   ELSE ${max0('CAST([cumulativeIssuedLbs] AS float) - CAST([cumulativeOutputLbs] AS float)')} END AS lbs,
              ${ctx.priceCase(surgeCols)} AS price,
              ${ctx.revCase('mesItem')} AS revRate
@@ -843,9 +836,10 @@ async function getLossReport(params = {}) {
   }
   const chain = buildChain(stages, shipping)
   if (shipping && shipping.available) {
-    const recon = shipping.bookkeeping.find(b => b.kind === 'reconciliation')
-    insights.push({ kind: 'shipping', usd: shipping.writeOff.revenueUsd,
-      text: `Shipped ${Math.round(shipping.shippedCases).toLocaleString('en-US')} of ${Math.round(shipping.producedCases).toLocaleString('en-US')} cases produced; ${Math.round(shipping.writeOff.cases).toLocaleString('en-US')} cases were written off (${shipping.writeOff.byKind.map(k => `${k.label} ${Math.round(k.downCases)}`).join(', ') || 'none'}). The ${Math.round(Math.abs(shipping.gapCases)).toLocaleString('en-US')}-case gap is inventory and timing, not loss${recon ? `; a pallet-sync inventory true-up (net ${Math.round(recon.netCases).toLocaleString('en-US')} cases) is bookkeeping and not counted` : ''}.` })
+    const fmtN = v => Math.round(v || 0).toLocaleString('en-US')
+    const topReason = shipping.loss.byReason[0]
+    insights.push({ kind: 'shipping', usd: shipping.loss.revenueUsd,
+      text: `Of the ${fmtN(shipping.producedCases)} cases (${fmtN(shipping.producedPallets)} pallets) produced in this window, ${fmtN(shipping.shippedCases)} have shipped so far (${shipping.shippedPctOfProduced != null ? shipping.shippedPctOfProduced.toFixed(0) : '—'}%); ${fmtN(shipping.loss.cases)} cases were lost (${fmtN(shipping.loss.destroyedPallets)} pallets destroyed${topReason ? `; largest reason: ${topReason.label}` : ''}) and ${fmtN(shipping.atRisk.cases)} more are failed and awaiting a decision.` })
   } else if (shipping && !shipping.available) {
     insights.push({ kind: 'shipping-unavailable', usd: null, text: 'Shipped vs produced could not be loaded from NetSuite for this window; that step is missing from the totals.' })
   }
@@ -889,6 +883,36 @@ async function getLossReport(params = {}) {
  * re-inserted inside one transaction. Prices used are the CURRENT ones —
  * re-running a window deliberately re-prices it.
  */
+/**
+ * Re-roll ONLY the shipping stage over a longer lookback: product made weeks
+ * ago can still be destroyed or written off, and its loss is attributed to its
+ * production day.
+ */
+async function rollupShipping({ fromDay, toDay }) {
+  const ctx = await pricingContext()
+  const step = await fgShipmentService.getShippingStep({ fromDay, toDay, prices: ctx.prices })
+  if (!step.available) return { fromDay, toDay, rows: 0, shipping: 'unavailable (existing rows kept)' }
+  const keyed = new Map()
+  for (const r of shippingRows(step, 'day')) {
+    const k = `${r.bucket}|${r.family}`
+    if (!keyed.has(k)) keyed.set(k, { day: r.bucket, family: r.family, pricePerLb: r.pricePerLb, agg: emptyAgg() })
+    addInto(keyed.get(k).agg, r)
+  }
+  const computedAt = new Date()
+  const records = [...keyed.values()].map(k => ({
+    day: k.day, stage: 'shipping', equipment: 'Finished goods', equipmentGroup: null, family: k.family,
+    lbsIn: 0, lbsInMeasured: 0, wasteLbs: round2(k.agg.wasteLbs), wasteMeasuredLbs: round2(k.agg.wasteLbs), wasteUpperBoundLbs: 0,
+    wasteUsd: k.agg.wasteUsd ? round2(k.agg.wasteUsd) : null, wasteMeasuredUsd: k.agg.wasteUsd ? round2(k.agg.wasteUsd) : null,
+    lostRevenueUsd: k.agg.lostRevenueUsd ? round2(k.agg.lostRevenueUsd) : null, lostRevenueMeasuredUsd: k.agg.lostRevenueUsd ? round2(k.agg.lostRevenueUsd) : null,
+    pricePerLb: k.pricePerLb, batchCount: 0, unmeasuredBatchCount: 0, zeroIssuedCount: 0, heldLbs: 0, computedAt,
+  }))
+  await db.sequelize.transaction(async (transaction) => {
+    await db.MesLossDaily.destroy({ where: { stage: 'shipping', day: { [db.Sequelize.Op.between]: [fromDay, toDay] } }, transaction })
+    if (records.length) await db.MesLossDaily.bulkCreate(records, { transaction })
+  })
+  return { fromDay, toDay, rows: records.length, shipping: 'included', computedAt: computedAt.toISOString() }
+}
+
 async function rollupDaily({ fromDay, toDay }) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(fromDay) || !/^\d{4}-\d{2}-\d{2}$/.test(toDay) || toDay < fromDay) {
     const err = new Error('fromDay/toDay must be YYYY-MM-DD with toDay >= fromDay'); err.status = 400; throw err
@@ -1012,6 +1036,7 @@ module.exports = {
   getLossReport,
   getLossHistory,
   rollupDaily,
+  rollupShipping,
   computeStages,
   parseWindow,
   STAGES,

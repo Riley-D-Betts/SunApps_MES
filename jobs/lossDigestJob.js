@@ -46,7 +46,8 @@ function buildCard(report, { fromDay, toDay }) {
   const ship = (report.chain || []).find(c => c.key === 'shipping')
   if (ship && ship.shipping && ship.shipping.available) {
     const sh = ship.shipping
-    facts.push({ title: 'Shipped vs produced', value: `${Math.round(sh.shippedCases).toLocaleString('en-US')} of ${Math.round(sh.producedCases).toLocaleString('en-US')} cases · written off ${Math.round(sh.writeOff.cases).toLocaleString('en-US')} (${fmtUsd(sh.writeOff.costUsd)} cost / ${fmtUsd(sh.writeOff.revenueUsd)} revenue)` })
+    const n = v => Math.round(v || 0).toLocaleString('en-US')
+    facts.push({ title: 'Produced this week → today', value: `${n(sh.producedCases)} cases / ${n(sh.producedPallets)} pallets · shipped ${n(sh.shippedCases)} (${sh.shippedPctOfProduced != null ? sh.shippedPctOfProduced.toFixed(0) : '—'}%) · lost ${n(sh.loss.cases)} (${fmtUsd(sh.loss.costUsd)} cost / ${fmtUsd(sh.loss.revenueUsd)} revenue) · at risk ${n(sh.atRisk.cases)}` })
   }
   const blind = (report.chain || []).filter(c => c.status === 'not-measured').map(c => c.label)
   if (blind.length) facts.push({ title: 'Not measured yet', value: blind.join(' · ') })

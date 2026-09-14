@@ -107,6 +107,9 @@ module.exports = {
   // cron set — a replay toggle must not disturb reporting.
   LOSS_ROLLUP_CRON: cronEnv('LOSS_ROLLUP_CRON', '40 5 * * *'),
   LOSS_ROLLUP_DAYS: parseInt(process.env.LOSS_ROLLUP_DAYS || '3', 10) || 3,
+  // Shipped-vs-produced is a production-date cohort whose loss keeps landing for
+  // weeks after the product was made, so its history rows are re-rolled wider.
+  LOSS_SHIPPING_LOOKBACK_DAYS: parseInt(process.env.LOSS_SHIPPING_LOOKBACK_DAYS || '60', 10) || 60,
   // Weekly executive digest — Monday 06:00 plant time, last ISO week, Teams
   // card via the Gateway. Posts ONLY when ENVIRONMENT=prod AND
   // LOSS_DIGEST_ENABLED=true AND MES_DRY_RUN is off; otherwise it logs the

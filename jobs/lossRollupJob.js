@@ -17,6 +17,10 @@ async function run({ days = config.LOSS_ROLLUP_DAYS } = {}) {
   const fromDay = plantTime.addPlantDays(today, -Math.max(1, days))
   try {
     const result = await lossReportService.rollupDaily({ fromDay, toDay })
+    // Shipping loss is attributed to the PRODUCTION day and keeps changing for
+    // weeks (pallets get destroyed long after they were made) — re-roll it wider.
+    const shipFrom = plantTime.addPlantDays(today, -Math.max(days, config.LOSS_SHIPPING_LOOKBACK_DAYS))
+    result.shippingLookback = await lossReportService.rollupShipping({ fromDay: shipFrom, toDay })
     console.log(`[LossRollupJob] ${fromDay}..${toDay}: ${result.rows} row(s) over ${result.daysWithData} day(s)`)
     statusStore.pushEvent('lossRollup.ok', `Loss history rolled up ${fromDay}..${toDay}`, result)
     lastPollTime = new Date()
