@@ -200,7 +200,7 @@ function fail(res, label, err) {
 
 exports.getLossReport = async (req, res) => {
   try {
-    const params = pick(req.query, ['from', 'to', 'groupBy', 'compare'])
+    const params = pick(req.query, ['from', 'to', 'groupBy', 'compare', 'ignoreUpperBounds'])
     const report = await lossReportService.getLossReport(params)
     return res.json({ success: true, ...report })
   } catch (err) {
@@ -210,7 +210,7 @@ exports.getLossReport = async (req, res) => {
 
 exports.getLossHistory = async (req, res) => {
   try {
-    const params = pick(req.query, ['from', 'to', 'groupBy', 'by'])
+    const params = pick(req.query, ['from', 'to', 'groupBy', 'by', 'ignoreUpperBounds'])
     const history = await lossReportService.getLossHistory(params)
     return res.json({ success: true, ...history })
   } catch (err) {

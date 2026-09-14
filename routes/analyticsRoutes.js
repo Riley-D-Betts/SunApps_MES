@@ -569,6 +569,13 @@ router.post('/inventory-adjustments/:id/reject', controller.rejectInventoryAdjus
  *         name: compare
  *         schema: { type: boolean, default: false }
  *         description: Also compute the equal-length prior window (`prior` + `headline.delta`).
+ *       - in: query
+ *         name: ignoreUpperBounds
+ *         schema: { type: boolean, default: false }
+ *         description: >
+ *           Leave out every batch whose loss is only an upper bound (its input pounds AND its loss), so every
+ *           figure — headline, chain, rankings, top events, trend, prior compare — is measured. What was left out is
+ *           always returned in `excluded`.
  *     responses:
  *       200: { description: The report. }
  *       400: { description: Bad window (to <= from, > 400 days, unparseable dates). }
@@ -642,6 +649,10 @@ router.post('/loss-report/rollup',           controller.rollupLossHistory)
  *       - in: query
  *         name: by
  *         schema: { type: string, enum: [stage, equipment, family], default: stage }
+ *       - in: query
+ *         name: ignoreUpperBounds
+ *         schema: { type: boolean, default: false }
+ *         description: Measured loss over measured input only (rows rolled up before lbsInMeasured existed report pct null).
  *     responses:
  *       200: { description: "{ period, points[], totals[], units }" }
  *       400: { description: Bad groupBy/by. }

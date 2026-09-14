@@ -4058,6 +4058,15 @@
               ],
               "default": "stage"
             }
+          },
+          {
+            "in": "query",
+            "name": "ignoreUpperBounds",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Measured loss over measured input only (rows rolled up before lbsInMeasured existed report pct null)."
           }
         ],
         "responses": {
