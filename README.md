@@ -187,6 +187,8 @@ All config funnels through `config/index.js` (dotenv). Everything below is what 
 | `EQUIPMENT_CRON` | `*/5 * * * * *` (5 s) | equipmentJob — 5 s deliberately halves trapezoidal error on the UHT software totalizer |
 | `TICK_CRON` | `*/5 * * * *` (5 min) | issueCompletionJob |
 | `INVENTORY_ADJUSTMENT_CRON` | `*/5 * * * *` (5 min) | inventoryAdjustmentJob — matches the 5-min averaging window used to denoise idle-tank jitter |
+| `LOSS_ROLLUP_CRON` | `40 5 * * *` (05:40 **plant time**) | lossRollupJob — MesLossDaily history, last `LOSS_ROLLUP_DAYS` (3) days; also once at boot (SD-729) |
+| `LOSS_DIGEST_CRON` | `0 6 * * 1` (Mon 06:00 **plant time**) | lossDigestJob — weekly Milk Loss Teams card; posts only when `ENVIRONMENT=prod` **and** `LOSS_DIGEST_ENABLED=true` **and** `MES_DRY_RUN` off (SD-729) |
 
 ### Behavior knobs
 
@@ -198,6 +200,10 @@ All config funnels through `config/index.js` (dotenv). Everything below is what 
 | `MES_WASTE_RESIDUAL_FLOOR_LBS` | `200` | Tank level below this at batch close counts as empty |
 | `MES_WASTE_RISE_FLOOR_LBS` | `20` | Per-tick destination level rise below this is ignored (arrival noise floor) |
 | `MES_WASTE_DROP_FLOOR_LBS` | `20` | **Declared but unreferenced** — Phase-2 placeholder, no consumer anywhere |
+| `LOSS_DIGEST_ENABLED` | `false` (strict `=== 'true'`) | Third gate on the weekly Teams digest (with `ENVIRONMENT=prod` and dry-run off). Absent = safely off; the card is still built and logged (SD-729) |
+| `LOSS_ROLLUP_DAYS` | `3` | Plant days the nightly loss-history rollup recomputes (batches close late / get retried) |
+| `LOSS_REPORT_URL` | `''` | Link placed on the digest card (the SunApps `/mes-loss-report` page) |
+| `PLANT_TZ` | `America/Boise` | Timezone for the two reporting crons and for plant-day bucketing in the loss report |
 | `MES_INFLOW_BACKFILL_LOOKBACK_HOURS` | `18` | How far back a freshly-named blend batch sweeps for `unmatched` inflows |
 | `MES_PARSER_STRICT_MODE` | `false` | Disables fuzzy product parsing (blend + surge); unmatched product strings go to `pending_ns`. Turn on once AVEVA's standardized/constrained inputs are fully rolled out |
 | `BLEND_TANK_OVERRIDES` | `{}` | JSON `{tankId: rawNsItemId}` — bypasses the blend product parser (sandbox scaffolding) |
@@ -241,6 +247,8 @@ All seven are wired identically: `cron.schedule(expr, guarded(name, () => job.ru
 | equipment | `jobs/equipmentJob.js` | 5 s | 10 s | silos + UHTs + surge tanks + routing | **read-only** — statusStore only; also drives UHT totalizer integration cadence and the sticky "UHT→tank" activeFill designation |
 | tick | `jobs/issueCompletionJob.js` | 5 min | 30 s | totalizer deltas via services | many small WO issues + completions (blend pass, then surge pass in its own try/catch) |
 | invAdjust | `jobs/inventoryAdjustmentJob.js` | 5 min | 30 s | silos, blend tanks, lines, UHTs | at-rest sweep → NS inventory adjustments |
+| lossRollup | `jobs/lossRollupJob.js` | daily 05:40 plant | — | none (batch tables only) | **writes only `MesLossDaily`** — persisted Milk Loss history, $ frozen at that morning's prices; registered once at boot outside the replay cron set, tz-pinned (SD-729) |
+| lossDigest | `jobs/lossDigestJob.js` | Mon 06:00 plant | — | none | **read-only** — weekly Teams Adaptive Card via Gateway `POST /internal/notify/teams` (channel `loss`); triple-gated, otherwise logs the card + `lossDigest.dryRun` event (SD-729) |
 
 Job-internal guards worth knowing (constants live at the top of each file): blend `MIN_BATCH_AGE_MS` 2 min (suppresses premature ends, *except* `all_lines_stopped`), `ALL_LINES_STOPPED_IDLE_MS` 5 min, line reset threshold 100 lb; surge `FILL_TICKS_FOR_START = 5`, `FILL_NOISE_GAL = 5`, CIP = state 4 is ineligible; equipment hysteresis `SWITCH_TICKS = 12` / `IDLE_TICKS = 36` (tick *counts*, so wall-time scales with the cron cadence).
 
@@ -318,6 +326,8 @@ The core idea (SD-597 → SD-636): **WO completion is driven by measured arrival
 - Separation: waste = feed − cream − skim over the batch window (baselined totalizers). Waste % > 5 (`WASTE_ALERT_THRESHOLD`) logs an alert event (console + statusStore only — Teams is off).
 - `wastePercent` is only computed when input/issued ≥ 10 lb and is clamped to ±999999.99 (sensor-glitch overflow protection — this literally overflowed a DECIMAL(5,2) once).
 
+**Milk Loss executive report (SD-729, `services/lossReportService.js`)** rolls the three batch tables up for leadership and is deliberately stricter than the analytics tabs: (1) every surge figure is split into a **measured** part and an **upper-bound-only** part (`wasteLbs = wasteLbsMeasured + wasteLbsUpperBoundOnly`) using the same fully-metered predicate as batch close (`concurrentFillDrain=0`, or every concurrent tick metered on line 1); the measured figure is `issued − COALESCE(outputWithDrainLbs, output)`, which is right whether `MES_METERED_DRAIN` is on or off; (2) closed batches with < 100 lb issued are **unaccounted** production (listed, never counted as zero loss); (3) families without a price row are reported as **unpriced pounds** — no global fallback; (4) lost FG revenue is shown as opportunity and never added; (5) `MesInventoryAdjustments` is never read (the sweep↔shortfall loop makes it noise); (6) pounds are canonical, `units.lbsPerGal` (= `mesItemConfig.LBS_PER_GAL`, 8.6) is published for display-only gallons; (7) batches are attributed to the plant-local (America/Boise) day they **closed**, weeks start Monday. Separation batches carry the HMI product index in `itemId` (15/16/21…), so family classification there goes through `PRODUCT_INDEX_ITEM_MAP` (`familyCaseExpr({ indexCols })`).
+
 The analytics layer folds *exact-linked* inventory adjustments into a batch's holistic waste: `wasteWithAdjLbs = issued + exactNetLbs − completed`. Fuzzy-linked sweep adjustments are shown but deliberately **not** folded in (a silo sweep spans many batches; folding it into one would overstate).
 
 ## 11. Inventory adjustments, sweeps & correlation
@@ -349,6 +359,7 @@ Sequelize models in `models/`, one file per table, **zero associations** — all
 | `MesBulkMilkRuns` | `MesBulkMilkRun` | Legacy manual bulk-milk WOs |
 | `MesProcessingLog` | `MesProcessingLog` | Append-only log of every NS POST attempt with full payload + response (singular table name; no indexes) |
 | `MesRuntimeConfigs` | `MesRuntimeConfig` | **Single row, id=1**: `replayMode`, `simStart`, `speedup`, `replayCronsJson` |
+| `MesLossDaily` | `MesLossDaily` | **Persisted Milk Loss history (SD-729)**: one row per plant-local close *day* × stage (`separation`/`blend`/`surge`; v2 adds `received`/`packaging`) × equipment × raw-milk family — `lbsIn`, `wasteLbs = wasteMeasuredLbs + wasteUpperBoundLbs`, `wasteUsd` **frozen at the `pricePerLb` in effect at rollup**, `lostRevenueUsd`, batch/unmeasured/zero-issued counts, `heldLbs`. **Unique** `(day, stage, equipment, family)`. Written by `lossRollupJob` (delete-and-reinsert per day, idempotent), `POST /api/mes/analytics/loss-report/rollup` and `scripts/backfillLossDaily.js`; read by `GET /loss-history`. Born in 1.0.13 → created by `sync()`; later columns need an `ensureRuntimeSchema` block |
 
 **Schema evolution:** there is no migration tool. `sequelize.sync()` creates *new* tables only; every column/index added after a table first shipped has an idempotent guarded DDL block in `db.ensureRuntimeSchema()` (`models/index.js`) — `IF NOT EXISTS(sys.columns…) ALTER TABLE ADD`, widen-column guards, `sys.indexes` guards. When you add a model column, **you must also add its block there** or existing deployments never get it. DEFAULT-constraint names must be prefixed (`DF_${P}Table_col`) or dev/prod collide in the shared DB.
 
@@ -458,6 +469,8 @@ Separation review: `GET /separation/batches?status=`, `GET /separation/product-i
 ### `/api/mes/analytics` (`routes/analyticsRoutes.js`)
 Filtered/paged/sorted (whitelisted sort fields, limit cap 500): `GET /blend-batches`, `/surge-batches`, `/separation-batches`, `/inventory-adjustments` (supports `excludePositiveSilo`), each with a `/-trend` rollup; `GET /inventory-adjustments/correlations`; `GET /batches-with-adjustments` (holistic waste incl. exact-linked adjustments); `GET /batches/:kind/:id` (drilldown) and `GET /batches/:kind/:id/netsuite` (live SuiteQL source-of-truth pull); `POST /inventory-adjustments/:id/retry|reject`.
 
+**Milk Loss executive report (SD-729):** `GET /loss-report?from&to&groupBy=day|week&compare=true` → `{ period, prior, headline, stages[], byEquipment[], byFamily[], byProduct[], topEvents[], trend[], unaccounted, insights[], pricing, units }` — the whole executive page in one call (defaults to the 7 whole plant days ending yesterday; bare `YYYY-MM-DD` dates are plant days, `to` inclusive; 400 on `to<=from` or > 400 days). `GET /loss-history?from&to&groupBy=day|week|month&by=stage|equipment|family` → frozen history from `MesLossDaily` (default last 26 weeks). `POST /loss-report/rollup?from&to` → recompute the history for a day range at current prices. `GET /loss-report/digest-preview` → the exact Teams card the weekly digest would post plus `wouldPost`. See §10 for the honesty rules the numbers follow.
+
 ### `/api/mes/dev/replay` (`routes/devRoutes.js`)
 `GET /status`, `POST /enable|disable|config|pause|resume|reset` — see §14.
 
@@ -522,6 +535,7 @@ docs/                      historian-api.md, PROJECT_OVERVIEW.md
 - **Recovery / backfill / cleanup** (~14) — incident tooling: `recoverBlendTank2AFill.js`, `retryFailedUnbuilds.js`, `cleanupPhantomTankBatches.js`, `fixSurgeIssueBaselines.js`, `fixCircularBom.js`; twin-item rollout: `createBatchTwin.js`, `attachBatchBom.js`, `rolloutBatchTwins.js`, `enableBinTrackingOnTwins.js`.
 - **Verification / audit** (~10) — `verifyNsReferences.js` (validates every hardcoded NS id against the live account — run after any NS data change), `verifyAdjustmentCorrelations.js`, `auditWipAccount.js`, `dryRunSweepTick.js` (forces dry-run, then runs one sweep tick).
 - **Catalog dumps** — `discoverTags.js` → `scripts/all-tags.json`; `exportNsItemSpec.js` → `ns-item-spec.json`.
+- **Milk Loss report (SD-729)** — `probeLossReport.js <fromDay> <toDayExcl> [--json]` runs the report against whichever table set `ENVIRONMENT` selects (read-only, no sync) **and** an independent T-SQL cross-check, exiting non-zero on any mismatch — the way to see prod-shaped numbers without the app; `backfillLossDaily.js --from YYYY-MM-DD [--to] [--confirm]` re-computes `MesLossDaily` for a range at current prices (dry-run by default).
 
 Rule of thumb: anything that *writes* to NS has a `dryRun`/`commit` split or forces `MES_DRY_RUN` — keep that convention.
 

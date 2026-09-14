@@ -353,8 +353,17 @@ function clearCaches() {
   for (const k of Object.keys(_resolvedItemCache)) delete _resolvedItemCache[k]
 }
 
+// The ONE gallons↔pounds factor the MES accounts with (SD-729). UHT/surge
+// totalizers and the Filler 1 inlet meter are gallons; NetSuite WO lines and
+// every batch table are pounds. A single whole/low-fat estimate is used on
+// purpose — UHT throughput is mixed during product changes and the mass
+// balance does not need per-product density. Pounds are canonical; the
+// loss report publishes this so both UIs convert to gallons identically.
+const LBS_PER_GAL = 8.6
+
 module.exports = {
   clearCaches,
+  LBS_PER_GAL,
   SEPARATION_BOM_MAP,
   getSeparationBomId,
   normalizeSkimIndex,

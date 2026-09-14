@@ -219,16 +219,26 @@ async function syncTick() {
 // ── SQL expression for aggregate lost-revenue ───────────────────────────────
 
 /**
+ * CASE literal yielding the lost-revenue $/lb for a row's mesItem, or NULL
+ * when the item is unpriced. Values are our own DECIMAL rows and constant
+ * ids — no request input. Returns null when no rates exist at all.
+ */
+function revenuePerLbCaseExpr(rates, { col = 'mesItem' } = {}) {
+  const branches = Object.entries(rates)
+    .map(([id, r]) => `WHEN [${col}] = '${String(id).replace(/'/g, '')}' THEN ${Number(r.revenuePerLb)}`)
+  if (!branches.length) return null
+  return `CASE ${branches.join(' ')} ELSE NULL END`
+}
+
+/**
  * SUM(wasteLbs * CASE mesItem …) literal for the analytics summary. No
  * global fallback — unpriced items contribute NULL (dropped by SUM), so the
- * total only covers priced batches. Values are our own DECIMAL rows and
- * constant ids — no request input. Returns null when no rates exist.
+ * total only covers priced batches. Returns null when no rates exist.
  */
 function lostRevenueCaseExpr(rates, { wasteCol = 'wasteLbs' } = {}) {
-  const branches = Object.entries(rates)
-    .map(([id, r]) => `WHEN [mesItem] = '${String(id).replace(/'/g, '')}' THEN ${Number(r.revenuePerLb)}`)
-  if (!branches.length) return null
-  return `SUM([${wasteCol}] * CASE ${branches.join(' ')} ELSE NULL END)`
+  const caseExpr = revenuePerLbCaseExpr(rates)
+  if (caseExpr == null) return null
+  return `SUM([${wasteCol}] * ${caseExpr})`
 }
 
 module.exports = {
@@ -241,5 +251,6 @@ module.exports = {
   appendManual,
   syncTick,
   lostRevenueCaseExpr,
+  revenuePerLbCaseExpr,
   clearCache,
 }

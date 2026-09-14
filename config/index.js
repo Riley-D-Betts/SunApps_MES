@@ -88,6 +88,22 @@ module.exports = {
   // overnight posting settles. Also runs once at boot, so this cadence only
   // governs how quickly a mid-day NS price change is picked up.
   PRICE_SYNC_CRON: cronEnv('PRICE_SYNC_CRON', '10 5 * * *'),
+  // Milk Loss report (SD-729). The daily MesLossDaily rollup runs after
+  // priceSync so the frozen $ use that morning's prices; it re-does the last
+  // LOSS_ROLLUP_DAYS plant days because batches close late / get retried.
+  // Both crons below are pinned to PLANT_TZ in server.js (the only tz-pinned
+  // crons in the app) and are registered once at boot, outside the replay
+  // cron set — a replay toggle must not disturb reporting.
+  LOSS_ROLLUP_CRON: cronEnv('LOSS_ROLLUP_CRON', '40 5 * * *'),
+  LOSS_ROLLUP_DAYS: parseInt(process.env.LOSS_ROLLUP_DAYS || '3', 10) || 3,
+  // Weekly executive digest — Monday 06:00 plant time, last ISO week, Teams
+  // card via the Gateway. Posts ONLY when ENVIRONMENT=prod AND
+  // LOSS_DIGEST_ENABLED=true AND MES_DRY_RUN is off; otherwise it logs the
+  // card (see jobs/lossDigestJob.js). Absent/false = safely off.
+  LOSS_DIGEST_CRON: cronEnv('LOSS_DIGEST_CRON', '0 6 * * 1'),
+  LOSS_DIGEST_ENABLED: process.env.LOSS_DIGEST_ENABLED === 'true',
+  LOSS_REPORT_URL: process.env.LOSS_REPORT_URL || '',
+  PLANT_TZ: process.env.PLANT_TZ || 'America/Boise',
   // Trailing window for the qty-weighted purchase-price average. 30d per
   // Andrew (2026-09-02). Sandbox NS (dev) can lag a refresh by months — widen
   // this on dev if derived prices come up empty.

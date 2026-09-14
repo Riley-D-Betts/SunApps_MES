@@ -55,6 +55,13 @@ function sendStagingNotification(title, message) {
   return request('POST', '/internal/notify/staging', { title, message })
 }
 
+// Channel-keyed Teams Adaptive Card (SD-729). The Gateway maps `channel` to
+// a webhook (TEAMS_<CHANNEL>_HOOK) and answers { ok:true, skipped:true } when
+// that hook is unset — so an unconfigured environment is a silent no-op.
+function sendTeamsCard({ channel, title, subtitle, facts, lines, link }) {
+  return request('POST', '/internal/notify/teams', { channel, title, subtitle, facts, lines, link })
+}
+
 module.exports = {
   netsuiteGet,
   netsuitePost,
@@ -62,4 +69,5 @@ module.exports = {
   suiteQL,
   callRestlet,
   sendStagingNotification,
+  sendTeamsCard,
 }

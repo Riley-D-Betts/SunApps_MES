@@ -15,6 +15,8 @@ const equipmentJob = require('./jobs/equipmentJob')
 const issueCompletionJob = require('./jobs/issueCompletionJob')
 const inventoryAdjustmentJob = require('./jobs/inventoryAdjustmentJob')
 const priceSyncJob = require('./jobs/priceSyncJob')
+const lossRollupJob = require('./jobs/lossRollupJob')
+const lossDigestJob = require('./jobs/lossDigestJob')
 const statusStore = require('./services/statusStore')
 const runtimeConfigService = require('./services/runtimeConfigService')
 const historianRoutes = require('./routes/historianRoutes')
@@ -173,6 +175,16 @@ sequelize.sync().then(async () => {
   await runtimeConfigService.load()
   reconcileMode(runtimeConfigService.get())
   runtimeConfigService.onChange(reconcileMode)
+
+  // Reporting crons (SD-729) live OUTSIDE cronTasks/applyCrons on purpose:
+  // a replay toggle rebuilds every cronTasks entry from the replay cron set
+  // (and DEFAULT_REPLAY_CRONS would need a key for each), while these two
+  // must simply keep running on the plant clock. They are the only crons in
+  // the app pinned to a timezone — the batch-polling crons are cadence-only.
+  cron.schedule(config.LOSS_ROLLUP_CRON, guarded('lossRollup', () => lossRollupJob.run()), { timezone: config.PLANT_TZ })
+  cron.schedule(config.LOSS_DIGEST_CRON, guarded('lossDigest', () => lossDigestJob.run()), { timezone: config.PLANT_TZ })
+  // Boot rollup so a freshly deployed instance already has yesterday's rows.
+  lossRollupJob.run().catch(() => {})
 
   // Prices at boot — a fresh deploy shouldn't wait for the 5 AM cron. run()
   // swallows its own errors (a dead gateway must never block startup).

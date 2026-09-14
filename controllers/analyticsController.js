@@ -3,6 +3,8 @@
 const analyticsService = require('../services/analyticsService')
 const inventoryAdjustmentService = require('../services/inventoryAdjustmentService')
 const adjustmentCorrelationService = require('../services/adjustmentCorrelationService')
+const lossReportService = require('../services/lossReportService')
+const lossDigestJob = require('../jobs/lossDigestJob')
 
 function pick(obj, keys) {
   const out = {}
@@ -185,5 +187,54 @@ exports.getInventoryAdjustmentTrend = async (req, res) => {
   } catch (err) {
     console.error('[analyticsController] inventory adjustment trend:', err)
     return res.status(500).json({ success: false, error: err.message })
+  }
+}
+
+// ── Milk Loss executive report (SD-729) ──────────────────────────────────────
+
+function fail(res, label, err) {
+  const status = err.status && err.status >= 400 && err.status < 500 ? err.status : 500
+  if (status === 500) console.error(`[analyticsController] ${label}:`, err)
+  return res.status(status).json({ success: false, error: err.message })
+}
+
+exports.getLossReport = async (req, res) => {
+  try {
+    const params = pick(req.query, ['from', 'to', 'groupBy', 'compare'])
+    const report = await lossReportService.getLossReport(params)
+    return res.json({ success: true, ...report })
+  } catch (err) {
+    return fail(res, 'loss report', err)
+  }
+}
+
+exports.getLossHistory = async (req, res) => {
+  try {
+    const params = pick(req.query, ['from', 'to', 'groupBy', 'by'])
+    const history = await lossReportService.getLossHistory(params)
+    return res.json({ success: true, ...history })
+  } catch (err) {
+    return fail(res, 'loss history', err)
+  }
+}
+
+exports.rollupLossHistory = async (req, res) => {
+  try {
+    const { from, to } = { ...req.query, ...(req.body || {}) }
+    if (!from || !to) return res.status(400).json({ success: false, error: 'from and to (YYYY-MM-DD plant days, inclusive) are required' })
+    const result = await lossReportService.rollupDaily({ fromDay: String(from).slice(0, 10), toDay: String(to).slice(0, 10) })
+    return res.json({ success: true, ...result })
+  } catch (err) {
+    return fail(res, 'loss rollup', err)
+  }
+}
+
+exports.getLossDigestPreview = async (req, res) => {
+  try {
+    const params = pick(req.query, ['from', 'to'])
+    const preview = await lossDigestJob.preview(params)
+    return res.json({ success: true, ...preview })
+  } catch (err) {
+    return fail(res, 'loss digest preview', err)
   }
 }
