@@ -41,6 +41,11 @@ db.ensureRuntimeSchema = async function () {
        AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lostRevenueMeasuredUsd' AND Object_ID = Object_ID(N'${P}MesLossDaily'))
       ALTER TABLE ${P}MesLossDaily ADD lostRevenueMeasuredUsd DECIMAL(14,2) NULL;
   `)
+  await sequelize.query(`
+    IF OBJECT_ID(N'${P}MesLossDaily') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lbsInMeasured' AND Object_ID = Object_ID(N'${P}MesLossDaily'))
+      ALTER TABLE ${P}MesLossDaily ADD lbsInMeasured DECIMAL(14,2) NULL;
+  `)
 
   // ${P}MesBlendTankBatches: tick-driven cumulative totals + last-fire timestamps
   await sequelize.query(`

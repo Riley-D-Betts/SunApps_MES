@@ -47,6 +47,13 @@ module.exports = (sequelize, DataTypes) => {
       type: DataTypes.DECIMAL(14, 2),
       allowNull: false,
     },
+    // Input lb of the batches whose loss is MEASURED (excludes upper-bound-only
+    // batches) — the denominator for "Ignore upper bounds". Null on rows rolled
+    // up before 1.0.13's SD-722 follow-up; re-run the rollup to fill it.
+    lbsInMeasured: {
+      type: DataTypes.DECIMAL(14, 2),
+      allowNull: true,
+    },
     // Best estimate: measured batches at measured waste + unmeasurable batches
     // at their upper bound. wasteLbs = wasteMeasuredLbs + wasteUpperBoundLbs.
     wasteLbs: {

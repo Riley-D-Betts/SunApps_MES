@@ -117,6 +117,10 @@ const bucketStr = expr => `CONVERT(varchar(10), ${expr}, 23)`
 
 // ── Window parsing ──────────────────────────────────────────────────────────
 
+function truthyParam(v) {
+  return v === true || v === 'true' || v === '1' || v === 1
+}
+
 function parseWindow({ from, to, groupBy = 'week' } = {}) {
   if (!['day', 'week'].includes(groupBy)) {
     const err = new Error(`groupBy must be day or week (got ${groupBy})`); err.status = 400; throw err
@@ -194,7 +198,7 @@ async function querySurge({ from, to, groupBy }, ctx) {
              ${ctx.revCase('mesItem')} AS revRate
       FROM b
     )
-    SELECT ${bucketStr(bucketExpr(groupBy, 'localDt'))} AS bucket, [tankId] AS equipment, [feedingUhtId] AS grp, family, [productName], [mesItem],
+    SELECT ${bucketStr(bucketExpr(groupBy, 'localDt'))} AS bucket, [tankId] AS equipment, [feedingUhtId] AS grp, family, [productName], [mesItem], measurable,
            COUNT(*) AS batches, SUM(issued) AS lbsIn,
            SUM(COALESCE(wasteMeasured, wasteUpper)) AS wasteLbs,
            SUM(COALESCE(wasteMeasured, 0)) AS wasteMeasuredLbs,
@@ -208,7 +212,7 @@ async function querySurge({ from, to, groupBy }, ctx) {
            SUM(CASE WHEN revRate IS NULL THEN COALESCE(wasteMeasured, wasteUpper) ELSE 0 END) AS unpricedRevenueLbs,
            MAX(price) AS pricePerLb, MAX(revRate) AS revenuePerLb
     FROM c
-    GROUP BY ${bucketExpr(groupBy, 'localDt')}, [tankId], [feedingUhtId], family, [productName], [mesItem]
+    GROUP BY ${bucketExpr(groupBy, 'localDt')}, [tankId], [feedingUhtId], family, [productName], [mesItem], measurable
   `
   const rows = await query(sql, { from, to })
   return rows.map(r => ({ stage: 'surge', ...r }))
@@ -232,7 +236,7 @@ async function queryBlend({ from, to, groupBy }, ctx) {
              ${ctx.revCase('mesItem')} AS revRate
       FROM b
     )
-    SELECT ${bucketStr(bucketExpr(groupBy, 'localDt'))} AS bucket, [tankId] AS equipment, NULL AS grp, family, [productName], [mesItem],
+    SELECT ${bucketStr(bucketExpr(groupBy, 'localDt'))} AS bucket, [tankId] AS equipment, NULL AS grp, family, [productName], [mesItem], 1 AS measurable,
            COUNT(*) AS batches, SUM(issued) AS lbsIn,
            SUM(waste) AS wasteLbs, SUM(waste) AS wasteMeasuredLbs, 0 AS wasteUpperBoundLbs, 0 AS unmeasuredBatches,
            SUM(waste * price) AS wasteUsd, SUM(waste * price) AS wasteMeasuredUsd,
@@ -265,7 +269,7 @@ async function querySeparation({ from, to, groupBy }, ctx) {
              ${ctx.priceCaseIdx(cols)} AS price
       FROM b
     )
-    SELECT ${bucketStr(bucketExpr(groupBy, 'localDt'))} AS bucket, [sourceSilo] AS equipment, NULL AS grp, family, NULL AS productName, [itemId] AS mesItem,
+    SELECT ${bucketStr(bucketExpr(groupBy, 'localDt'))} AS bucket, [sourceSilo] AS equipment, NULL AS grp, family, NULL AS productName, [itemId] AS mesItem, 1 AS measurable,
            SUM(CASE WHEN held = 0 THEN 1 ELSE 0 END) AS batches,
            SUM(CASE WHEN held = 0 THEN feed ELSE 0 END) AS lbsIn,
            SUM(CASE WHEN held = 0 THEN ${max0('waste')} ELSE 0 END) AS wasteLbs,
@@ -295,6 +299,9 @@ async function computeStages(win, ctx) {
   const [surge, blend, sep] = await Promise.all([querySurge(win, ctx), queryBlend(win, ctx), querySeparation(win, ctx)])
   return [...surge, ...blend, ...sep].map(r => ({
     stage: r.stage,
+    // false = every batch in this group has only an upper-bound loss (concurrent
+    // fill+drain not fully metered). Used by ignoreUpperBounds and lbsInMeasured.
+    measurable: Number(r.measurable) === 1,
     bucket: toDayString(r.bucket),
     equipment: r.equipment || 'unknown',
     group: r.grp || null,
@@ -330,11 +337,12 @@ function toDayString(v) {
 // ── Roll-ups ────────────────────────────────────────────────────────────────
 
 function emptyAgg() {
-  return { batches: 0, lbsIn: 0, wasteLbs: 0, wasteMeasuredLbs: 0, wasteUpperBoundLbs: 0, unmeasuredBatches: 0,
+  return { batches: 0, lbsIn: 0, lbsInMeasured: 0, batchesMeasured: 0, wasteLbs: 0, wasteMeasuredLbs: 0, wasteUpperBoundLbs: 0, unmeasuredBatches: 0,
     wasteUsd: 0, wasteMeasuredUsd: 0, unpricedLbs: 0, lostRevenueUsd: 0, lostRevenueMeasuredUsd: 0, unpricedRevenueLbs: 0, heldCount: 0, heldLbs: 0, negativeBalanceCount: 0 }
 }
 function addInto(agg, r) {
   agg.batches += r.batches; agg.lbsIn += r.lbsIn
+  if (r.measurable) { agg.lbsInMeasured += r.lbsIn; agg.batchesMeasured += r.batches }
   agg.wasteLbs += r.wasteLbs; agg.wasteMeasuredLbs += r.wasteMeasuredLbs; agg.wasteUpperBoundLbs += r.wasteUpperBoundLbs
   agg.unmeasuredBatches += r.unmeasuredBatches
   agg.wasteUsd += num(r.wasteUsd); agg.wasteMeasuredUsd += num(r.wasteMeasuredUsd)
@@ -377,6 +385,20 @@ function finish(a) {
     pct: a.lbsIn > 0 ? round2((a.wasteLbs / a.lbsIn) * 100) : null,
     measuredShare: a.wasteLbs > 0 ? round2(a.wasteMeasuredLbs / a.wasteLbs) : 1,
     confidence: confidenceOf(a),
+  }
+}
+
+/** What "Ignore upper bounds" leaves out: batches whose loss is upper-bound only. Always computed. */
+function summariseExcluded(rows) {
+  const out = rows.filter(r => !r.measurable)
+  const a = out.reduce((acc, r) => addInto(acc, r), emptyAgg())
+  return {
+    batches: a.batches,
+    lbsIn: round2(a.lbsIn),
+    wasteLbsUpperBound: round2(a.wasteLbs),
+    wasteUsdUpperBound: round2(a.wasteUsd),
+    lostRevenueUsdUpperBound: round2(a.lostRevenueUsd),
+    equipment: [...new Set(out.map(r => r.equipment))].sort(),
   }
 }
 
@@ -539,7 +561,7 @@ function buildTrend(rows) {
 
 // ── Top events + unaccounted (per-batch queries) ────────────────────────────
 
-async function queryTopEvents({ from, to }, ctx, limit = 10) {
+async function queryTopEvents({ from, to }, ctx, { limit = 10, measuredOnly = false } = {}) {
   const surgeCols = ['componentItemId', 'mesItem']
   const sql = `
     SELECT TOP ${limit} * FROM (
@@ -575,7 +597,7 @@ async function queryTopEvents({ from, to }, ctx, limit = 10) {
       WHERE [status] IN ('completed', 'error') AND [inputVolume] > 0
         AND COALESCE([batchEnd],[createdAt]) >= :from AND COALESCE([batchEnd],[createdAt]) < :to
     ) x
-    WHERE lbs > 0
+    WHERE lbs > 0 ${measuredOnly ? 'AND measured = 1' : ''}
     ORDER BY lbs * COALESCE(price, 0) DESC, lbs DESC
   `
   const rows = await query(sql, { from, to })
@@ -699,10 +721,17 @@ function buildInsights({ headline, stages, byEquipment, byProduct, byFamily, tre
 
 async function getLossReport(params = {}) {
   const win = parseWindow(params)
-  const compare = params.compare === true || params.compare === 'true' || params.compare === '1'
+  const compare = truthyParam(params.compare)
+  // "Ignore upper bounds" (Andrew, 2026-09-14): drop every batch whose loss is
+  // only an upper bound — its input pounds as well as its loss, so the loss %
+  // is measured-over-measured rather than measured-over-everything. What was
+  // dropped is always reported in `excluded`.
+  const ignoreUpperBounds = truthyParam(params.ignoreUpperBounds)
   const ctx = await pricingContext()
 
-  const rows = await computeStages({ from: win.from, to: win.to, groupBy: win.groupBy }, ctx)
+  const allRows = await computeStages({ from: win.from, to: win.to, groupBy: win.groupBy }, ctx)
+  const excluded = summariseExcluded(allRows)
+  const rows = ignoreUpperBounds ? allRows.filter(r => r.measurable) : allRows
   const stages = buildStages(rows)
   const headline = buildHeadline(rows, stages)
   const byEquipment = buildByEquipment(rows)
@@ -711,7 +740,7 @@ async function getLossReport(params = {}) {
   const trend = buildTrend(rows)
 
   const [topEvents, zeroIssued] = await Promise.all([
-    queryTopEvents(win, ctx),
+    queryTopEvents(win, ctx, { measuredOnly: ignoreUpperBounds }),
     queryUnaccounted(win, ctx),
   ])
   const sepAgg = rows.filter(r => r.stage === 'separation').reduce((a, r) => addInto(a, r), emptyAgg())
@@ -724,14 +753,15 @@ async function getLossReport(params = {}) {
     unpricedFamilies: byFamily.filter(f => !f.priced && f.wasteLbs > 0).map(f => ({ family: f.family, lbs: f.wasteLbs })),
     // Products with no FG revenue rate (their lb are in the cost figure but not the revenue one).
     unpricedRevenueProducts: byProduct.filter(p => p.stage !== 'separation' && p.wasteLbs > 0 && p.lostRevenueUsd == null).map(p => ({ product: p.productName, stage: p.stage, lbs: p.wasteLbs })),
-    unmeteredSurgeTanks: byEquipment.filter(e => e.stage === 'surge' && e.measuredShare < 1).map(e => e.equipment),
+    unmeteredSurgeTanks: [...new Set(allRows.filter(r => r.stage === 'surge' && !r.measurable).map(r => r.equipment))],
   }
 
   let prior = null
   if (compare) {
     const len = win.to - win.from
     const pw = { from: new Date(win.from.getTime() - len), to: win.from, groupBy: win.groupBy }
-    const prows = await computeStages(pw, ctx)
+    const prowsAll = await computeStages(pw, ctx)
+    const prows = ignoreUpperBounds ? prowsAll.filter(r => r.measurable) : prowsAll
     const pstages = buildStages(prows)
     const pheadline = buildHeadline(prows, pstages)
     prior = { period: { from: pw.from.toISOString(), to: pw.to.toISOString() }, headline: pheadline, stages: pstages }
@@ -746,6 +776,10 @@ async function getLossReport(params = {}) {
   }
 
   const insights = buildInsights({ headline, stages, byEquipment, byProduct, byFamily, trend, unaccounted, prior })
+  if (ignoreUpperBounds && excluded.batches > 0) {
+    insights.unshift({ kind: 'upper-bounds-excluded', usd: excluded.wasteUsdUpperBound,
+      text: `Upper bounds ignored: ${excluded.batches} batch(es) whose loss could only be estimated are left out — ${fmtLbs(excluded.lbsIn)} of milk in and up to ${fmtUsd(excluded.wasteUsdUpperBound)} (cost) / ${fmtUsd(excluded.lostRevenueUsdUpperBound)} (revenue) of loss. Every figure on this page is measured.` })
+  }
   const chain = buildChain(stages)
   const unmeasuredSteps = chain.filter(c => c.status === 'not-measured').map(c => c.label)
   if (unmeasuredSteps.length) {
@@ -754,7 +788,8 @@ async function getLossReport(params = {}) {
   }
 
   return {
-    period: { from: win.from.toISOString(), to: win.to.toISOString(), days: round2(win.days), groupBy: win.groupBy, tz: plantTime.PLANT_TZ },
+    period: { from: win.from.toISOString(), to: win.to.toISOString(), days: round2(win.days), groupBy: win.groupBy, tz: plantTime.PLANT_TZ, ignoreUpperBounds },
+    excluded,
     prior,
     headline,
     stages,
@@ -813,7 +848,7 @@ async function rollupDaily({ fromDay, toDay }) {
   const computedAt = new Date()
   const records = [...keyed.values()].map(k => ({
     day: k.day, stage: k.stage, equipment: k.equipment, equipmentGroup: k.equipmentGroup || null, family: k.family,
-    lbsIn: round2(k.agg.lbsIn), wasteLbs: round2(k.agg.wasteLbs), wasteMeasuredLbs: round2(k.agg.wasteMeasuredLbs), wasteUpperBoundLbs: round2(k.agg.wasteUpperBoundLbs),
+    lbsIn: round2(k.agg.lbsIn), lbsInMeasured: round2(k.agg.lbsInMeasured), wasteLbs: round2(k.agg.wasteLbs), wasteMeasuredLbs: round2(k.agg.wasteMeasuredLbs), wasteUpperBoundLbs: round2(k.agg.wasteUpperBoundLbs),
     wasteUsd: k.pricePerLb != null ? round2(k.agg.wasteUsd) : null,
     wasteMeasuredUsd: k.pricePerLb != null ? round2(k.agg.wasteMeasuredUsd) : null,
     lostRevenueUsd: k.stage === 'separation' || !revenueRated(k.agg) ? null : round2(k.agg.lostRevenueUsd),
@@ -831,7 +866,8 @@ async function rollupDaily({ fromDay, toDay }) {
 }
 
 /** Frozen history from MesLossDaily, bucketed by day|week|month and split by stage|equipment|family. */
-async function getLossHistory({ from, to, groupBy = 'week', by = 'stage' } = {}) {
+async function getLossHistory({ from, to, groupBy = 'week', by = 'stage', ignoreUpperBounds: ignoreParam } = {}) {
+  const ignoreUpperBounds = truthyParam(ignoreParam)
   if (!['day', 'week', 'month'].includes(groupBy)) { const err = new Error('groupBy must be day, week or month'); err.status = 400; throw err }
   if (!['stage', 'equipment', 'family'].includes(by)) { const err = new Error('by must be stage, equipment or family'); err.status = 400; throw err }
   const fromDay = from ? String(from).slice(0, 10) : plantTime.addPlantDays(plantTime.plantDateString(), -182)
@@ -839,7 +875,7 @@ async function getLossHistory({ from, to, groupBy = 'week', by = 'stage' } = {})
   const dim = by === 'stage' ? '[stage]' : by === 'equipment' ? "[stage] + '|' + [equipment]" : '[family]'
   const sql = `
     SELECT ${bucketStr(bucketExpr(groupBy, '[day]'))} AS bucket, ${dim} AS series,
-           SUM([lbsIn]) AS lbsIn, SUM([wasteLbs]) AS wasteLbs, SUM([wasteMeasuredLbs]) AS wasteMeasuredLbs, SUM([wasteUpperBoundLbs]) AS wasteUpperBoundLbs,
+           SUM([lbsIn]) AS lbsIn, SUM([lbsInMeasured]) AS lbsInMeasured, SUM([wasteLbs]) AS wasteLbs, SUM([wasteMeasuredLbs]) AS wasteMeasuredLbs, SUM([wasteUpperBoundLbs]) AS wasteUpperBoundLbs,
            SUM([wasteUsd]) AS wasteUsd, SUM([wasteMeasuredUsd]) AS wasteMeasuredUsd, SUM([lostRevenueUsd]) AS lostRevenueUsd, SUM([lostRevenueMeasuredUsd]) AS lostRevenueMeasuredUsd,
            SUM(CASE WHEN [pricePerLb] IS NULL THEN [wasteLbs] ELSE 0 END) AS unpricedLbs,
            SUM([batchCount]) AS batches, SUM([unmeasuredBatchCount]) AS unmeasuredBatches, SUM([zeroIssuedCount]) AS zeroIssued, SUM([heldLbs]) AS heldLbs,
@@ -850,14 +886,23 @@ async function getLossHistory({ from, to, groupBy = 'week', by = 'stage' } = {})
     ORDER BY ${bucketExpr(groupBy, '[day]')}, ${dim}
   `
   const rows = await query(sql, { fromDay, toDay })
-  const points = rows.map(r => ({
-    bucket: toDayString(r.bucket), series: r.series,
-    lbsIn: round2(r.lbsIn), wasteLbs: round2(r.wasteLbs), wasteLbsMeasured: round2(r.wasteMeasuredLbs), wasteLbsUpperBound: round2(r.wasteUpperBoundLbs),
-    wasteUsd: round2(r.wasteUsd), wasteUsdMeasured: round2(r.wasteMeasuredUsd), lostRevenueUsd: round2(r.lostRevenueUsd), lostRevenueUsdMeasured: round2(r.lostRevenueMeasuredUsd), unpricedLbs: round2(r.unpricedLbs),
-    pct: num(r.lbsIn) > 0 ? round2((num(r.wasteLbs) / num(r.lbsIn)) * 100) : null,
-    batches: num(r.batches), unmeasuredBatches: num(r.unmeasuredBatches), zeroIssued: num(r.zeroIssued), heldLbs: round2(r.heldLbs),
-    computedAt: r.computedAt instanceof Date ? r.computedAt.toISOString() : r.computedAt,
-  }))
+  // ignoreUpperBounds: measured loss over measured input only. Rows rolled up
+  // before lbsInMeasured existed have it NULL → those buckets get pct null.
+  const points = rows.map(r => {
+    const lbsIn = ignoreUpperBounds ? (r.lbsInMeasured != null ? round2(r.lbsInMeasured) : null) : round2(r.lbsIn)
+    const wasteLbs = ignoreUpperBounds ? round2(r.wasteMeasuredLbs) : round2(r.wasteLbs)
+    return {
+      bucket: toDayString(r.bucket), series: r.series,
+      lbsIn, wasteLbs, wasteLbsMeasured: round2(r.wasteMeasuredLbs), wasteLbsUpperBound: ignoreUpperBounds ? 0 : round2(r.wasteUpperBoundLbs),
+      wasteUsd: ignoreUpperBounds ? round2(r.wasteMeasuredUsd) : round2(r.wasteUsd), wasteUsdMeasured: round2(r.wasteMeasuredUsd),
+      lostRevenueUsd: ignoreUpperBounds ? round2(r.lostRevenueMeasuredUsd) : round2(r.lostRevenueUsd), lostRevenueUsdMeasured: round2(r.lostRevenueMeasuredUsd),
+      unpricedLbs: round2(r.unpricedLbs),
+      pct: lbsIn > 0 ? round2((wasteLbs / lbsIn) * 100) : null,
+      batches: ignoreUpperBounds ? num(r.batches) - num(r.unmeasuredBatches) : num(r.batches),
+      unmeasuredBatches: num(r.unmeasuredBatches), zeroIssued: num(r.zeroIssued), heldLbs: round2(r.heldLbs),
+      computedAt: r.computedAt instanceof Date ? r.computedAt.toISOString() : r.computedAt,
+    }
+  })
   // Totals per bucket across series, for the headline line of a chart.
   const totals = new Map()
   for (const p of points) {
@@ -866,10 +911,10 @@ async function getLossHistory({ from, to, groupBy = 'week', by = 'stage' } = {})
     t.wasteUsd = round2(t.wasteUsd + p.wasteUsd); t.wasteUsdMeasured = round2(t.wasteUsdMeasured + p.wasteUsdMeasured)
     t.lostRevenueUsd = round2(t.lostRevenueUsd + p.lostRevenueUsd); t.lostRevenueUsdMeasured = round2(t.lostRevenueUsdMeasured + p.lostRevenueUsdMeasured)
     t.wasteLbs = round2(t.wasteLbs + p.wasteLbs); t.wasteLbsMeasured = round2(t.wasteLbsMeasured + p.wasteLbsMeasured)
-    if (p.series === 'surge' || String(p.series).startsWith('surge|')) t.surgeLbsIn = round2(t.surgeLbsIn + p.lbsIn)
+    if (p.series === 'surge' || String(p.series).startsWith('surge|')) t.surgeLbsIn = round2(t.surgeLbsIn + (p.lbsIn || 0))
   }
   return {
-    period: { fromDay, toDay, groupBy, by, tz: plantTime.PLANT_TZ },
+    period: { fromDay, toDay, groupBy, by, tz: plantTime.PLANT_TZ, ignoreUpperBounds },
     points,
     totals: [...totals.values()].map(t => ({ ...t, pct: t.surgeLbsIn > 0 ? round2((t.wasteLbs / t.surgeLbsIn) * 100) : null })),
     units: { canonical: 'lb', lbsPerGal: itemConfig.LBS_PER_GAL },
