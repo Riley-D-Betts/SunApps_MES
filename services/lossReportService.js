@@ -23,7 +23,11 @@
  *  - Families with no price row are reported as UNPRICED lb, not priced at a
  *    global fallback (the analytics page may fall back; an exec number must
  *    not).
- *  - Lost FG revenue is an opportunity figure; it is never added to loss $.
+ *  - Loss $ is measured TWO ways, as peers (Andrew, 2026-09-14): raw-milk
+ *    COST (wasteUsd, per-family $/lb) and forgone finished-goods REVENUE
+ *    (lostRevenueUsd, per-item $/lb from packaging + invoices). Both carry
+ *    the same measured / upper-bound split. They are never added together.
+ *    Separation has no revenue figure (too far upstream, SD-717 rule).
  *  - Pounds are canonical; `units.lbsPerGal` lets the UIs show gallons.
  *
  * Time: every batch is attributed to the plant-local (America/Boise) date it
@@ -166,7 +170,9 @@ async function querySurge({ from, to, groupBy }, ctx) {
            SUM(COALESCE(wasteMeasured, 0) * price) AS wasteMeasuredUsd,
            SUM(CASE WHEN price IS NULL THEN COALESCE(wasteMeasured, wasteUpper) ELSE 0 END) AS unpricedLbs,
            SUM(COALESCE(wasteMeasured, wasteUpper) * revRate) AS lostRevenueUsd,
-           MAX(price) AS pricePerLb
+           SUM(COALESCE(wasteMeasured, 0) * revRate) AS lostRevenueMeasuredUsd,
+           SUM(CASE WHEN revRate IS NULL THEN COALESCE(wasteMeasured, wasteUpper) ELSE 0 END) AS unpricedRevenueLbs,
+           MAX(price) AS pricePerLb, MAX(revRate) AS revenuePerLb
     FROM c
     GROUP BY ${bucketExpr(groupBy, 'localDt')}, [tankId], [feedingUhtId], family, [productName], [mesItem]
   `
@@ -198,7 +204,9 @@ async function queryBlend({ from, to, groupBy }, ctx) {
            SUM(waste * price) AS wasteUsd, SUM(waste * price) AS wasteMeasuredUsd,
            SUM(CASE WHEN price IS NULL THEN waste ELSE 0 END) AS unpricedLbs,
            SUM(waste * revRate) AS lostRevenueUsd,
-           MAX(price) AS pricePerLb
+           SUM(waste * revRate) AS lostRevenueMeasuredUsd,
+           SUM(CASE WHEN revRate IS NULL THEN waste ELSE 0 END) AS unpricedRevenueLbs,
+           MAX(price) AS pricePerLb, MAX(revRate) AS revenuePerLb
     FROM c
     GROUP BY ${bucketExpr(groupBy, 'localDt')}, [tankId], family, [productName], [mesItem]
   `
@@ -232,8 +240,8 @@ async function querySeparation({ from, to, groupBy }, ctx) {
            SUM(CASE WHEN held = 0 THEN ${max0('waste')} * price END) AS wasteUsd,
            SUM(CASE WHEN held = 0 THEN ${max0('waste')} * price END) AS wasteMeasuredUsd,
            SUM(CASE WHEN held = 0 AND price IS NULL THEN ${max0('waste')} ELSE 0 END) AS unpricedLbs,
-           NULL AS lostRevenueUsd,
-           MAX(price) AS pricePerLb,
+           NULL AS lostRevenueUsd, NULL AS lostRevenueMeasuredUsd, 0 AS unpricedRevenueLbs,
+           MAX(price) AS pricePerLb, NULL AS revenuePerLb,
            SUM(held) AS heldCount, SUM(CASE WHEN held = 1 THEN feed ELSE 0 END) AS heldLbs,
            SUM(CASE WHEN held = 0 AND waste < 0 THEN 1 ELSE 0 END) AS negativeBalanceCount
     FROM c
@@ -269,7 +277,10 @@ async function computeStages(win, ctx) {
     wasteMeasuredUsd: r.wasteMeasuredUsd != null ? Number(r.wasteMeasuredUsd) : null,
     unpricedLbs: num(r.unpricedLbs),
     lostRevenueUsd: r.lostRevenueUsd != null ? Number(r.lostRevenueUsd) : null,
+    lostRevenueMeasuredUsd: r.lostRevenueMeasuredUsd != null ? Number(r.lostRevenueMeasuredUsd) : null,
+    unpricedRevenueLbs: num(r.unpricedRevenueLbs),
     pricePerLb: r.pricePerLb != null ? Number(r.pricePerLb) : null,
+    revenuePerLb: r.revenuePerLb != null ? Number(r.revenuePerLb) : null,
     heldCount: num(r.heldCount),
     heldLbs: num(r.heldLbs),
     negativeBalanceCount: num(r.negativeBalanceCount),
@@ -286,7 +297,7 @@ function toDayString(v) {
 
 function emptyAgg() {
   return { batches: 0, lbsIn: 0, wasteLbs: 0, wasteMeasuredLbs: 0, wasteUpperBoundLbs: 0, unmeasuredBatches: 0,
-    wasteUsd: 0, wasteMeasuredUsd: 0, unpricedLbs: 0, lostRevenueUsd: 0, heldCount: 0, heldLbs: 0, negativeBalanceCount: 0 }
+    wasteUsd: 0, wasteMeasuredUsd: 0, unpricedLbs: 0, lostRevenueUsd: 0, lostRevenueMeasuredUsd: 0, unpricedRevenueLbs: 0, heldCount: 0, heldLbs: 0, negativeBalanceCount: 0 }
 }
 function addInto(agg, r) {
   agg.batches += r.batches; agg.lbsIn += r.lbsIn
@@ -294,6 +305,7 @@ function addInto(agg, r) {
   agg.unmeasuredBatches += r.unmeasuredBatches
   agg.wasteUsd += num(r.wasteUsd); agg.wasteMeasuredUsd += num(r.wasteMeasuredUsd)
   agg.unpricedLbs += r.unpricedLbs; agg.lostRevenueUsd += num(r.lostRevenueUsd)
+  agg.lostRevenueMeasuredUsd += num(r.lostRevenueMeasuredUsd); agg.unpricedRevenueLbs += num(r.unpricedRevenueLbs)
   agg.heldCount += r.heldCount; agg.heldLbs += r.heldLbs; agg.negativeBalanceCount += r.negativeBalanceCount
   return agg
 }
@@ -320,6 +332,9 @@ function finish(a) {
     wasteUsd: round2(a.wasteUsd), wasteMeasuredUsd: round2(a.wasteMeasuredUsd),
     wasteUpperBoundUsd: round2(a.wasteUsd - a.wasteMeasuredUsd),
     lostRevenueUsd: round2(a.lostRevenueUsd),
+    lostRevenueMeasuredUsd: round2(a.lostRevenueMeasuredUsd),
+    lostRevenueUpperBoundUsd: round2(a.lostRevenueUsd - a.lostRevenueMeasuredUsd),
+    unpricedRevenueLbs: round2(a.unpricedRevenueLbs),
     pct: a.lbsIn > 0 ? round2((a.wasteLbs / a.lbsIn) * 100) : null,
     measuredShare: a.wasteLbs > 0 ? round2(a.wasteMeasuredLbs / a.wasteLbs) : 1,
     confidence: confidenceOf(a),
@@ -329,15 +344,22 @@ function finish(a) {
 function buildStages(rows) {
   const byStage = groupRows(rows, r => r.stage)
   const total = [...byStage.values()].reduce((s, a) => s + a.wasteUsd, 0)
+  const totalRev = [...byStage.values()].reduce((s, a) => s + a.lostRevenueUsd, 0)
   return STAGES.map(key => {
     const a = finish(byStage.get(key) || emptyAgg())
+    const rev = key !== 'separation'   // separation is too far upstream for a revenue figure (SD-717 rule)
     return {
       key, label: STAGE_LABEL[key],
       lbsIn: a.lbsIn, wasteLbs: a.wasteLbs, wasteLbsMeasured: a.wasteMeasuredLbs, wasteLbsUpperBoundOnly: a.wasteUpperBoundLbs,
       wasteUsd: a.wasteUsd, wasteUsdMeasured: a.wasteMeasuredUsd, wasteUsdUpperBound: a.wasteUpperBoundUsd,
-      unpricedLbs: a.unpricedLbs, lostRevenueUsd: key === 'separation' ? null : a.lostRevenueUsd,
+      unpricedLbs: a.unpricedLbs,
+      lostRevenueUsd: rev ? a.lostRevenueUsd : null,
+      lostRevenueUsdMeasured: rev ? a.lostRevenueMeasuredUsd : null,
+      lostRevenueUsdUpperBound: rev ? a.lostRevenueUpperBoundUsd : null,
+      unpricedRevenueLbs: rev ? a.unpricedRevenueLbs : null,
       batches: a.batches, unmeasuredBatches: a.unmeasuredBatches, pct: a.pct,
       pctOfTotalUsd: total > 0 ? round2((a.wasteUsd / total) * 100) : null,
+      pctOfTotalRevenueUsd: rev && totalRev > 0 ? round2((a.lostRevenueUsd / totalRev) * 100) : null,
       measuredShare: a.measuredShare, confidence: a.confidence,
     }
   })
@@ -361,7 +383,12 @@ function buildHeadline(rows, stages) {
     lbsProcessedBasis: basis ? basis.key : null,
     lossPct: lbsProcessed > 0 ? round2((all.wasteLbs / lbsProcessed) * 100) : null,
     unpricedLbs: all.unpricedLbs,
+    // Second $ basis (Andrew, 2026-09-14): forgone finished-goods revenue on
+    // the same lost pounds. Shown as a peer of the raw-milk cost, never added.
     lostRevenueUsd: all.lostRevenueUsd,
+    lostRevenueUsdMeasured: all.lostRevenueMeasuredUsd,
+    lostRevenueUsdUpperBound: all.lostRevenueUpperBoundUsd,
+    unpricedRevenueLbs: all.unpricedRevenueLbs,
     measuredShare: all.measuredShare,
     batches: all.batches,
   }
@@ -373,8 +400,11 @@ function buildByEquipment(rows) {
   for (const [k, a] of m) {
     const [stage, equipment, group] = k.split('|')
     const f = finish(a)
+    const rev = stage !== 'separation'
     out.push({ stage, equipment, group: group || null, lbsIn: f.lbsIn, wasteLbs: f.wasteLbs, wasteLbsMeasured: f.wasteMeasuredLbs,
-      wasteUsd: f.wasteUsd, wasteUsdMeasured: f.wasteMeasuredUsd, pct: f.pct, measuredShare: f.measuredShare, batches: f.batches, confidence: f.confidence })
+      wasteUsd: f.wasteUsd, wasteUsdMeasured: f.wasteMeasuredUsd,
+      lostRevenueUsd: rev ? f.lostRevenueUsd : null, lostRevenueUsdMeasured: rev ? f.lostRevenueMeasuredUsd : null,
+      pct: f.pct, measuredShare: f.measuredShare, batches: f.batches, confidence: f.confidence })
   }
   return out.sort((x, y) => y.wasteUsd - x.wasteUsd || y.wasteLbs - x.wasteLbs)
 }
@@ -385,7 +415,8 @@ function buildByFamily(rows, ctx) {
   for (const [family, a] of m) {
     const f = finish(a)
     const p = ctx.prices[family]
-    out.push({ family, lbsIn: f.lbsIn, wasteLbs: f.wasteLbs, wasteLbsMeasured: f.wasteMeasuredLbs, wasteUsd: f.wasteUsd,
+    out.push({ family, lbsIn: f.lbsIn, wasteLbs: f.wasteLbs, wasteLbsMeasured: f.wasteMeasuredLbs, wasteUsd: f.wasteUsd, wasteUsdMeasured: f.wasteMeasuredUsd,
+      lostRevenueUsd: f.lostRevenueUsd, lostRevenueUsdMeasured: f.lostRevenueMeasuredUsd,
       pricePerLb: p ? p.pricePerLb : null, priceSource: p ? p.source : 'none', priced: !!p })
   }
   return out.sort((x, y) => y.wasteUsd - x.wasteUsd || y.wasteLbs - x.wasteLbs)
@@ -397,8 +428,9 @@ function buildByProduct(rows) {
   for (const [k, a] of m) {
     const [stage, productName, mesItem] = k.split('|')
     const f = finish(a)
-    out.push({ stage, productName: productName || null, mesItem: mesItem || null, wasteLbs: f.wasteLbs, wasteUsd: f.wasteUsd,
-      lostRevenueUsd: stage === 'separation' ? null : f.lostRevenueUsd, pct: f.pct, batches: f.batches, measuredShare: f.measuredShare })
+    out.push({ stage, productName: productName || null, mesItem: mesItem || null, wasteLbs: f.wasteLbs, wasteUsd: f.wasteUsd, wasteUsdMeasured: f.wasteMeasuredUsd,
+      lostRevenueUsd: stage === 'separation' ? null : f.lostRevenueUsd, lostRevenueUsdMeasured: stage === 'separation' ? null : f.lostRevenueMeasuredUsd,
+      pct: f.pct, batches: f.batches, measuredShare: f.measuredShare })
   }
   return out.sort((x, y) => y.wasteUsd - x.wasteUsd || y.wasteLbs - x.wasteLbs).slice(0, 10)
 }
@@ -416,10 +448,14 @@ function buildTrend(rows) {
     const stages = {}
     for (const s of STAGES) {
       const sa = perStage.get(`${bucket}|${s}`)
-      stages[s] = sa ? { wasteUsd: round2(sa.wasteUsd), wasteLbs: round2(sa.wasteLbs), lbsIn: round2(sa.lbsIn) } : { wasteUsd: 0, wasteLbs: 0, lbsIn: 0 }
+      stages[s] = sa
+        ? { wasteUsd: round2(sa.wasteUsd), lostRevenueUsd: s === 'separation' ? null : round2(sa.lostRevenueUsd), wasteLbs: round2(sa.wasteLbs), lbsIn: round2(sa.lbsIn) }
+        : { wasteUsd: 0, lostRevenueUsd: s === 'separation' ? null : 0, wasteLbs: 0, lbsIn: 0 }
     }
     const surgeIn = stages.surge.lbsIn
-    return { bucket, wasteUsd: f.wasteUsd, wasteUsdMeasured: f.wasteMeasuredUsd, wasteLbs: f.wasteLbs, wasteLbsMeasured: f.wasteMeasuredLbs,
+    return { bucket, wasteUsd: f.wasteUsd, wasteUsdMeasured: f.wasteMeasuredUsd,
+      lostRevenueUsd: f.lostRevenueUsd, lostRevenueUsdMeasured: f.lostRevenueMeasuredUsd,
+      wasteLbs: f.wasteLbs, wasteLbsMeasured: f.wasteMeasuredLbs,
       lbsIn: round2(surgeIn), pct: surgeIn > 0 ? round2((f.wasteLbs / surgeIn) * 100) : null, batches: f.batches, stages, source: 'live' }
   })
 }
@@ -438,7 +474,8 @@ async function queryTopEvents({ from, to }, ctx, limit = 10) {
              CASE WHEN [concurrentFillDrain] = 0 OR ([concurrentTickCount] > 0 AND [meteredDrainTickCount] = [concurrentTickCount] AND [drainFillerLines] = '1')
                   THEN ${max0('CAST([cumulativeIssuedLbs] AS float) - COALESCE(CAST([outputWithDrainLbs] AS float), CAST([cumulativeOutputLbs] AS float))')}
                   ELSE ${max0('CAST([cumulativeIssuedLbs] AS float) - CAST([cumulativeOutputLbs] AS float)')} END AS lbs,
-             ${ctx.priceCase(surgeCols)} AS price
+             ${ctx.priceCase(surgeCols)} AS price,
+             ${ctx.revCase('mesItem')} AS revRate
       FROM ${T.surge}
       WHERE [status] = 'completed' AND [cumulativeIssuedLbs] >= ${ZERO_ISSUED_LBS}
         AND COALESCE([completedAt],[createdAt]) >= :from AND COALESCE([completedAt],[createdAt]) < :to
@@ -446,7 +483,8 @@ async function queryTopEvents({ from, to }, ctx, limit = 10) {
       SELECT 'blend', [id], COALESCE([completedAt],[createdAt]), [productName], [tankId], NULL, [nsWorkOrderNumber], NULL, NULL, NULL,
              ${ctx.familyCase(['mesItem'])}, 1, CAST([cumulativeIssuedLbs] AS float),
              ${max0('CAST([cumulativeIssuedLbs] AS float) - CAST([cumulativeOutputLbs] AS float)')},
-             ${ctx.priceCase(['mesItem'])}
+             ${ctx.priceCase(['mesItem'])},
+             ${ctx.revCase('mesItem')}
       FROM ${T.blend}
       WHERE [status] = 'completed' AND [cumulativeIssuedLbs] >= ${ZERO_ISSUED_LBS}
         AND COALESCE([completedAt],[createdAt]) >= :from AND COALESCE([completedAt],[createdAt]) < :to
@@ -454,7 +492,8 @@ async function queryTopEvents({ from, to }, ctx, limit = 10) {
       SELECT 'separation', [id], COALESCE([batchEnd],[createdAt]), CAST([itemId] AS nvarchar(32)), [sourceSilo], NULL, CAST([nsTransactionId] AS nvarchar(64)), NULL, NULL, NULL,
              ${ctx.familyCaseIdx(['itemId'])}, 1, CAST([inputVolume] AS float),
              ${max0('CAST([wasteVolume] AS float)')},
-             ${ctx.priceCaseIdx(['itemId'])}
+             ${ctx.priceCaseIdx(['itemId'])},
+             NULL
       FROM ${T.sep}
       WHERE [status] IN ('completed', 'error') AND [inputVolume] > 0
         AND COALESCE([batchEnd],[createdAt]) >= :from AND COALESCE([batchEnd],[createdAt]) < :to
@@ -466,6 +505,7 @@ async function queryTopEvents({ from, to }, ctx, limit = 10) {
   return rows.map(r => {
     const lbs = round2(r.lbs)
     const usd = r.price != null ? round2(lbs * Number(r.price)) : null
+    const revenueUsd = r.revRate != null ? round2(lbs * Number(r.revRate)) : null
     const measured = Number(r.measured) === 1
     const issued = num(r.issued)
     const pct = issued > 0 ? round2((lbs / issued) * 100) : null
@@ -476,7 +516,7 @@ async function queryTopEvents({ from, to }, ctx, limit = 10) {
       day: plantTime.plantDateString(new Date(r.closeAt)),
       product: r.kind === 'separation' ? rawItemName(r.productName, r.family) : r.productName,
       equipment: r.equipment, group: r.grp || null, family: r.family || 'unclassified',
-      issuedLbs: round2(issued), lbs, pct, usd, priced: r.price != null, measured,
+      issuedLbs: round2(issued), lbs, pct, usd, revenueUsd, priced: r.price != null, revenuePriced: r.revRate != null, measured,
       nsWorkOrderNumber: r.nsWorkOrderNumber || null,
       note: eventNote(r, measured),
     }
@@ -605,6 +645,8 @@ async function getLossReport(params = {}) {
     separationHeld: { count: sepAgg.heldCount, lbs: round2(sepAgg.heldLbs) },
     separationNegativeBalance: { count: sepAgg.negativeBalanceCount },
     unpricedFamilies: byFamily.filter(f => !f.priced && f.wasteLbs > 0).map(f => ({ family: f.family, lbs: f.wasteLbs })),
+    // Products with no FG revenue rate (their lb are in the cost figure but not the revenue one).
+    unpricedRevenueProducts: byProduct.filter(p => p.stage !== 'separation' && p.wasteLbs > 0 && !(p.lostRevenueUsd > 0)).map(p => ({ product: p.productName, stage: p.stage, lbs: p.wasteLbs })),
     unmeteredSurgeTanks: byEquipment.filter(e => e.stage === 'surge' && e.measuredShare < 1).map(e => e.equipment),
   }
 
@@ -621,6 +663,8 @@ async function getLossReport(params = {}) {
       lossLbs: round2(headline.lossLbs - pheadline.lossLbs),
       lossPct: headline.lossPct != null && pheadline.lossPct != null ? round2(headline.lossPct - pheadline.lossPct) : null,
       lossUsdPct: pheadline.lossUsd > 0 ? round2(((headline.lossUsd - pheadline.lossUsd) / pheadline.lossUsd) * 100) : null,
+      lostRevenueUsd: round2(headline.lostRevenueUsd - pheadline.lostRevenueUsd),
+      lostRevenueUsdPct: pheadline.lostRevenueUsd > 0 ? round2(((headline.lostRevenueUsd - pheadline.lostRevenueUsd) / pheadline.lostRevenueUsd) * 100) : null,
     }
   }
 
@@ -689,6 +733,7 @@ async function rollupDaily({ fromDay, toDay }) {
     wasteUsd: k.pricePerLb != null ? round2(k.agg.wasteUsd) : null,
     wasteMeasuredUsd: k.pricePerLb != null ? round2(k.agg.wasteMeasuredUsd) : null,
     lostRevenueUsd: k.stage === 'separation' ? null : round2(k.agg.lostRevenueUsd),
+    lostRevenueMeasuredUsd: k.stage === 'separation' ? null : round2(k.agg.lostRevenueMeasuredUsd),
     pricePerLb: k.pricePerLb, batchCount: k.agg.batches, unmeasuredBatchCount: k.agg.unmeasuredBatches,
     zeroIssuedCount: k.zeroIssuedCount, heldLbs: round2(k.agg.heldLbs), computedAt,
   }))
@@ -711,7 +756,7 @@ async function getLossHistory({ from, to, groupBy = 'week', by = 'stage' } = {})
   const sql = `
     SELECT ${bucketStr(bucketExpr(groupBy, '[day]'))} AS bucket, ${dim} AS series,
            SUM([lbsIn]) AS lbsIn, SUM([wasteLbs]) AS wasteLbs, SUM([wasteMeasuredLbs]) AS wasteMeasuredLbs, SUM([wasteUpperBoundLbs]) AS wasteUpperBoundLbs,
-           SUM([wasteUsd]) AS wasteUsd, SUM([wasteMeasuredUsd]) AS wasteMeasuredUsd, SUM([lostRevenueUsd]) AS lostRevenueUsd,
+           SUM([wasteUsd]) AS wasteUsd, SUM([wasteMeasuredUsd]) AS wasteMeasuredUsd, SUM([lostRevenueUsd]) AS lostRevenueUsd, SUM([lostRevenueMeasuredUsd]) AS lostRevenueMeasuredUsd,
            SUM(CASE WHEN [pricePerLb] IS NULL THEN [wasteLbs] ELSE 0 END) AS unpricedLbs,
            SUM([batchCount]) AS batches, SUM([unmeasuredBatchCount]) AS unmeasuredBatches, SUM([zeroIssuedCount]) AS zeroIssued, SUM([heldLbs]) AS heldLbs,
            MAX([computedAt]) AS computedAt
@@ -724,7 +769,7 @@ async function getLossHistory({ from, to, groupBy = 'week', by = 'stage' } = {})
   const points = rows.map(r => ({
     bucket: toDayString(r.bucket), series: r.series,
     lbsIn: round2(r.lbsIn), wasteLbs: round2(r.wasteLbs), wasteLbsMeasured: round2(r.wasteMeasuredLbs), wasteLbsUpperBound: round2(r.wasteUpperBoundLbs),
-    wasteUsd: round2(r.wasteUsd), wasteUsdMeasured: round2(r.wasteMeasuredUsd), lostRevenueUsd: round2(r.lostRevenueUsd), unpricedLbs: round2(r.unpricedLbs),
+    wasteUsd: round2(r.wasteUsd), wasteUsdMeasured: round2(r.wasteMeasuredUsd), lostRevenueUsd: round2(r.lostRevenueUsd), lostRevenueUsdMeasured: round2(r.lostRevenueMeasuredUsd), unpricedLbs: round2(r.unpricedLbs),
     pct: num(r.lbsIn) > 0 ? round2((num(r.wasteLbs) / num(r.lbsIn)) * 100) : null,
     batches: num(r.batches), unmeasuredBatches: num(r.unmeasuredBatches), zeroIssued: num(r.zeroIssued), heldLbs: round2(r.heldLbs),
     computedAt: r.computedAt instanceof Date ? r.computedAt.toISOString() : r.computedAt,
@@ -732,9 +777,10 @@ async function getLossHistory({ from, to, groupBy = 'week', by = 'stage' } = {})
   // Totals per bucket across series, for the headline line of a chart.
   const totals = new Map()
   for (const p of points) {
-    if (!totals.has(p.bucket)) totals.set(p.bucket, { bucket: p.bucket, wasteUsd: 0, wasteUsdMeasured: 0, wasteLbs: 0, wasteLbsMeasured: 0, surgeLbsIn: 0 })
+    if (!totals.has(p.bucket)) totals.set(p.bucket, { bucket: p.bucket, wasteUsd: 0, wasteUsdMeasured: 0, lostRevenueUsd: 0, lostRevenueUsdMeasured: 0, wasteLbs: 0, wasteLbsMeasured: 0, surgeLbsIn: 0 })
     const t = totals.get(p.bucket)
     t.wasteUsd = round2(t.wasteUsd + p.wasteUsd); t.wasteUsdMeasured = round2(t.wasteUsdMeasured + p.wasteUsdMeasured)
+    t.lostRevenueUsd = round2(t.lostRevenueUsd + p.lostRevenueUsd); t.lostRevenueUsdMeasured = round2(t.lostRevenueUsdMeasured + p.lostRevenueUsdMeasured)
     t.wasteLbs = round2(t.wasteLbs + p.wasteLbs); t.wasteLbsMeasured = round2(t.wasteLbsMeasured + p.wasteLbsMeasured)
     if (p.series === 'surge' || String(p.series).startsWith('surge|')) t.surgeLbsIn = round2(t.surgeLbsIn + p.lbsIn)
   }

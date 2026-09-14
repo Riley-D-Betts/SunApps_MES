@@ -23,19 +23,21 @@ const isoDay = v => (v == null ? null : (v instanceof Date ? v : new Date(v)).to
  */
 function buildCard(report, { fromDay, toDay }) {
   const h = report.headline
+  // Two $ bases, as peers: raw-milk cost and forgone FG revenue (never added).
   const facts = [
-    { title: 'Loss (best estimate)', value: `${fmtUsd(h.lossUsd)} · ${fmtLbs(h.lossLbs)}${h.lossPct != null ? ` · ${h.lossPct.toFixed(1)}%` : ''}` },
-    { title: 'Of which measured', value: `${fmtUsd(h.lossUsdMeasured)} (${Math.round((h.measuredShare || 0) * 100)}%)` },
-    { title: 'Upper-bound only', value: fmtUsd(h.lossUsdUpperBound) },
+    { title: 'Milk lost', value: `${fmtLbs(h.lossLbs)}${h.lossPct != null ? ` · ${h.lossPct.toFixed(1)}%` : ''} · ${h.batches} batches` },
+    { title: 'Loss · raw milk cost', value: `${fmtUsd(h.lossUsd)} (measured ${fmtUsd(h.lossUsdMeasured)}, upper-bound ${fmtUsd(h.lossUsdUpperBound)})` },
+    { title: 'Loss · revenue', value: `${fmtUsd(h.lostRevenueUsd)} (measured ${fmtUsd(h.lostRevenueUsdMeasured)}, upper-bound ${fmtUsd(h.lostRevenueUsdUpperBound)})` },
   ]
   if (h.delta) {
-    const up = h.delta.lossUsd >= 0
-    facts.push({ title: 'vs prior week', value: `${up ? '▲' : '▼'} ${fmtUsd(Math.abs(h.delta.lossUsd))}${h.delta.lossUsdPct != null ? ` (${up ? '+' : ''}${h.delta.lossUsdPct.toFixed(0)}%)` : ''}` })
+    const arrow = v => (v >= 0 ? '▲' : '▼')
+    const pct = v => (v != null ? ` (${v >= 0 ? '+' : ''}${v.toFixed(0)}%)` : '')
+    facts.push({ title: 'vs prior week', value: `cost ${arrow(h.delta.lossUsd)} ${fmtUsd(Math.abs(h.delta.lossUsd))}${pct(h.delta.lossUsdPct)} · revenue ${arrow(h.delta.lostRevenueUsd)} ${fmtUsd(Math.abs(h.delta.lostRevenueUsd))}${pct(h.delta.lostRevenueUsdPct)}` })
   }
   const worst = report.byEquipment[0]
-  if (worst) facts.push({ title: 'Worst equipment', value: `${worst.equipment}${worst.group ? ` (${worst.group})` : ''} · ${fmtUsd(worst.wasteUsd)}` })
-  const stageLine = report.stages.filter(s => s.wasteUsd > 0 || s.wasteLbs > 0).map(s => `${s.label} ${fmtUsd(s.wasteUsd)}`).join(' · ')
-  if (stageLine) facts.push({ title: 'By stage', value: stageLine })
+  if (worst) facts.push({ title: 'Worst equipment', value: `${worst.equipment}${worst.group ? ` (${worst.group})` : ''} · cost ${fmtUsd(worst.wasteUsd)}${worst.lostRevenueUsd != null ? ` · revenue ${fmtUsd(worst.lostRevenueUsd)}` : ''}` })
+  const stageLine = report.stages.filter(s => s.wasteUsd > 0 || s.wasteLbs > 0).map(s => `${s.label} ${fmtUsd(s.wasteUsd)}${s.lostRevenueUsd != null ? ` / ${fmtUsd(s.lostRevenueUsd)}` : ''}`).join(' · ')
+  if (stageLine) facts.push({ title: 'By stage (cost / revenue)', value: stageLine })
   if (report.unaccounted.zeroIssuedCount > 0) {
     const est = report.unaccounted.zeroIssuedEstimatedLbs
     facts.push({ title: 'Unaccounted batches', value: `${report.unaccounted.zeroIssuedCount}${est > 0 ? ` (~${fmtLbs(est)} by the UHT totalizer)` : ''}` })
