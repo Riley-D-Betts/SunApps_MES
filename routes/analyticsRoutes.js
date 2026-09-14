@@ -548,7 +548,9 @@ router.post('/inventory-adjustments/:id/reject', controller.rejectInventoryAdjus
  *       (`wasteLbs = wasteLbsMeasured + wasteLbsUpperBoundOnly`). Dollars come in TWO bases as peers — raw-milk
  *       cost (`wasteUsd*`) and forgone FG revenue (`lostRevenueUsd*`), never added. Pounds are canonical; `units.lbsPerGal`
  *       converts for display. Never reads inventory adjustments. Batches that closed with under 100 lb issued
- *       are listed under `unaccounted`, not counted as loss. Priced at CURRENT raw-milk prices with no global
+ *       are listed under `unaccounted`, not counted as loss. `chain[]` always carries all seven product-path steps
+ *       (separation → blend → UHT → surge → fillers → packaging → shipped vs produced) with a measured / combined /
+ *       not-measured status, so unmeasured steps show as warnings rather than zero. Priced at CURRENT raw-milk prices with no global
  *       fallback (unpriced families are reported in pounds).
  *     parameters:
  *       - in: query

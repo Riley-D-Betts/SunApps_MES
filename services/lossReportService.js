@@ -30,6 +30,11 @@
  *    Separation has no revenue figure (too far upstream, SD-717 rule).
  *  - Pounds are canonical; `units.lbsPerGal` lets the UIs show gallons.
  *
+ * Chain: `chain[]` always lists all seven steps of the product path
+ * (separation → blend → UHT → surge → fillers → packaging → shipped vs
+ * produced) with a status of measured / combined / not-measured, so the
+ * report shows where we are blind as clearly as where we lose milk.
+ *
  * Time: every batch is attributed to the plant-local (America/Boise) date it
  * CLOSED (completedAt → createdAt fallback; separation batchEnd). Weeks start
  * Monday. Windows are half-open UTC instants [from, to).
@@ -64,7 +69,36 @@ const MAX_WINDOW_DAYS = 400
 const ZERO_ISSUED_LBS = 100          // below this a "completed" batch never really issued
 const UNMETERED_INSIGHT_SHARE = 0.25 // upper-bound share of $ that earns a callout
 const STAGES = ['separation', 'blend', 'surge']
-const STAGE_LABEL = { separation: 'Separation', blend: 'Blend tanks', surge: 'Surge tanks' }
+const STAGE_LABEL = { separation: 'Separation', blend: 'Blend tanks', surge: 'UHT → Surge tanks' }
+
+// The whole product path, raw milk to shipped cases (Andrew, 2026-09-14).
+// Every step is ALWAYS present in the response so the report tells the full
+// story even where we cannot measure yet — an unmeasured step is shown with a
+// warning, never as zero loss.
+//   measured     — a measured-stage figure exists (may still be partly upper bound)
+//   combined     — physically a separate step, but its loss is inside another
+//                  step's single measurement (`combinedWith`)
+//   not-measured — no loss figure today; `howToMeasure` says what it would take
+const CHAIN = [
+  { key: 'separation', label: 'Separation', stage: 'separation', status: 'measured',
+    what: 'Raw milk fed to the separator minus the cream and skim that came out.' },
+  { key: 'blend', label: 'Blend tanks', stage: 'blend', status: 'measured',
+    what: 'Milk issued into a blend tank minus what its load cells show arriving.' },
+  { key: 'uht', label: 'UHT', stage: null, status: 'combined', combinedWith: 'surge',
+    what: 'Loss inside the UHT (start-up, divert, product changeover).',
+    howToMeasure: 'Measured together with the surge tanks today: we meter milk into the UHT and see it arrive in the surge tank, but nothing meters what leaves the UHT. A UHT outlet meter would split the two.' },
+  { key: 'surge', label: 'Surge tanks', stage: 'surge', status: 'measured',
+    what: 'Milk metered into the UHT minus what reached the surge tank (plus metered drain to Filler 1). Includes UHT loss.' },
+  { key: 'filler', label: 'Fillers', stage: null, status: 'not-measured',
+    what: 'Milk sent to a filler that did not end up in a good carton (start-up, flush, rejects).',
+    howToMeasure: 'Filler 1 already meters its inlet; loss needs good-carton counts × carton volume per SKU. Fillers 2–6 need inlet meters.' },
+  { key: 'packaging', label: 'Packaging', stage: null, status: 'not-measured',
+    what: 'Good cartons that did not become cases on a pallet (damage, case packer rejects).',
+    howToMeasure: 'Compare filler good-carton counts with case-packer and palletizer counts (the historian already has most of these counters).' },
+  { key: 'shipping', label: 'Shipped vs produced', stage: null, status: 'not-measured',
+    what: 'Finished cases produced but never shipped or invoiced (rework, holds, write-offs).',
+    howToMeasure: 'NetSuite work-order completions vs item fulfillments / pallet details for the same period.' },
+]
 
 const num = v => (v == null ? 0 : Number(v))
 const round2 = v => Math.round(num(v) * 100) / 100
@@ -344,6 +378,44 @@ function finish(a) {
     measuredShare: a.wasteLbs > 0 ? round2(a.wasteMeasuredLbs / a.wasteLbs) : 1,
     confidence: confidenceOf(a),
   }
+}
+
+/**
+ * The seven-step product path with a figure where one exists. Figures are
+ * copied from the measured stage; combined/unmeasured steps carry nulls and
+ * a warning. `shareOfMeasured*` feed the donut (measured steps only).
+ */
+function buildChain(stages) {
+  const byKey = Object.fromEntries(stages.map(s => [s.key, s]))
+  const totalUsd = stages.reduce((t, s) => t + (s.wasteUsd || 0), 0)
+  const totalRev = stages.reduce((t, s) => t + (s.lostRevenueUsd || 0), 0)
+  const totalLbs = stages.reduce((t, s) => t + (s.wasteLbs || 0), 0)
+  return CHAIN.map((c, i) => {
+    const s = c.stage ? byKey[c.stage] : null
+    const base = {
+      key: c.key, order: i + 1, label: c.label, status: c.status,
+      combinedWith: c.combinedWith || null,
+      measured: c.status === 'measured',
+      warning: c.status === 'measured' ? (s && s.confidence !== 'measured' ? 'partly-estimated' : null) : (c.status === 'combined' ? 'combined' : 'not-measured'),
+      what: c.what, howToMeasure: c.howToMeasure || null,
+    }
+    if (!s) {
+      return { ...base, lbsIn: null, wasteLbs: null, wasteLbsMeasured: null, wasteLbsUpperBound: null, pct: null,
+        wasteUsd: null, wasteUsdMeasured: null, wasteUsdUpperBound: null,
+        lostRevenueUsd: null, lostRevenueUsdMeasured: null, lostRevenueUsdUpperBound: null,
+        batches: null, confidence: null, shareOfMeasuredUsd: null, shareOfMeasuredRevenueUsd: null, shareOfMeasuredLbs: null }
+    }
+    return {
+      ...base,
+      lbsIn: s.lbsIn, wasteLbs: s.wasteLbs, wasteLbsMeasured: s.wasteLbsMeasured, wasteLbsUpperBound: s.wasteLbsUpperBoundOnly, pct: s.pct,
+      wasteUsd: s.wasteUsd, wasteUsdMeasured: s.wasteUsdMeasured, wasteUsdUpperBound: s.wasteUsdUpperBound,
+      lostRevenueUsd: s.lostRevenueUsd, lostRevenueUsdMeasured: s.lostRevenueUsdMeasured, lostRevenueUsdUpperBound: s.lostRevenueUsdUpperBound,
+      batches: s.batches, confidence: s.confidence,
+      shareOfMeasuredUsd: totalUsd > 0 ? round2((s.wasteUsd / totalUsd) * 100) : null,
+      shareOfMeasuredRevenueUsd: totalRev > 0 && s.lostRevenueUsd != null ? round2((s.lostRevenueUsd / totalRev) * 100) : null,
+      shareOfMeasuredLbs: totalLbs > 0 ? round2((s.wasteLbs / totalLbs) * 100) : null,
+    }
+  })
 }
 
 function buildStages(rows) {
@@ -674,12 +746,19 @@ async function getLossReport(params = {}) {
   }
 
   const insights = buildInsights({ headline, stages, byEquipment, byProduct, byFamily, trend, unaccounted, prior })
+  const chain = buildChain(stages)
+  const unmeasuredSteps = chain.filter(c => c.status === 'not-measured').map(c => c.label)
+  if (unmeasuredSteps.length) {
+    insights.push({ kind: 'not-measured', usd: null,
+      text: `${unmeasuredSteps.join(', ')} ${unmeasuredSteps.length > 1 ? 'are' : 'is'} not measured yet, so ${unmeasuredSteps.length > 1 ? 'their' : 'its'} loss is not in these totals. UHT loss is included in the surge-tank figure.` })
+  }
 
   return {
     period: { from: win.from.toISOString(), to: win.to.toISOString(), days: round2(win.days), groupBy: win.groupBy, tz: plantTime.PLANT_TZ },
     prior,
     headline,
     stages,
+    chain,
     byEquipment,
     byFamily,
     byProduct,

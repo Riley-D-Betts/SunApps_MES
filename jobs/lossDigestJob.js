@@ -43,6 +43,8 @@ function buildCard(report, { fromDay, toDay }) {
     facts.push({ title: 'Unaccounted batches', value: `${report.unaccounted.zeroIssuedCount}${est > 0 ? ` (~${fmtLbs(est)} by the UHT totalizer)` : ''}` })
   }
   if (h.unpricedLbs > 0) facts.push({ title: 'Unpriced', value: fmtLbs(h.unpricedLbs) })
+  const blind = (report.chain || []).filter(c => c.status === 'not-measured').map(c => c.label)
+  if (blind.length) facts.push({ title: 'Not measured yet', value: blind.join(' · ') })
   return {
     channel: 'loss',
     title: `Milk loss · week of ${fromDay}`,
