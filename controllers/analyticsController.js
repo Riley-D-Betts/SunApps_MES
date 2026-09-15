@@ -201,7 +201,7 @@ function fail(res, label, err) {
 exports.getLossReport = async (req, res) => {
   try {
     const params = pick(req.query, ['from', 'to', 'groupBy', 'compare', 'ignoreUpperBounds'])
-    const report = await lossReportService.getLossReport(params)
+    const report = await lossReportService.getLossReport({ ...params, historian: req.app.locals.historian })
     return res.json({ success: true, ...report })
   } catch (err) {
     return fail(res, 'loss report', err)

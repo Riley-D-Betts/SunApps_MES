@@ -34,8 +34,11 @@
  *
  * Chain: `chain[]` always lists all seven steps of the product path
  * (separation → blend → UHT → surge → fillers → packaging → shipped vs
- * produced) with a status of measured / combined / not-measured, so the
- * report shows where we are blind as clearly as where we lose milk.
+ * produced) with a status of measured / combined / partial / not-measured,
+ * so the report shows where we are blind as clearly as where we lose milk.
+ * Each step also carries a `reliability` (see RELIABILITY) and the fillers
+ * step is Filler 1 only (fillerLossService, never added to the totals).
+ * `plantBalance` (plantBalanceService) is received → cased from NetSuite.
  *
  * Time: every batch is attributed to the plant-local (America/Boise) date it
  * CLOSED (completedAt → createdAt fallback; separation batchEnd). Weeks start
@@ -56,6 +59,8 @@ const fgRevenueRateService = require('./fgRevenueRateService')
 const itemConfig = require('./mesItemConfig')
 const plantTime = require('../utils/plantTime')
 const fgShipmentService = require('./fgShipmentService')
+const fillerLossService = require('./fillerLossService')
+const plantBalanceService = require('./plantBalanceService')
 
 const P = config.TABLE_PREFIX
 const T = {
@@ -93,15 +98,58 @@ const CHAIN = [
     howToMeasure: 'Measured together with the surge tanks today: we meter milk into the UHT and see it arrive in the surge tank, but nothing meters what leaves the UHT. A UHT outlet meter would split the two.' },
   { key: 'surge', label: 'Surge tanks', stage: 'surge', status: 'measured',
     what: 'Milk metered into the UHT minus what reached the surge tank (plus metered drain to Filler 1). Includes UHT loss.' },
-  { key: 'filler', label: 'Fillers', stage: null, status: 'not-measured',
-    what: 'Milk sent to a filler that did not end up in a good carton (start-up, flush, rejects).',
-    howToMeasure: 'Filler 1 already meters its inlet; loss needs good-carton counts × carton volume per SKU. Fillers 2–6 need inlet meters.' },
+  { key: 'filler', label: 'Fillers', stage: null, status: 'partial',
+    what: 'Milk sent to a filler that did not end up in a good carton (start-up, flush, rejects). Line 1 only: metered Filler 1 inlet while running minus good cartons × carton volume.',
+    howToMeasure: 'Filler 1 is measured (inlet meter, good-carton counters, carton size of the SKU on line 1). Fillers 2–6 need inlet meters.' },
   { key: 'packaging', label: 'Packaging', stage: null, status: 'not-measured',
     what: 'Good cartons that did not become cases on a pallet (damage, case packer rejects).',
     howToMeasure: 'Compare filler good-carton counts with case-packer and palletizer counts (the historian already has most of these counters).' },
   { key: 'shipping', label: 'Produced → shipped', stage: 'shipping', status: 'measured',
     what: 'Product made in the window, followed to today: pallets destroyed and cases written off are loss; failed pallets awaiting a decision are at risk; the rest has shipped or is still in QC hold or inventory.' },
 ]
+
+// How far each step's figure can be trusted (Andrew's audits, 2026-09-15).
+// Kept here, not in SQL, so a fix that restores a step is a one-line change.
+//   reliable   — the figure is a real loss measurement
+//   partial    — part real, part artifact / estimate
+//   unreliable — known to be mostly measurement artifact (or not measured)
+// `sinceConfig` names a config date after which the step becomes reliable.
+// headline.reliableLoss* sums the reliable + partial measured stages only.
+const RELIABILITY = {
+  separation: { level: 'unreliable', sinceConfig: 'LOSS_SEPARATION_RELIABLE_FROM',
+    reason: 'Volumes were computed from stale totalizer baselines before the SD-722 fix; batches closed before {since} are not trustworthy.' },
+  blend: { level: 'partial',
+    reason: 'Partly real: issued minus load-cell arrival is a measurement, but tanks a UHT pulled from while filling are upper bounds.' },
+  uht: { level: 'unreliable',
+    reason: 'Inside the surge-tank figure, which surge-tank level readings under-count; matched runs show finished goods at 95 % or more of milk into the UHT.' },
+  surge: { level: 'unreliable',
+    reason: 'Surge-tank level readings under-count arrival; matched runs show finished goods at 95 % or more of milk into the UHT.' },
+  filler: { level: 'partial',
+    reason: 'Line 1 only: metered inlet while running against good-carton counts × carton size. Not in the totals; fillers 2–6 are not measured.' },
+  packaging: { level: 'unreliable', reason: 'Not measured: no figure for this step.' },
+  shipping: { level: 'reliable',
+    reason: 'Destroyed pallets and write-offs recorded in NetSuite against product made in the window.' },
+}
+
+function parseSinceConfig(v) {
+  if (!v) return null
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? plantTime.startOfPlantDay(String(v)) : new Date(v)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+/** { level, reason, since } for a chain/stage key over a window. */
+function reliabilityFor(key, win) {
+  const r = RELIABILITY[key]
+  if (!r) return null
+  if (!r.sinceConfig) return { level: r.level, reason: r.reason, since: null }
+  const since = parseSinceConfig(config[r.sinceConfig])
+  if (!since) return { level: 'unreliable', reason: r.reason.replace(/; batches closed before \{since\} are not trustworthy\./, `; no fix date is set yet (${r.sinceConfig}), so no window is trustworthy.`), since: null }
+  const sinceIso = since.toISOString()
+  const sinceDay = plantTime.plantDateString(since)
+  if (win.from >= since) return { level: 'reliable', reason: `Batches closed on or after ${sinceDay} use the fixed totalizer baselines.`, since: sinceIso }
+  if (win.to <= since) return { level: 'unreliable', reason: r.reason.replace('{since}', sinceDay), since: sinceIso }
+  return { level: 'partial', reason: `${r.reason.replace('{since}', sinceDay)} Only batches closed from ${sinceDay} count toward reliable loss.`, since: sinceIso }
+}
 
 const num = v => (v == null ? 0 : Number(v))
 const round2 = v => Math.round(num(v) * 100) / 100
@@ -477,7 +525,20 @@ function summariseExcluded(rows) {
  * copied from the measured stage; combined/unmeasured steps carry nulls and
  * a warning. `shareOfMeasured*` feed the donut (measured steps only).
  */
-function buildChain(stages, shipping) {
+function fillerFigures(filler) {
+  if (!filler || !filler.available) {
+    return { warning: 'unavailable', lbsIn: null, wasteLbs: null, wasteLbsMeasured: null, wasteLbsUpperBound: null, pct: null,
+      wasteUsd: null, wasteUsdMeasured: null, wasteUsdUpperBound: null, lostRevenueUsd: null, lostRevenueUsdMeasured: null, lostRevenueUsdUpperBound: null,
+      batches: null, confidence: null, shareOfMeasuredUsd: null, shareOfMeasuredRevenueUsd: null, shareOfMeasuredLbs: null }
+  }
+  // Measured, line 1 only; never part of the totals or the donut shares.
+  return { warning: 'partial', lbsIn: filler.inletLbs, wasteLbs: filler.lossLbs, wasteLbsMeasured: filler.lossLbs, wasteLbsUpperBound: 0, pct: filler.lossPct,
+    wasteUsd: filler.costUsd, wasteUsdMeasured: filler.costUsd, wasteUsdUpperBound: filler.costUsd != null ? 0 : null,
+    lostRevenueUsd: filler.revenueUsd, lostRevenueUsdMeasured: filler.revenueUsd, lostRevenueUsdUpperBound: filler.revenueUsd != null ? 0 : null,
+    batches: filler.runs, confidence: 'measured', shareOfMeasuredUsd: null, shareOfMeasuredRevenueUsd: null, shareOfMeasuredLbs: null }
+}
+
+function buildChain(stages, shipping, filler = null, win = null) {
   const byKey = Object.fromEntries(stages.map(s => [s.key, s]))
   const totalUsd = stages.reduce((t, s) => t + (s.wasteUsd || 0), 0)
   const totalRev = stages.reduce((t, s) => t + (s.lostRevenueUsd || 0), 0)
@@ -490,6 +551,11 @@ function buildChain(stages, shipping) {
       measured: c.status === 'measured',
       warning: c.status === 'measured' ? (s && s.confidence !== 'measured' ? 'partly-estimated' : null) : (c.status === 'combined' ? 'combined' : 'not-measured'),
       what: c.what, howToMeasure: c.howToMeasure || null,
+      reliability: win ? reliabilityFor(c.key, win) : null,
+    }
+    if (c.key === 'filler') {
+      base.filler = filler || null
+      return { ...base, ...fillerFigures(filler) }
     }
     if (c.key === 'shipping') base.shipping = shippingDetail(shipping)
     if (c.key === 'shipping' && (!shipping || !shipping.available)) {
@@ -810,10 +876,47 @@ function buildInsights({ headline, stages, byEquipment, byProduct, byFamily, tre
   return out
 }
 
+// ── Reliability roll-up ─────────────────────────────────────────────────────
+
+/**
+ * Loss from the steps that can be trusted: reliable + partial stages, using
+ * the same (possibly ignoreUpperBounds-filtered) stage figures as the totals.
+ * A separation window that straddles LOSS_SEPARATION_RELIABLE_FROM counts only
+ * the batches closed from that date. Never changes the existing totals.
+ */
+async function reliableLoss(stages, win, ctx) {
+  let lbs = 0, usd = 0, rev = 0
+  const steps = []
+  for (const st of stages) {
+    const rel = st.reliability
+    if (!rel || rel.level === 'unreliable') continue
+    if (st.key === 'separation' && rel.level === 'partial' && rel.since) {
+      const rows = await querySeparation({ from: new Date(rel.since), to: win.to, groupBy: 'day' }, ctx)
+      lbs += rows.reduce((t, r) => t + num(r.wasteLbs), 0)
+      usd += rows.reduce((t, r) => t + num(r.wasteUsd), 0)
+      steps.push({ key: st.key, level: rel.level, fromSince: rel.since })
+      continue
+    }
+    lbs += num(st.wasteLbs); usd += num(st.wasteUsd); rev += num(st.lostRevenueUsd)
+    steps.push({ key: st.key, level: rel.level })
+  }
+  return { lbs: round2(lbs), usd: round2(usd), rev: round2(rev), steps }
+}
+
+/** Lazily-built REST historian for callers without one (digest job, scripts). */
+let _defaultHistorian = null
+function defaultHistorian() {
+  if (config.HISTORIAN_PROVIDER !== 'rest') return null
+  if (!_defaultHistorian) _defaultHistorian = require('../historian').createProvider('rest')
+  return _defaultHistorian
+}
+
 // ── Public: the report ──────────────────────────────────────────────────────
 
 async function getLossReport(params = {}) {
   const win = parseWindow(params)
+  // The filler step reads the historian; the route passes the app's provider.
+  const historian = params.historian || defaultHistorian()
   const compare = truthyParam(params.compare)
   // "Ignore upper bounds" (Andrew, 2026-09-14): drop every batch whose loss is
   // only an upper bound — its input pounds as well as its loss, so the loss %
@@ -824,16 +927,25 @@ async function getLossReport(params = {}) {
 
   const len = win.to - win.from
   const priorWin = { from: new Date(win.from.getTime() - len), to: win.from, groupBy: win.groupBy }
-  const [mesRows, shipping, priorShipping] = await Promise.all([
+  const [mesRows, shipping, priorShipping, filler] = await Promise.all([
     computeStages({ from: win.from, to: win.to, groupBy: win.groupBy }, ctx),
     fgShipmentService.getShippingStep({ ...windowDays(win), prices: ctx.prices }),
     compare ? fgShipmentService.getShippingStep({ ...windowDays(priorWin), prices: ctx.prices }) : Promise.resolve(null),
+    fillerLossService.getFillerStep({ from: win.from, to: win.to, historian, prices: ctx.prices, rates: ctx.rates }),
   ])
+  const plantBalance = await plantBalanceService.getPlantBalance({ ...windowDays(win), shipping })
   const allRows = [...mesRows, ...shippingRows(shipping, win.groupBy)]
   const excluded = summariseExcluded(allRows)
   const rows = ignoreUpperBounds ? allRows.filter(r => r.measurable) : allRows
   const stages = buildStages(rows)
+  for (const st of stages) st.reliability = reliabilityFor(st.key, win)
   const headline = buildHeadline(rows, stages)
+  const reliable = await reliableLoss(stages, win, ctx)
+  // Loss from reliable + partial steps only (a subset of lossUsd / lossLbs).
+  headline.reliableLossUsd = reliable.usd
+  headline.reliableLossLbs = reliable.lbs
+  headline.reliableLostRevenueUsd = reliable.rev
+  headline.reliableLossSteps = reliable.steps
   const byEquipment = buildByEquipment(rows)
   const byFamily = buildByFamily(rows, ctx)
   const byProduct = buildByProduct(rows)
@@ -866,6 +978,7 @@ async function getLossReport(params = {}) {
     const prowsAll = [...await computeStages(pw, ctx), ...shippingRows(priorShipping, win.groupBy)]
     const prows = ignoreUpperBounds ? prowsAll.filter(r => r.measurable) : prowsAll
     const pstages = buildStages(prows)
+    for (const st of pstages) st.reliability = reliabilityFor(st.key, pw)
     const pheadline = buildHeadline(prows, pstages)
     prior = { period: { from: pw.from.toISOString(), to: pw.to.toISOString() }, headline: pheadline, stages: pstages }
     headline.delta = {
@@ -883,7 +996,26 @@ async function getLossReport(params = {}) {
     insights.unshift({ kind: 'upper-bounds-excluded', usd: excluded.wasteUsdUpperBound,
       text: `Upper bounds ignored: ${excluded.batches} batch(es) whose loss could only be estimated are left out — ${fmtLbs(excluded.lbsIn)} of milk in and up to ${fmtUsd(excluded.wasteUsdUpperBound)} (cost) / ${fmtUsd(excluded.lostRevenueUsdUpperBound)} (revenue) of loss. Every figure on this page is measured.` })
   }
-  const chain = buildChain(stages, shipping)
+  const chain = buildChain(stages, shipping, filler, win)
+  if (headline.lossLbs > 0) {
+    const unreliable = stages.filter(x => x.reliability && x.reliability.level === 'unreliable' && x.wasteLbs > 0).map(x => x.label)
+    const share = headline.lossUsd > 0 ? Math.round((headline.reliableLossUsd / headline.lossUsd) * 100) : null
+    const trusted = reliable.steps.map(x => `${STAGE_LABEL[x.key]}${x.level === 'partial' ? ' (partly)' : ''}`)
+    insights.unshift({ kind: 'reliable-loss', usd: headline.reliableLossUsd,
+      text: `Of the ${fmtUsd(headline.lossUsd)} total, ${fmtUsd(headline.reliableLossUsd)}${share != null ? ` (${share}%)` : ''} and ${fmtLbs(headline.reliableLossLbs)} come from steps whose figures can be trusted${trusted.length ? `: ${trusted.join(', ')}` : ''}.${unreliable.length ? ` ${unreliable.join(' and ')} ${unreliable.length > 1 ? 'are' : 'is'} left out because ${unreliable.length > 1 ? 'those figures are' : 'that figure is'} mostly measurement artifact; each step's reliability says why.` : ''}` })
+  }
+  if (filler && filler.available) {
+    const g = v => `${Math.round(v || 0).toLocaleString('en-US')} gal`
+    insights.push({ kind: 'filler', usd: filler.costUsd,
+      text: `Filler 1 took in ${g(filler.inletGal)} while running and filled ${Math.round(filler.goodCartons).toLocaleString('en-US')} good cartons (${g(filler.goodCartonGal)}): ${g(Math.max(0, filler.lossGal))} (${fmtPct(filler.lossPct)}) never reached a good carton${filler.costUsd != null ? `, ${fmtUsd(filler.costUsd)} of raw milk` : ''}. Not added to the totals (it is already inside the surge-tank figure); fillers 2–6 are not metered.` })
+  } else if (filler) {
+    insights.push({ kind: 'filler-unavailable', usd: null, text: `Filler 1 loss is not available for this window: ${filler.reason}` })
+  }
+  if (plantBalance && plantBalance.available) {
+    const pb = plantBalance
+    insights.push({ kind: 'plant-balance', usd: null,
+      text: `Plant balance: ${fmtLbs(pb.received.lbs)} received on trucks${pb.inventory.drawdownLbs ? ` and ${fmtLbs(Math.abs(pb.inventory.drawdownLbs))} ${pb.inventory.drawdownLbs > 0 ? 'drawn down from' : 'added to'} the tanks` : ''}; ${fmtLbs(pb.cased.lbs)} (${fmtPct(pb.cased.pctOfReceived)}) went into cases and ${fmtLbs(pb.bulkShipped.lbs)} shipped in bulk, leaving ${fmtLbs(pb.lostBeforeCasing.lbs)} (${fmtPct(pb.lostBeforeCasing.pctOfReceived)} of receipts) that never reached a case.${pb.receiptsComplete ? '' : ' Receipts are not complete yet, so this can move.'}` })
+  }
   if (shipping && shipping.available) {
     const fmtN = v => Math.round(v || 0).toLocaleString('en-US')
     const topReason = shipping.loss.byReason[0]
@@ -895,7 +1027,7 @@ async function getLossReport(params = {}) {
   const unmeasuredSteps = chain.filter(c => c.status === 'not-measured').map(c => c.label)
   if (unmeasuredSteps.length) {
     insights.push({ kind: 'not-measured', usd: null,
-      text: `${unmeasuredSteps.join(' and ')} ${unmeasuredSteps.length > 1 ? 'are' : 'is'} not measured yet, so ${unmeasuredSteps.length > 1 ? 'their' : 'its'} loss is not in these totals. UHT loss is included in the surge-tank figure.` })
+      text: `${unmeasuredSteps.join(' and ')} ${unmeasuredSteps.length > 1 ? 'are' : 'is'} not measured yet, so ${unmeasuredSteps.length > 1 ? 'their' : 'its'} loss is not in these totals. UHT loss is included in the surge-tank figure; fillers are measured on line 1 only.` })
   }
 
   return {
@@ -911,6 +1043,7 @@ async function getLossReport(params = {}) {
     topEvents,
     trend,
     unaccounted,
+    plantBalance,
     insights,
     pricing: {
       families: Object.fromEntries(Object.entries(ctx.prices).map(([f, p]) => [f, { pricePerLb: p.pricePerLb, source: p.source, effectiveFrom: p.effectiveFrom }])),
@@ -1090,5 +1223,7 @@ module.exports = {
   parseWindow,
   STAGES,
   ZERO_ISSUED_LBS,
+  RELIABILITY,
+  reliabilityFor,
   _pricingContext: pricingContext,
 }
