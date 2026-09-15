@@ -792,10 +792,22 @@ async function countNoFlowBlendBatches({ from, to }) {
   return num(r && r.n)
 }
 
+// The SD-722 surge breaker columns exist only once a table set has booted this
+// version — probe once so the report still runs against older tables.
+let _surgeBreakerColumns = null
+async function hasSurgeBreakerColumns() {
+  if (_surgeBreakerColumns !== null) return _surgeBreakerColumns
+  const [r] = await query(`SELECT COUNT(*) AS n FROM sys.columns WHERE Name = N'issueBlockedReason' AND Object_ID = Object_ID(N'${P}MesSurgeTankBatches')`)
+  _surgeBreakerColumns = num(r && r.n) > 0
+  return _surgeBreakerColumns
+}
+
 async function queryUnaccounted({ from, to }, ctx) {
+  const breaker = await hasSurgeBreakerColumns()
   const sql = `
     SELECT 'surge' AS kind, s.[id], s.[tankId] AS tank, s.[productName], COALESCE(s.[completedAt], s.[createdAt]) AS closeAt,
-           s.[nsWorkOrderNumber], s.[lastIssueError], s.[consecutiveIssueFailures] AS fails, s.[layerSkipReason], s.[issueBlocked], s.[issueBlockedReason],
+           s.[nsWorkOrderNumber], s.[lastIssueError], s.[consecutiveIssueFailures] AS fails, s.[layerSkipReason],
+           ${breaker ? 's.[issueBlocked], s.[issueBlockedReason]' : 'CAST(0 AS bit) AS issueBlocked, CAST(NULL AS nvarchar(500)) AS issueBlockedReason'},
            ${ctx.familyCase(['componentItemId', 'mesItem']).replace(/\[(componentItemId|mesItem)\]/g, 's.[$1]')} AS family,
            (SELECT SUM(CASE WHEN i.[lastTotalizerGal] - i.[lastIssuedUhtGal] > 0 THEN i.[lastTotalizerGal] - i.[lastIssuedUhtGal] ELSE 0 END)
               FROM ${T.issue} i WHERE i.[surgeTankBatchId] = s.[id]) AS unIssuedGal
