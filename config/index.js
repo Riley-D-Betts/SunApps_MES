@@ -118,6 +118,18 @@ module.exports = {
   // this we just defer to the next tick so we don't spam NS with sub-pound noise.
   MES_MIN_ISSUE_LBS: parseFloat(process.env.MES_MIN_ISSUE_LBS || '10'),
   MES_MIN_COMPLETION_LBS: parseFloat(process.env.MES_MIN_COMPLETION_LBS || '1'),
+  // Surge issue circuit breaker (SD-722). After this many consecutive surge
+  // issue failures with the same error signature (12 ≈ 1 h at the 5-min tick)
+  // the batch is flagged issueBlocked and the shortfall auto-adjust stops
+  // fabricating inventory for it. The issue itself keeps retrying (cursor held)
+  // and the block clears on the first success. 0 disables the breaker.
+  MES_SURGE_ISSUE_BREAKER_FAILURES: Math.max(0, parseInt(process.env.MES_SURGE_ISSUE_BREAKER_FAILURES || '12', 10) || 0),
+  // How far back the surge Layer-3 resolver looks for a COMPLETED blend batch on
+  // the feeding tank when none is active (SD-722). Kept at 72 h: prod pins that
+  // were canonical-and-correct occurred 55–70 h after the blend batch finished
+  // (slow-draining tanks), so 48 h would drop real pins. Mis-pins are stopped by
+  // the FG cross-check (canonical raw or approved pairing), not by the window.
+  MES_SURGE_RECENT_BLEND_WINDOW_HOURS: parseFloat(process.env.MES_SURGE_RECENT_BLEND_WINDOW_HOURS || '72') || 72,
   // Waste-tracking noise floors (lbs). Completion is driven by measured arrival
   // into the destination vessel; issued − arrival = waste (NS shrinkage). These
   // floors keep load-cell / level sensor jitter from fabricating phantom

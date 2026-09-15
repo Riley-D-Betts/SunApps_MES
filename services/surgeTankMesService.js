@@ -11,6 +11,7 @@ const config = require('../config')
 const db = require('../models')
 const clock = require('../sim/clock')
 const notifyService = require('./notifyService')
+const rawMilkPriceService = require('./rawMilkPriceService')
 
 function nsErrShort(err) {
   const msg = String(err?.message || '')
@@ -140,17 +141,32 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
   // matching block in blendTankMesService.buildWoIssueBody for details.
   quantity = Math.floor(quantity * 100) / 100
 
+  // SD-722 circuit breaker: a blocked batch never fabricates inventory.
+  const allowShortfallAdjust = opts.allowShortfallAdjust !== false
+
   let allocations = null
   let resolvedBinId = preferredBinId
   if (tracking.isLot) {
-    allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, preferredBinId)
+    // SD-722: only bin-filter lots for items that actually USE bins. 16 raw FG
+    // items in prod NS are lot-numbered with usebins=F (8352 Raw DG Half & Half,
+    // 8349, 8350, 8351, 8357, 8348, …): their blend completions and every
+    // shortfall adjustment land in lots with NO bin, so a `bal.binnumber =
+    // <blend tank bin>` filter always found "0 across 0 lot(s)" and the
+    // shortfall bump fabricated ~100k lb into an invisible bin-less lot every
+    // tick (62.8M lb of 8352 on hand by 2026-09-15). Without bins the lot is the
+    // only location, and buildAssignmentItems already emits the lot-only
+    // assignment (issueinventorynumber, no binnumber) for isLot && !useBins.
+    const allocBinId = tracking.useBins ? preferredBinId : null
+    allocations = await nsInventory.findInventoryAllocations(targetItemId, quantity, allocBinId)
     let allocatedQty = allocations.reduce((s, a) => s + a.qty, 0)
     if (allocatedQty + 1e-6 < quantity) {
       const shortfall = quantity - allocatedQty + SHORTFALL_BUFFER_LBS
-      const adjusted = await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall })
+      const adjusted = allowShortfallAdjust
+        ? await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall })
+        : false
       if (adjusted) {
         // Poll with backoff — NS inventorybalance lags the adjustment POST.
-        const result = await pollAllocations(targetItemId, quantity, preferredBinId)
+        const result = await pollAllocations(targetItemId, quantity, allocBinId)
         allocations = result.allocations
         allocatedQty = result.allocatedQty
       }
@@ -179,7 +195,7 @@ async function buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, preferred
         ? await inventoryAdjustment.getBinQtyOnHand(targetItemId, preferredBinId)
         : 0
       const realShortfall = quantity - currentOnHand + SHORTFALL_BUFFER_LBS
-      const adjusted = preferredBinId && realShortfall > 0
+      const adjusted = allowShortfallAdjust && preferredBinId && realShortfall > 0
         ? await tryShortfallAutoAdjust({ nsWorkOrderId, targetItemId, preferredBinId, shortfall: realShortfall })
         : false
       if (adjusted) {
@@ -327,7 +343,7 @@ function parseUnavailableLots(err) {
 // body. We fabricate onto the real lot the issue references (not a phantom new
 // lot): if blend later completes that lot, the at-rest sweep reconciles the
 // overshoot. See Bug B + [[downstream_waste_tracking]]. Returns { nsResult, body }.
-async function postSurgeIssueWithShortfallRetry({ nsWorkOrderId, targetItemId, binId, body, tankName, quantity, bomLines, woHasLotLines, tracking }) {
+async function postSurgeIssueWithShortfallRetry({ nsWorkOrderId, targetItemId, binId, body, tankName, quantity, bomLines, woHasLotLines, tracking, allowShortfallAdjust = true }) {
   try {
     const nsResult = await core.netsuitePost(`/record/v1/workOrder/${nsWorkOrderId}/!transform/workOrderIssue`, body)
     return { nsResult, body }
@@ -341,11 +357,13 @@ async function postSurgeIssueWithShortfallRetry({ nsWorkOrderId, targetItemId, b
         && bomLines && quantity != null) {
       const flipped = !woHasLotLines
       console.warn(`[SurgeTankMesService] WO ${nsWorkOrderId} item ${targetItemId} rejected with wrapper-mismatch ("${(err.message || '').replace(/\s+/g, ' ').slice(0, 90)}…") — retrying with ${flipped ? 'lowercase componentinventorydetail' : 'camelCase inventoryDetail'} wrapper`)
-      const rebuilt = await buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, binId, bomLines, { forceWoHasLotLines: flipped })
+      const rebuilt = await buildWoIssueBody(nsWorkOrderId, targetItemId, quantity, binId, bomLines, { forceWoHasLotLines: flipped, allowShortfallAdjust })
       const nsResult = await core.netsuitePost(`/record/v1/workOrder/${nsWorkOrderId}/!transform/workOrderIssue`, rebuilt.body)
       return { nsResult, body: rebuilt.body }
     }
     if (!isInventoryUnavailable(err)) throw err
+    // SD-722 circuit breaker: a blocked batch doesn't top lots up either.
+    if (!allowShortfallAdjust) throw err
     const shorts = parseUnavailableLots(err)
     if (!binId || shorts.length === 0) throw err
 
@@ -407,6 +425,95 @@ function isSiloRef(name) {
   return !!itemConfig.normalizeSiloName(name)
 }
 
+// ── Layer-3 component cross-check (SD-722) ──────────────────────────────────
+// Prod evidence (30 days to 2026-09-15): surge batches were pinned to a raw
+// component that had nothing to do with the FG being packaged — e.g. ST81/ST84
+// "Kirkland Organic Whole Milk" pinned to 8352 Raw DG Half & Half because that
+// was the most recent completed blend batch on BlendTank2A (42–57 h earlier),
+// and ST81/ST82 Kirkland Organic Whole pinned to 8368 Raw Organic A2 3.25% off
+// the silo line. Every tick then failed "Insufficient inventory" and the
+// shortfall auto-adjust fabricated the wrong item into the bin every 5 min.
+//
+// Two strengths of check:
+//   strict (a HISTORICAL guess — the recent-completed-blend fallback): the
+//     component must be the canonical raw FG for the FG (FG_TO_RAW_FG_MAP) or an
+//     ops-APPROVED pairing in MesFgInputPairings. A pending/unknown combo is not
+//     good enough to bet a whole batch's issues on.
+//   family (a LIVE signal — active blend batch, live SCADA name, silo feed
+//     line): canonical/approved always pass; otherwise the milk family
+//     (conventional / organic / a2 / cream_*, rawMilkPriceService taxonomy)
+//     must not contradict the FG's. Unknown family on either side passes —
+//     a live signal is not overridden on a guess.
+async function vetComponentForFg(fgItemId, componentItemId, { strict = false } = {}) {
+  if (!fgItemId || !componentItemId) return { ok: true, why: 'unchecked' }
+  const fg = String(fgItemId)
+  const comp = String(componentItemId)
+  const canonical = itemConfig.FG_TO_RAW_FG_MAP[fg]
+  if (canonical != null && String(canonical) === comp) return { ok: true, why: 'canonical' }
+  let pair = null
+  try {
+    pair = await db.MesFgInputPairing.findOne({ where: { fgItemId: Number(fg), rawInputItemId: Number(comp) }, attributes: ['status'] })
+  } catch (err) {
+    console.warn(`[SurgeTankMesService] vetComponentForFg pairing lookup failed: ${err.message}`)
+  }
+  if (pair?.status === 'approved') return { ok: true, why: 'approved' }
+  if (strict) {
+    return { ok: false, reason: `component ${comp} is neither the canonical raw (${canonical ?? 'none'}) nor an approved pairing for FG ${fg}` }
+  }
+  const fgFam = rawMilkPriceService.familyForBatch(null, fg)
+  const compFam = rawMilkPriceService.familyForBatch(comp, null)
+  if (fgFam && compFam && fgFam !== compFam) {
+    return { ok: false, reason: `family mismatch: component ${comp} is ${compFam}, FG ${fg} is ${fgFam}` }
+  }
+  return { ok: true, why: 'family' }
+}
+
+// Most recent COMPLETED blend batch on a tank (with real completed output —
+// phantom 0-lb NOTE_STRING transients have no NS inventory) that is an
+// acceptable strict match for the FG. Scans the recent candidates newest-first
+// so a canonical batch isn't hidden behind a newer, unrelated one (the 8352
+// mis-pin). With no FG to check against, returns the newest (legacy behavior).
+// Returns { batch, skippedNewer } or { batch: null, rejected, reason }.
+async function findRecentBlendBatchForFg(tankId, fgItemId) {
+  const since = new Date(clock.now() - config.MES_SURGE_RECENT_BLEND_WINDOW_HOURS * 60 * 60 * 1000)
+  const candidates = await db.MesBlendTankBatch.findAll({
+    where: {
+      tankId,
+      status: 'completed',
+      mesItem: { [db.Sequelize.Op.ne]: null },
+      cumulativeCompletedLbs: { [db.Sequelize.Op.gt]: 0 },
+      // Upper bound matters in historical replay (sim clock behind wall time).
+      detectedAt: { [db.Sequelize.Op.gte]: since, [db.Sequelize.Op.lte]: new Date(clock.now()) },
+    },
+    order: [['detectedAt', 'DESC']],
+    limit: 10,
+  })
+  if (candidates.length === 0) return { batch: null, rejected: null, reason: 'no recent completed blend batch' }
+  if (!fgItemId) return { batch: candidates[0], skippedNewer: false }
+  for (let i = 0; i < candidates.length; i++) {
+    const v = await vetComponentForFg(fgItemId, candidates[i].mesItem, { strict: true })
+    if (v.ok) return { batch: candidates[i], skippedNewer: i > 0 }
+  }
+  const first = candidates[0]
+  return {
+    batch: null,
+    rejected: first,
+    reason: `recent blend batches on ${tankId} (newest: ${first.mesItem} "${first.productName}") are not canonical/approved for FG ${fgItemId}`,
+  }
+}
+
+// A resolver result that means "we know what we'd have pinned, and it's wrong
+// for this FG" — the caller must NOT pin it. layerSkipReason is STRING(30).
+function deferredPin(rejectedItemId, rejectedItemName, reason) {
+  return {
+    deferred: true,
+    rejectedItemId: rejectedItemId != null ? String(rejectedItemId) : null,
+    rejectedItemName: rejectedItemName || null,
+    reason,
+    layerSkipReason: 'pin-rejected',
+  }
+}
+
 /**
  * Decide the single component item that the surge tank's Layer-3 WO should
  * consume, based on what's physically feeding the UHT at WO-create time, and
@@ -430,10 +537,22 @@ function isSiloRef(name) {
  * or leaves them pending forever (no blocklist).
  */
 async function resolveLayer3Component(data, historian, fgItem) {
-  const resolved = await _resolveLayer3Source(data, historian)
+  const fgItemId = fgItem?.id ? Number(fgItem.id) : null
+  const resolved = await _resolveLayer3Source(data, historian, fgItemId)
   if (!resolved) return null
 
-  const fgItemId = fgItem?.id ? Number(fgItem.id) : null
+  // SD-722: the resolver found a component but it contradicts the FG. Don't
+  // pin it. Still log the combo as a pending pairing so ops can approve it in
+  // /api/mes/fg-pairings if it was actually legitimate — the unpinned tick
+  // re-resolves every tick and picks it up as soon as it's approved.
+  if (resolved.deferred) {
+    console.warn(`[SurgeTankMesService] Layer-3 pin REJECTED for FG ${fgItemId}: ${resolved.reason} — WO will run unpinned, issues deferred until a valid component resolves`)
+    if (fgItemId && resolved.rejectedItemId) {
+      await ensurePendingPairing(fgItemId, fgItem?.name, resolved.rejectedItemId, resolved.rejectedItemName)
+    }
+    return { ...resolved, pairingStatus: 'pending_review' }
+  }
+
   if (!fgItemId) return { ...resolved, pairingStatus: null }
 
   const rawInputItemId = Number(resolved.itemId)
@@ -453,22 +572,7 @@ async function resolveLayer3Component(data, historian, fgItem) {
   } else {
     pairingStatus = 'pending_review'
     if (!pair) {
-      try {
-        await db.MesFgInputPairing.create({
-          fgItemId,
-          rawInputItemId,
-          status: 'pending',
-          fgName: fgItem.name || null,
-          rawInputName: resolved.itemName || null,
-          createdBy: 'auto',
-        })
-        console.log(`[SurgeTankMesService] New pairing flagged for review: FG ${fgItemId} (${fgItem.name}) ← raw ${rawInputItemId} (${resolved.itemName})`)
-      } catch (err) {
-        // Race: a concurrent batch inserted the same pairing first — fine.
-        if (err.name !== 'SequelizeUniqueConstraintError') {
-          console.warn(`[SurgeTankMesService] Failed to log pending pairing: ${err.message}`)
-        }
-      }
+      await ensurePendingPairing(fgItemId, fgItem.name, rawInputItemId, resolved.itemName)
     } else {
       console.log(`[SurgeTankMesService] Pairing still pending review: FG ${fgItemId} ← raw ${rawInputItemId} (id=${pair.id})`)
     }
@@ -476,9 +580,32 @@ async function resolveLayer3Component(data, historian, fgItem) {
   return { ...resolved, pairingStatus }
 }
 
-// Inner: resolve which NS item feeds the surge WO, agnostic of pairing status.
-// Returns { itemId, itemName, binId, resolvedFrom, layerSkipReason } or null.
-async function _resolveLayer3Source(data, historian) {
+async function ensurePendingPairing(fgItemId, fgName, rawInputItemId, rawInputName) {
+  try {
+    const existing = await db.MesFgInputPairing.findOne({ where: { fgItemId: Number(fgItemId), rawInputItemId: Number(rawInputItemId) } })
+    if (existing) return
+    await db.MesFgInputPairing.create({
+      fgItemId: Number(fgItemId),
+      rawInputItemId: Number(rawInputItemId),
+      status: 'pending',
+      fgName: fgName || null,
+      rawInputName: rawInputName || null,
+      createdBy: 'auto',
+    })
+    console.log(`[SurgeTankMesService] New pairing flagged for review: FG ${fgItemId} (${fgName}) ← raw ${rawInputItemId} (${rawInputName})`)
+  } catch (err) {
+    // Race: a concurrent batch inserted the same pairing first — fine.
+    if (err.name !== 'SequelizeUniqueConstraintError') {
+      console.warn(`[SurgeTankMesService] Failed to log pending pairing: ${err.message}`)
+    }
+  }
+}
+
+// Inner: resolve which NS item feeds the surge WO. fgItemId (optional) drives
+// the SD-722 cross-check (vetComponentForFg). Returns
+// { itemId, itemName, binId, resolvedFrom, layerSkipReason }, a deferredPin()
+// result when the only candidate contradicts the FG, or null (nothing yet).
+async function _resolveLayer3Source(data, historian, fgItemId = null) {
   const feedingFromEntName = data.feedingFromEntName
   const feedingUhtId = data.feedingUhtId
   if (!feedingFromEntName) {
@@ -487,44 +614,54 @@ async function _resolveLayer3Source(data, historian) {
     // this UHT's TSTAT and carry sourceSilo so the batch can display the real
     // silo instead of "?".
     const fromLine = await resolveComponentFromUhtFeedLine(feedingUhtId, historian)
-    return fromLine ? { ...fromLine, layerSkipReason: 'layer-1-and-2-skip' } : null
+    if (!fromLine) return null
+    const v = await vetComponentForFg(fgItemId, fromLine.itemId)
+    if (!v.ok) return { ...deferredPin(fromLine.itemId, fromLine.itemName, `UHT feed line: ${v.reason}`), sourceSilo: fromLine.sourceSilo }
+    return { ...fromLine, layerSkipReason: 'layer-1-and-2-skip' }
   }
 
   if (isBlendTankRef(feedingFromEntName)) {
-    let blendBatch = await db.MesBlendTankBatch.findOne({
+    const binId = itemConfig.getBinId(feedingFromEntName)
+    const activeBatch = await db.MesBlendTankBatch.findOne({
       where: { tankId: feedingFromEntName, status: 'active' },
       order: [['detectedAt', 'DESC']],
     })
-    if (!blendBatch?.mesItem) {
-      // Blend tank may have finished before the surge batch resolved. Fall back
-      // to the most recent batch on that tank within 48 h that actually completed
-      // some product (cumulativeCompletedLbs > 0). Phantom batches (9-second
-      // NOTE_STRING transients with 0 lbs) are explicitly excluded — they have
-      // no NS inventory and would cause every surge tick to fail with
-      // "Insufficient inventory".
-      blendBatch = await db.MesBlendTankBatch.findOne({
-        where: {
-          tankId: feedingFromEntName,
-          status: 'completed',
-          mesItem: { [db.Sequelize.Op.ne]: null },
-          cumulativeCompletedLbs: { [db.Sequelize.Op.gt]: 0 },
-          detectedAt: { [db.Sequelize.Op.gte]: new Date(clock.now() - 72 * 60 * 60 * 1000) },
-        },
-        order: [['detectedAt', 'DESC']],
-      })
+    if (activeBatch?.mesItem) {
+      // Live signal: the tank's currently-named product. Family check only.
+      const v = await vetComponentForFg(fgItemId, activeBatch.mesItem)
+      if (!v.ok) return deferredPin(activeBatch.mesItem, activeBatch.productName, `active blend batch on ${feedingFromEntName}: ${v.reason}`)
+      return { itemId: String(activeBatch.mesItem), itemName: activeBatch.productName, binId, resolvedFrom: 'blend-tank', layerSkipReason: null }
     }
-    if (!blendBatch?.mesItem) {
-      console.warn(`[SurgeTankMesService] _resolveLayer3Source: no blend batch (active or recent with completions) on ${feedingFromEntName} — deferring`)
-      return null
+
+    // Blend tank may have finished before the surge batch resolved. Fall back
+    // to a recent completed batch (MES_SURGE_RECENT_BLEND_WINDOW_HOURS, with
+    // real completed output) — but only one that is canonical/approved for this
+    // FG (strict: it's a historical guess, not a live signal).
+    const recent = await findRecentBlendBatchForFg(feedingFromEntName, fgItemId)
+    if (recent.batch) {
+      return {
+        itemId: String(recent.batch.mesItem),
+        itemName: recent.batch.productName,
+        binId,
+        // 'blend-tank-recent-fg' = a newer, non-matching batch was skipped over.
+        resolvedFrom: recent.skippedNewer ? 'blend-tank-recent-fg' : 'blend-tank-recent',
+        layerSkipReason: null,
+      }
     }
-    const resolvedFrom = blendBatch.status === 'active' ? 'blend-tank' : 'blend-tank-recent'
-    return {
-      itemId: String(blendBatch.mesItem),
-      itemName: blendBatch.productName,
-      binId: itemConfig.getBinId(feedingFromEntName),
-      resolvedFrom,
-      layerSkipReason: null,
+
+    // Last resort: the tank's LIVE SCADA product name (same fallback the tick's
+    // legacy resolver uses), family-checked like any live signal.
+    const live = await resolveBlendTankLiveProduct(feedingFromEntName, historian)
+    if (live) {
+      const v = await vetComponentForFg(fgItemId, live.itemId)
+      if (v.ok) return { ...live, layerSkipReason: null }
+      return deferredPin(live.itemId, live.itemName, `live product on ${feedingFromEntName}: ${v.reason}`)
     }
+    if (recent.rejected) {
+      return deferredPin(recent.rejected.mesItem, recent.rejected.productName, recent.reason)
+    }
+    console.warn(`[SurgeTankMesService] _resolveLayer3Source: no blend batch (active or recent with completions) on ${feedingFromEntName} — deferring`)
+    return null
   }
 
   if (isSiloRef(feedingFromEntName)) {
@@ -540,6 +677,8 @@ async function _resolveLayer3Source(data, historian) {
         if (feedingLine?.productName) {
           const lineItem = lineMapper.resolveLineProduct(feedingLine.productName)
           if (lineItem?.id) {
+            const v = await vetComponentForFg(fgItemId, lineItem.id)
+            if (!v.ok) return deferredPin(lineItem.id, lineItem.name, `silo line ${silo}: ${v.reason}`)
             const skipReason = itemConfig.isBulkRawId(lineItem.id) ? 'layer-1-and-2-skip' : 'layer-2-skip'
             return {
               itemId: String(lineItem.id),
@@ -564,6 +703,28 @@ async function _resolveLayer3Source(data, historian) {
 
   console.warn(`[SurgeTankMesService] _resolveLayer3Source: unknown feeding source: ${feedingFromEntName}`)
   return null
+}
+
+// Parse a blend tank's LIVE SCADA product name to its raw blend item (e.g.
+// "Marcels 1%" → NS 8340). Null when the tank has no parseable name.
+async function resolveBlendTankLiveProduct(tankId, historian) {
+  if (!historian) return null
+  try {
+    const tankStatuses = await historian.getBlendTankStatus()
+    const tank = (tankStatuses || []).find(t => t.tankId === tankId)
+    const parsed = tank?.productName ? blendProductParser.parseProductName(tank.productName) : null
+    if (!parsed?.nsId) return null
+    return {
+      itemId: String(parsed.nsId),
+      itemName: parsed.name,
+      binId: itemConfig.getBinId(tankId),
+      resolvedFrom: 'blend-tank-live-product',
+      liveName: tank.productName,
+    }
+  } catch (err) {
+    console.warn(`[SurgeTankMesService] live blend product lookup for ${tankId} failed — ${err.message}`)
+    return null
+  }
 }
 
 /**
@@ -634,12 +795,17 @@ async function resolveSurgeTankComponent(batch, historian) {
     }
   }
 
+  // Unpinned: legacy batches, and (SD-722) batches whose create-time pin was
+  // rejected by the FG cross-check. Re-resolve every tick through the same
+  // vetted resolver as WO create, so the tick can't re-introduce the mis-pin
+  // (batch 73: DFI Marcels 1% issued against 8357 Raw DFI Holiday Nog). A
+  // rejected result returns null — the caller defers and holds the cursor, and
+  // an ops approval of the pending pairing makes the next tick resolve.
   let feedingFromEntName = batch.feedingFromEntName
   const feedingUhtId = batch.feedingUhtId
-  if (!feedingFromEntName) {
+  if (!feedingFromEntName && feedingUhtId && historian) {
     // Retroactive recovery: batches started before the feedingFromEntName fix
     // have null here. Try the live valve-based value from the current UHT status.
-    if (!feedingUhtId || !historian) return null
     try {
       const uhtList = await historian.getUhtStatus()
       const uhtStatus = uhtList.find(u => u.uhtId === feedingUhtId)
@@ -647,125 +813,40 @@ async function resolveSurgeTankComponent(batch, historian) {
     } catch (err) {
       console.warn(`[SurgeTankMesService] resolveSurgeTankComponent: live UHT lookup failed — ${err.message}`)
     }
-    if (!feedingFromEntName) {
-      // Silo→TSTAT→UHT bypass (A2 Whole: MSilo3 → TSTAT1 → UHT1 → ST81). No
-      // blend-tank valve is open, so the UHT has no fromEntName to recover.
-      // Resolve the component straight from the line feeding this UHT's TSTAT.
-      const fromLine = await resolveComponentFromUhtFeedLine(feedingUhtId, historian)
-      if (fromLine) {
-        // Backfill the source silo onto the batch so the UI stops showing
-        // "Source ?" — and so future ticks take the stable isSiloRef path.
-        if (fromLine.sourceSilo && batch.feedingFromEntName !== fromLine.sourceSilo) {
-          try {
-            await batch.update({ feedingFromEntName: fromLine.sourceSilo })
-            console.log(`[SurgeTankMesService] Backfilled feedingFromEntName="${fromLine.sourceSilo}" on batch ${batch.id} (${batch.tankId}) from UHT feed line`)
-          } catch (err) {
-            console.warn(`[SurgeTankMesService] Failed to backfill feedingFromEntName on batch ${batch.id}: ${err.message}`)
-          }
-        }
-        console.log(`[SurgeTankMesService] resolveSurgeTankComponent: ${batch.tankId} fed via UHT ${feedingUhtId} bypass — component "${fromLine.itemName}" (NS ${fromLine.itemId}) from feed line`)
-        return fromLine
-      }
-      return null
-    }
-    // Pin it so future ticks skip this lookup.
-    await batch.update({ feedingFromEntName })
-    console.log(`[SurgeTankMesService] Retroactively pinned feedingFromEntName="${feedingFromEntName}" on batch ${batch.id} (${batch.tankId})`)
-  }
-
-  if (isBlendTankRef(feedingFromEntName)) {
-    let blendBatch = await db.MesBlendTankBatch.findOne({
-      where: { tankId: feedingFromEntName, status: 'active' },
-      order: [['detectedAt', 'DESC']],
-    })
-    if (!blendBatch?.mesItem) {
-      // Same phantom-exclusion filter as _resolveLayer3Source: require > 0 lbs
-      // completed and extend to 48h so real older batches aren't missed.
-      blendBatch = await db.MesBlendTankBatch.findOne({
-        where: {
-          tankId: feedingFromEntName,
-          status: 'completed',
-          mesItem: { [db.Sequelize.Op.ne]: null },
-          cumulativeCompletedLbs: { [db.Sequelize.Op.gt]: 0 },
-          detectedAt: { [db.Sequelize.Op.gte]: new Date(clock.now() - 72 * 60 * 60 * 1000) },
-        },
-        order: [['detectedAt', 'DESC']],
-      })
-    }
-    if (!blendBatch?.mesItem) {
-      // No MES blend batch on the feeding tank — it was filled before this
-      // replay window, named without a fill to open a batch, or a reset wiped
-      // it (BlendTank1B post-reset, 2026-06-01). Fall back to the tank's LIVE
-      // SCADA product name and parse it to the same raw blend item a batch
-      // would carry — exactly what the dashboard shows (e.g. "Marcels 1%" →
-      // NS 8340). Lets the surge WO resolve its component without depending on
-      // a blend batch existing.
-      if (historian) {
-        try {
-          const tankStatuses = await historian.getBlendTankStatus()
-          const tank = (tankStatuses || []).find(t => t.tankId === feedingFromEntName)
-          const parsed = tank?.productName ? blendProductParser.parseProductName(tank.productName) : null
-          if (parsed?.nsId) {
-            console.log(`[SurgeTankMesService] resolveSurgeTankComponent: no batch on ${feedingFromEntName}; resolved component from live product "${tank.productName}" → NS ${parsed.nsId}`)
-            return {
-              itemId: String(parsed.nsId),
-              itemName: parsed.name,
-              binId: itemConfig.getBinId(feedingFromEntName),
-              resolvedFrom: 'blend-tank-live-product',
-            }
-          }
-        } catch (err) {
-          console.warn(`[SurgeTankMesService] resolveSurgeTankComponent: live blend product lookup for ${feedingFromEntName} failed — ${err.message}`)
-        }
-      }
-      console.warn(`[SurgeTankMesService] No blend-tank batch (active or recent) and no parseable live product on ${feedingFromEntName} — cannot resolve component`)
-      return null
-    }
-    const resolvedFrom = blendBatch.status === 'active' ? 'blend-tank-batch' : 'blend-tank-batch-recent'
-    return {
-      itemId: String(blendBatch.mesItem),
-      itemName: blendBatch.productName,
-      binId: itemConfig.getBinId(feedingFromEntName),
-      resolvedFrom,
+    if (feedingFromEntName) {
+      // Pin it so future ticks skip this lookup.
+      await batch.update({ feedingFromEntName })
+      console.log(`[SurgeTankMesService] Retroactively pinned feedingFromEntName="${feedingFromEntName}" on batch ${batch.id} (${batch.tankId})`)
     }
   }
+  if (!feedingFromEntName && !feedingUhtId) return null
 
-  if (isSiloRef(feedingFromEntName)) {
-    const silo = itemConfig.normalizeSiloName(feedingFromEntName) || feedingFromEntName
-    let resolved = null
-    if (feedingUhtId) {
-      try {
-        const tokens = uhtFeedTokens(feedingUhtId)
-        const lineReadings = await historian.getMilkLineStatus()
-        const feedingLine = lineReadings.find(r => {
-          const dest = String(r.requestedBy || '').toUpperCase()
-          return tokens.some(t => dest.includes(t))
-        })
-        if (feedingLine?.productName) {
-          const lineItem = lineMapper.resolveLineProduct(feedingLine.productName)
-          if (lineItem?.id) {
-            resolved = {
-              itemId: String(lineItem.id),
-              itemName: lineItem.name,
-              binId: itemConfig.getBinId(feedingLine.siloName || silo),
-              resolvedFrom: 'silo-line-product',
-            }
-          }
-        }
-      } catch (err) {
-        console.warn(`[SurgeTankMesService] resolveSurgeTankComponent: line lookup failed — ${err.message}`)
-      }
-    }
-    if (resolved) return resolved
-    // No live feeding-line product → do NOT guess from a static silo item
-    // (silos are product-flexible). Return null so the tick defers and the
-    // batch surfaces on the Surge Tank Review backlog.
-    console.warn(`[SurgeTankMesService] resolveSurgeTankComponent: no live product for silo ${silo} — deferring to Surge Tank Review`)
+  const resolved = await _resolveLayer3Source({ feedingFromEntName, feedingUhtId }, historian, batch.mesItem || null)
+  if (!resolved) {
+    console.log(`[SurgeTankMesService] resolveSurgeTankComponent: nothing resolves for ${batch.tankId} (from ${feedingFromEntName || '?'} via ${feedingUhtId || '?'})`)
+    return null
+  }
+  if (resolved.deferred) {
+    console.warn(`[SurgeTankMesService] resolveSurgeTankComponent: ${batch.tankId} component rejected — ${resolved.reason}`)
     return null
   }
 
-  console.warn(`[SurgeTankMesService] Unknown feeding source: ${feedingFromEntName}`)
-  return null
+  // Silo→TSTAT→UHT bypass: backfill the source silo onto the batch so the UI
+  // stops showing "Source ?" — and so future ticks take the stable silo path.
+  if (!batch.feedingFromEntName && resolved.sourceSilo) {
+    try {
+      await batch.update({ feedingFromEntName: resolved.sourceSilo })
+      console.log(`[SurgeTankMesService] Backfilled feedingFromEntName="${resolved.sourceSilo}" on batch ${batch.id} (${batch.tankId}) from UHT feed line`)
+    } catch (err) {
+      console.warn(`[SurgeTankMesService] Failed to backfill feedingFromEntName on batch ${batch.id}: ${err.message}`)
+    }
+  }
+  return {
+    itemId: resolved.itemId,
+    itemName: resolved.itemName,
+    binId: resolved.binId,
+    resolvedFrom: resolved.resolvedFrom,
+  }
 }
 
 async function processWOStart(data, historian) {
@@ -828,7 +909,12 @@ async function processWOStart(data, historian) {
       console.warn(`[SurgeTankMesService] resolveLayer3Component threw — proceeding without pin: ${err.message}`)
     }
   }
-  if (resolvedComponent) {
+  // SD-722: a rejected pin carries no itemId — keep it off the row and the WO
+  // body, but record WHY on the batch so the review/loss surfaces can show it.
+  const pinRejected = !!resolvedComponent?.deferred
+  if (pinRejected) {
+    console.warn(`  Layer-3 component REJECTED (${resolvedComponent.rejectedItemId} "${resolvedComponent.rejectedItemName || ''}"): ${resolvedComponent.reason}`)
+  } else if (resolvedComponent) {
     console.log(`  Layer-3 component: NS ${resolvedComponent.itemId} (${resolvedComponent.itemName}) from ${resolvedComponent.resolvedFrom}${resolvedComponent.layerSkipReason ? ` [${resolvedComponent.layerSkipReason}]` : ''} (pairing: ${resolvedComponent.pairingStatus || 'n/a'})`)
   }
 
@@ -848,6 +934,9 @@ async function processWOStart(data, historian) {
     componentResolvedFrom: resolvedComponent?.resolvedFrom || null,
     layerSkipReason: resolvedComponent?.layerSkipReason || null,
     pairingStatus: resolvedComponent?.pairingStatus || null,
+    // Pin rejection detail lives in issueBlockedReason (not issueBlocked — the
+    // batch isn't failing NS, it's deferring) so Surge Tank Review can show it.
+    issueBlockedReason: pinRejected ? String(`pin rejected: ${resolvedComponent.reason}`).slice(0, 500) : null,
     parserConfidence: assemblyItem.confidence,
     status: 'active',
     detectedAt: detectedAt || new Date(clock.now()),
@@ -1149,6 +1238,10 @@ async function processWOEnd(data, historian) {
       meteredDrainApplied: config.MES_METERED_DRAIN,
       closedZeroIssued,
       unIssuedLbs,
+      issueBlocked: !!record.issueBlocked,
+      issueBlockedReason: record.issueBlockedReason || null,
+      componentItemId: record.componentItemId || null,
+      layerSkipReason: record.layerSkipReason || null,
       flushedIssue,
       flushedCompletion,
     }),
@@ -1294,7 +1387,7 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
   if (config.MES_DRY_RUN) {
     await state.update({ lastIssuedUhtGal: currentGal, lastIssueAt: observedAt })
     await batch.increment({ cumulativeIssuedLbs: deltaLbs })
-    await batch.update({ lastIssueAt: observedAt, consecutiveIssueFailures: 0, lastIssueError: null, lastIssueErrorAt: null })
+    await batch.update({ lastIssueAt: observedAt, consecutiveIssueFailures: 0, lastIssueError: null, lastIssueErrorAt: null, ...ISSUE_BREAKER_CLEAR })
     console.log(`[SurgeTankMesService] DRY RUN tick issue UHT ${batch.feedingUhtId} → ${batch.tankId}: ${deltaLbs.toFixed(1)} lb (${deltaGal.toFixed(1)} gal)`)
     return true
   }
@@ -1332,7 +1425,10 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
 
   let body, allocations, tracking, resolvedBin, woHasLotLines
   try {
-    const built = await buildWoIssueBody(batch.nsWorkOrderId, component.itemId, deltaLbs, component.binId, bomLines)
+    // SD-722: once the breaker has tripped, keep retrying the issue (the cursor
+    // is held, so real stock landing later still books it) but stop fabricating.
+    const allowShortfallAdjust = !batch.issueBlocked
+    const built = await buildWoIssueBody(batch.nsWorkOrderId, component.itemId, deltaLbs, component.binId, bomLines, { allowShortfallAdjust })
     body = built.body
     allocations = built.allocations
     tracking = built.tracking
@@ -1375,6 +1471,7 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
       nsWorkOrderId: batch.nsWorkOrderId, targetItemId: component.itemId,
       binId: component.binId, body, tankName: batch.tankId,
       quantity: deltaLbs, bomLines, woHasLotLines, tracking,
+      allowShortfallAdjust: !batch.issueBlocked,
     })
     body = issued.body
     const nsResult = issued.nsResult
@@ -1387,11 +1484,15 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
       lastProductName: component.itemName,
     })
     await batch.increment({ cumulativeIssuedLbs: deltaLbs })
+    if (batch.issueBlocked) {
+      console.warn(`[SurgeTankMesService] ${batch.tankId} (WO ${batch.nsWorkOrderNumber || batch.nsWorkOrderId}): issue succeeded — circuit breaker cleared`)
+    }
     await batch.update({
       lastIssueAt: observedAt,
       consecutiveIssueFailures: 0,
       lastIssueError: null,
       lastIssueErrorAt: null,
+      ...ISSUE_BREAKER_CLEAR,
     })
 
     await db.MesProcessingLog.create({
@@ -1454,25 +1555,68 @@ async function tickIssueForBatch(batch, historian, issueMode = 'issue') {
 // Deliberately NO email/Teams — report-only, per SD-708 rollout decisions.
 const STUCK_ISSUE_FAILURE_THRESHOLD = 5 // ~25 min at the prod 5-min tick
 
+// SD-722 circuit breaker. The WO2060-style stuck batch above was report-only,
+// but a stuck batch whose failure is "Insufficient inventory" also runs the
+// shortfall auto-adjust every tick — prod: 1,353 fabricated bumps (+84.7M lb)
+// in 30 days, fought by the at-rest sweep. After MES_SURGE_ISSUE_BREAKER_FAILURES
+// consecutive failures with the SAME error signature, flag the batch
+// issueBlocked: the tick keeps retrying the issue (cursor held; a success clears
+// the block) but never adjusts inventory up again for it.
+const ISSUE_BREAKER_CLEAR = { sameIssueErrorStreak: 0, issueBlocked: false, issueBlockedAt: null }
+
+// Normalize an error so a frozen delta retried every tick ("need 60676.33",
+// "need 64240.1", …) reads as one signature. Numbers → '#', whitespace folded.
+function issueErrorSignature(msg) {
+  return String(msg || '')
+    .replace(/-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/gi, '#')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 300)
+}
+
 async function noteIssueFailure(batch, err, state) {
   try {
     const count = (Number(batch.consecutiveIssueFailures) || 0) + 1
-    await batch.update({
+    const errText = String(err.message || err)
+    const sameAsLast = batch.lastIssueError != null
+      && issueErrorSignature(batch.lastIssueError) === issueErrorSignature(errText.slice(0, 500))
+    const streak = sameAsLast ? (Number(batch.sameIssueErrorStreak) || 0) + 1 : 1
+    const threshold = config.MES_SURGE_ISSUE_BREAKER_FAILURES
+    const trip = threshold > 0 && streak >= threshold && !batch.issueBlocked
+    const updates = {
       consecutiveIssueFailures: count,
-      lastIssueError: String(err.message || err).slice(0, 500),
+      lastIssueError: errText.slice(0, 500),
       lastIssueErrorAt: new Date(clock.now()),
-    })
+      sameIssueErrorStreak: streak,
+    }
+    if (trip) {
+      updates.issueBlocked = true
+      updates.issueBlockedAt = new Date(clock.now())
+      updates.issueBlockedReason = `breaker: ${streak} consecutive identical issue failures — ${errText.replace(/\s+/g, ' ')}`.slice(0, 500)
+    }
+    await batch.update(updates)
+    if (trip) {
+      const heldLbs = state
+        ? Math.max(0, (parseFloat(state.lastTotalizerGal) || 0) - (parseFloat(state.lastIssuedUhtGal) || 0)) * GAL_TO_LBS
+        : null
+      console.error(`[SurgeTankMesService] BREAKER: ${batch.tankId} (WO ${batch.nsWorkOrderNumber || batch.nsWorkOrderId}) blocked after ${streak} identical issue failures — shortfall auto-adjust disabled for this batch; issue keeps retrying${heldLbs != null ? `, ~${heldLbs.toFixed(0)} lb held` : ''}. Error: ${errText.replace(/\s+/g, ' ').slice(0, 200)}`)
+      statusStore.pushEvent(
+        'surgeTick.issueBlocked',
+        `${batch.tankId}: issue blocked after ${streak} identical failures — no more inventory auto-adjusts (WO ${batch.nsWorkOrderNumber || batch.nsWorkOrderId})`,
+        { tankId: batch.tankId, nsWorkOrderId: batch.nsWorkOrderId, nsWorkOrderNumber: batch.nsWorkOrderNumber || null, streak, heldLbs, error: errText.slice(0, 500) }
+      )
+    }
     // First shout at the threshold, then at most ~hourly (every 12th tick).
     if (count === STUCK_ISSUE_FAILURE_THRESHOLD
         || (count > STUCK_ISSUE_FAILURE_THRESHOLD && count % 12 === 0)) {
       const heldLbs = state
         ? Math.max(0, (parseFloat(state.lastTotalizerGal) || 0) - (parseFloat(state.lastIssuedUhtGal) || 0)) * GAL_TO_LBS
         : null
-      console.error(`[SurgeTankMesService] STUCK: ${batch.tankId} (WO ${batch.nsWorkOrderNumber || batch.nsWorkOrderId}) — ${count} consecutive NS issue failures${heldLbs != null ? `, ~${heldLbs.toFixed(0)} lb held` : ''}. Last error: ${String(err.message || '').replace(/\s+/g, ' ').slice(0, 200)}`)
+      console.error(`[SurgeTankMesService] STUCK: ${batch.tankId} (WO ${batch.nsWorkOrderNumber || batch.nsWorkOrderId}) — ${count} consecutive NS issue failures${heldLbs != null ? `, ~${heldLbs.toFixed(0)} lb held` : ''}${batch.issueBlocked || trip ? ' [issue blocked]' : ''}. Last error: ${errText.replace(/\s+/g, ' ').slice(0, 200)}`)
       statusStore.pushEvent(
         'surgeTick.stuck',
         `${batch.tankId}: ${count} consecutive NS issue failures${heldLbs != null ? ` — ~${heldLbs.toFixed(0)} lb held` : ''} (WO ${batch.nsWorkOrderNumber || batch.nsWorkOrderId})`,
-        { tankId: batch.tankId, nsWorkOrderId: batch.nsWorkOrderId, nsWorkOrderNumber: batch.nsWorkOrderNumber || null, count, heldLbs }
+        { tankId: batch.tankId, nsWorkOrderId: batch.nsWorkOrderId, nsWorkOrderNumber: batch.nsWorkOrderNumber || null, count, heldLbs, issueBlocked: !!(batch.issueBlocked || trip) }
       )
     }
   } catch (e) {
@@ -1963,6 +2107,10 @@ async function getAllBatches({ status, limit = 200 } = {}) {
     const j = b.toJSON()
     j.stuck = b.status === 'active'
       && (Number(b.consecutiveIssueFailures) || 0) >= STUCK_ISSUE_FAILURE_THRESHOLD
+    // SD-722: breaker tripped (no more auto-adjusts) or create-time pin rejected
+    // (running unpinned, issues deferred). Either way ops should look at it.
+    j.pinRejected = b.status === 'active' && !b.componentItemId && b.layerSkipReason === 'pin-rejected'
+    if (b.status === 'active' && (b.issueBlocked || j.pinRejected)) j.stuck = true
     return j
   })
   return { success: true, batches: rows }
@@ -2088,4 +2236,10 @@ module.exports = {
   getSurgeProductOptions,
   clearCaches,
   STUCK_ISSUE_FAILURE_THRESHOLD,
+  // SD-722 — exported for scripted checks (scripts/checkSurgePinCrossCheck.js)
+  vetComponentForFg,
+  issueErrorSignature,
+  _resolveLayer3Source,
+  _noteIssueFailure: noteIssueFailure,
+  _buildWoIssueBody: buildWoIssueBody,
 }

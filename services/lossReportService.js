@@ -729,7 +729,7 @@ async function countNoFlowBlendBatches({ from, to }) {
 async function queryUnaccounted({ from, to }, ctx) {
   const sql = `
     SELECT 'surge' AS kind, s.[id], s.[tankId] AS tank, s.[productName], COALESCE(s.[completedAt], s.[createdAt]) AS closeAt,
-           s.[nsWorkOrderNumber], s.[lastIssueError], s.[consecutiveIssueFailures] AS fails, s.[layerSkipReason],
+           s.[nsWorkOrderNumber], s.[lastIssueError], s.[consecutiveIssueFailures] AS fails, s.[layerSkipReason], s.[issueBlocked], s.[issueBlockedReason],
            ${ctx.familyCase(['componentItemId', 'mesItem']).replace(/\[(componentItemId|mesItem)\]/g, 's.[$1]')} AS family,
            (SELECT SUM(CASE WHEN i.[lastTotalizerGal] - i.[lastIssuedUhtGal] > 0 THEN i.[lastTotalizerGal] - i.[lastIssuedUhtGal] ELSE 0 END)
               FROM ${T.issue} i WHERE i.[surgeTankBatchId] = s.[id]) AS unIssuedGal
@@ -737,7 +737,7 @@ async function queryUnaccounted({ from, to }, ctx) {
     WHERE s.[status] = 'completed' AND s.[cumulativeIssuedLbs] < ${ZERO_ISSUED_LBS}
       AND COALESCE(s.[completedAt], s.[createdAt]) >= :from AND COALESCE(s.[completedAt], s.[createdAt]) < :to
     UNION ALL
-    SELECT 'blend', b.[id], b.[tankId], b.[productName], COALESCE(b.[completedAt], b.[createdAt]), b.[nsWorkOrderNumber], b.[errorMessage], NULL, NULL,
+    SELECT 'blend', b.[id], b.[tankId], b.[productName], COALESCE(b.[completedAt], b.[createdAt]), b.[nsWorkOrderNumber], b.[errorMessage], NULL, NULL, NULL, NULL,
            ${ctx.familyCase(['mesItem']).replace(/\[mesItem\]/g, 'b.[mesItem]')}, NULL
     FROM ${T.blend} b
     WHERE b.[status] = 'completed' AND b.[cumulativeIssuedLbs] < ${ZERO_ISSUED_LBS}
@@ -751,7 +751,10 @@ async function queryUnaccounted({ from, to }, ctx) {
     kind: r.kind, id: r.id, tank: r.tank, product: r.productName, family: r.family || 'unclassified',
     date: r.closeAt instanceof Date ? r.closeAt.toISOString() : r.closeAt,
     nsWorkOrderNumber: r.nsWorkOrderNumber || null,
-    reason: r.layerSkipReason ? `layer skip: ${r.layerSkipReason}` : (r.lastIssueError ? String(r.lastIssueError).slice(0, 160) : 'no issue posted'),
+    // SD-722: a tripped breaker / rejected pin explains the gap better than the raw layer-skip tag.
+    reason: r.issueBlockedReason ? String(r.issueBlockedReason).slice(0, 160)
+      : r.layerSkipReason ? `layer skip: ${r.layerSkipReason}` : (r.lastIssueError ? String(r.lastIssueError).slice(0, 160) : 'no issue posted'),
+    issueBlocked: !!r.issueBlocked,
     issueFailures: num(r.fails),
     estimatedLbs: r.unIssuedGal != null ? round2(Number(r.unIssuedGal) * itemConfig.LBS_PER_GAL) : null,
   }))
