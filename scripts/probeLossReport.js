@@ -58,7 +58,7 @@ async function main() {
   console.log(`RELIABLE LOSS: ${usd(rep.headline.reliableLossUsd)} · ${lbs(rep.headline.reliableLossLbs)} lb (${(rep.headline.reliableLossSteps || []).map(s => `${s.key}:${s.level}`).join(', ')})`)
   const F = (rep.chain.find(c => c.key === 'filler') || {}).filler
   if (F && F.available) {
-    console.log(`FILLER 1: in ${lbs(F.inletGal)} gal · ${lbs(F.goodCartons)} good cartons = ${lbs(F.goodCartonGal)} gal · loss ${lbs(F.lossGal)} gal (${F.lossPct}%) = ${lbs(F.lossLbs)} lb · cost ${usd(F.costUsd)} · revenue ${usd(F.revenueUsd)} · join ${JSON.stringify(F.join)}`)
+    console.log(`FILLER 1: in ${lbs(F.inletGal)} gal · ${lbs(F.goodCartons)} good cartons = ${lbs(F.goodCartonGal)} gal · loss ${lbs(F.lossGal)} gal (${F.lossPct}%) = ${lbs(F.lossLbs)} lb · cost ${usd(F.costUsd)} · revenue ${usd(F.revenueUsd)} · carton volume ${F.join} · rejects ${lbs(F.rejectCartons)} cartons ≤ ${lbs(F.rejectGal)} gal · check ${JSON.stringify(F.cartonVolumeCheck)} · coverage ${JSON.stringify(F.joinStats)}`)
     console.table(F.byDay)
   } else console.log(`FILLER 1: unavailable — ${F ? F.reason : 'no step'}`)
   const PB = rep.plantBalance
