@@ -558,7 +558,9 @@ router.post('/inventory-adjustments/:id/reject', controller.rejectInventoryAdjus
  *       and partial stages — a subset of the unchanged totals. The `filler` chain step (status `partial`) carries
  *       `filler`: Filler 1 inlet gallons while in RunMode vs good cartons × carton volume of the SKU on line 1
  *       (`inletGal`, `goodCartons`, `goodCartonGal`, `lossGal`, `lossLbs`, `lossPct`, `costUsd`, `revenueUsd`, `bySku[]`,
- *       `byDay[]`, `join`, `otherFillers[]`), or `available:false` with `reason`; it is never added to the totals.
+ *       `byDay[]`, `join` (`netsuite-pallets` when the SKU join covers ≥ 95 % of cartons, else `historian-carton-size` from the
+ *       filler's per-lane fill setting), `joinStats`, `cartonVolumeCheck`, `rejectCartons`, `rejectGal`, `otherFillers[]`), or
+ *       `available:false` with `reason`; it is never added to the totals.
  *       `plantBalance` is received → cased for the window's plant days from NetSuite: `received` (truck net lb),
  *       `inventory` (tank drawdown from sweep memos), `cased` (physical lb), `bulkShipped`, `destroyedAfterCasing`,
  *       `lostBeforeCasing` (= received + drawdown − cased − bulk shipped), `%ofReceived`, `receiptsComplete`, `caveats[]`

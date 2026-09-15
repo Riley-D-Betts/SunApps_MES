@@ -17,20 +17,35 @@
  * First→Last plus the step from the previous hour's Last, and a drop (Minimum
  * below First, or First below the previous Last) is treated as a reset.
  *
- * Carton volume: the SKU on line 1 at that hour, from NetSuite pallet
- * completions (WOCompl with custbody_woc_line = 1; createddate is plant time,
- * ~1 h behind the cartons). An hour takes the SKU of the pallets completed in
- * the two hours after it starts; with none, the nearest line-1 pallet within
- * 8 h. Volume per SKU comes from fgCartonVolumeService (carton component mL ×
- * lb/gal). If more than JOIN_MAX_UNMATCHED of the cartons cannot be given a
- * SKU the step is unavailable with the reason — it never reports $0.
+ * Carton volume, two ways (both always computed; `join` says which is used):
+ *   'netsuite-pallets' — the SKU on line 1 at that hour, from NetSuite pallet
+ *     completions (WOCompl with custbody_woc_line = 1; createddate is plant
+ *     time, ~1 h behind the cartons). An hour takes the SKU of the pallets
+ *     completed in the two hours after it starts; with none, the nearest line-1
+ *     pallet within 8 h. Volume per SKU from fgCartonVolumeService (labelled
+ *     carton mL). Used when it covers ≥ MIN_COVERAGE of the good cartons.
+ *   'historian-carton-size' — the filler's own per-lane fill setting,
+ *     Filler1.L1/L2_Total_Fill_Volume (mL per carton, step-held; it drops to
+ *     350 for a second at stops, so values under 500 are ignored). Verified
+ *     2026-09-15: ~1790 mL while 59 oz Alexandre ran, 1893–1920 on 64 oz half &
+ *     half, ~1950 on Aldi 64 oz. (L1/L2_Current_Carton_Size is only the 64 oz
+ *     carton code and the per-station *_Operating_Volume values are servo
+ *     doses — neither is the fill.) Used when the NetSuite join cannot cover the
+ *     window (e.g. the sandbox account on dev).
+ * Neither covering ≥ MIN_COVERAGE → available:false with the reason; never $0.
+ *
+ * Rejects: L1/L2_Carton_Count_Infeed − L1/L2_Carton_Count_Good per lane
+ * (same reset handling). L1/L2_Bad_Carton_At_Discharge is a deadbanded pulse
+ * in the historian (no usable count). rejectGal = rejects × fill setting — an
+ * upper bound, since a carton rejected before filling holds no milk. It is
+ * part of the loss, not added to it.
  *
  * Pricing, like the other steps: raw-milk family $/lb (family of the SKU's
  * bulk item on its packaging WorkOrds, else its name) and FG revenue $/lb for
  * that bulk item. Loss pounds are shared across SKUs by their carton gallons.
  *
  * Historian load: one plant day at a time, sequentially (fillerFlowService's
- * reads + two counter reads per day); each day is cached (10 min for today,
+ * reads + four counter and two fill-setting reads per day); each day is cached (10 min for today,
  * 6 h for past days). History starts 2026-08-18T20:40Z.
  */
 
@@ -46,9 +61,13 @@ const plantTime = require('../utils/plantTime')
 
 const HISTORY_START = new Date('2026-08-18T20:40:00Z')
 const LANE_TAGS = ['Filler1.L1_Carton_Count_Good', 'Filler1.L2_Carton_Count_Good']
+const INFEED_TAGS = ['Filler1.L1_Carton_Count_Infeed', 'Filler1.L2_Carton_Count_Infeed']
+const FILL_TAGS = ['Filler1.L1_Total_Fill_Volume', 'Filler1.L2_Total_Fill_Volume']
+const MIN_FILL_ML = 500
+const ML_PER_GAL = 3785.411784
+const MIN_COVERAGE = 0.95
 const HOUR_MS = 3600000
 const MAX_DAYS = 62
-const JOIN_MAX_UNMATCHED = 0.05
 const NEAREST_MS = 8 * HOUR_MS
 const BULK_FG_IDS = surgeParser.PRODUCT_CATALOG.map(p => p.nsId)
 const DAY_CACHE_PAST_MS = 6 * HOUR_MS
@@ -103,24 +122,58 @@ function counterByHour(rows) {
   return { byHour: out, resets }
 }
 
+/**
+ * Time-weighted fill setting (mL) per hour from a step-held ProcessValues
+ * series; values under MIN_FILL_ML (the stop blip) keep the previous setting.
+ * Hours before the first valid value take the first valid value.
+ */
+function fillByHour(points, since, until) {
+  const pts = points.map(p => ({ t: Date.parse(p.DateTime), v: num(p.Value) })).filter(p => p.v != null && p.v >= MIN_FILL_ML).sort((a, b) => a.t - b.t)
+  const out = new Map()
+  if (!pts.length) return out
+  const s0 = since.getTime(), u0 = until.getTime()
+  for (let h = Math.floor(s0 / HOUR_MS) * HOUR_MS; h < u0; h += HOUR_MS) {
+    const lo = Math.max(h, s0), hi = Math.min(h + HOUR_MS, u0)
+    let cur = pts[0].v, wsum = 0, w = 0, t = lo
+    for (const p of pts) { if (p.t <= lo) cur = p.v; else break }
+    for (const p of pts) {
+      if (p.t <= lo) continue
+      if (p.t >= hi) break
+      wsum += cur * (p.t - t); w += p.t - t; cur = p.v; t = p.t
+    }
+    wsum += cur * (hi - t); w += hi - t
+    if (w > 0) out.set(h, wsum / w)
+  }
+  return out
+}
+
 async function readDay(historian, since, until) {
   const key = `${since.toISOString()}|${until.toISOString()}`
   const hit = _dayCache.get(key)
   const ttl = until.getTime() < Date.now() - HOUR_MS ? DAY_CACHE_PAST_MS : DAY_CACHE_TODAY_MS
   if (hit && Date.now() - hit.at < ttl) return hit.value
   const flow = await getFillerFlow(historian, { filler: 1, since, until, resolution: HOUR_MS })
-  const hours = new Map()
   let resets = 0
-  for (const fqn of LANE_TAGS) {
-    const c = counterByHour(await analogSummary(historian, fqn, since, until, HOUR_MS))
-    resets += c.resets
-    for (const [k, n] of c.byHour) hours.set(k, (hours.get(k) || 0) + n)
+  const lanes = []
+  for (let l = 0; l < 2; l++) {
+    const good = counterByHour(await analogSummary(historian, LANE_TAGS[l], since, until, HOUR_MS))
+    const infeed = counterByHour(await analogSummary(historian, INFEED_TAGS[l], since, until, HOUR_MS))
+    const fill = fillByHour(await historian._queryProcessValues(FILL_TAGS[l], since, until, { verbose: false }), since, until)
+    resets += good.resets
+    lanes.push({ good: good.byHour, infeed: infeed.byHour, fill })
   }
+  const hourKeys = [...new Set(lanes.flatMap(x => [...x.good.keys()]))].sort((a, b) => a - b)
+  const cartonsByHour = hourKeys.map(t => {
+    const good = lanes.map(x => Math.round(x.good.get(t) || 0))
+    const infeed = lanes.map(x => Math.round(x.infeed.get(t) || 0))
+    const fillMl = lanes.map(x => (x.fill.has(t) ? Math.round(x.fill.get(t) * 10) / 10 : null))
+    return { t, n: good[0] + good[1], good, rejects: infeed.map((v, k) => Math.max(0, v - good[k])), fillMl }
+  }).filter(h => h.n > 0)
   const value = {
     since: since.toISOString(), until: until.toISOString(),
     runtimeGal: flow.volume.byState.runtime, byState: flow.volume.byState,
     runs: flow.runs.length, runtimeMinutes: flow.runs.reduce((t, r) => t + r.minutes, 0),
-    cartonsByHour: [...hours.entries()].filter(([, n]) => n > 0).map(([t, n]) => ({ t, n: Math.round(n) })),
+    cartonsByHour,
     counterResets: resets, measuredHours: flow.coverage.bucketsMeasured, expectedHours: flow.coverage.bucketsExpected,
   }
   _dayCache.set(key, { at: Date.now(), value })
@@ -203,16 +256,44 @@ async function compute({ from, start, end, fromDay, toDayExcl, historian, prices
   const cartonsTotal = hours.reduce((t, h) => t + h.n, 0)
   if (inletGal <= 0 && cartonsTotal <= 0) return unavailable('Filler 1 did not run in this window.', { from: start.toISOString(), to: end.toISOString() })
 
-  // 2. SKU per hour from line-1 pallet completions.
-  const pallets = await linePallets(fromDay, toDayExcl)
-  const names = {}
-  for (const p of pallets) names[p.item] = p.name
-  const skus = Object.keys(names)
-  const [vols, bulkOf] = await Promise.all([cartonVolumes.getCartonVolumes(skus, names), bulkItems(skus, plantTime.addPlantDays(toDayExcl, -1))])
+  if (cartonsTotal <= 0) {
+    return unavailable(`Filler 1 took in ${Math.round(inletGal).toLocaleString('en-US')} gal while running but its good-carton counters recorded nothing.`, { from: start.toISOString(), to: end.toISOString(), inletGal: round1(inletGal) })
+  }
 
+  // 2a. Carton volume from the filler's fill setting, per lane per hour.
+  const fills = hours.flatMap(h => h.fillMl.map((ml, k) => (ml != null ? { ml, n: h.good[k] } : null)).filter(Boolean))
+  const fillCartons = fills.reduce((t, f) => t + f.n, 0)
+  const avgFillMl = fillCartons > 0 ? fills.reduce((t, f) => t + f.ml * f.n, 0) / fillCartons : null
+  let histGal = 0, histCovered = 0, rejectCartons = 0, rejectGal = 0
+  const histPerDay = {}
+  for (const h of hours) {
+    const pd = (histPerDay[h.day] ||= { cartons: 0, cartonGal: 0 })
+    pd.cartons += h.n
+    for (let k = 0; k < 2; k++) {
+      const ml = h.fillMl[k] ?? h.fillMl[1 - k]   // the other lane's setting when one lane has none
+      if (h.rejects[k] > 0) { rejectCartons += h.rejects[k]; rejectGal += h.rejects[k] * ((ml ?? avgFillMl) || 0) / ML_PER_GAL }
+      if (!h.good[k]) continue
+      if (ml == null) continue
+      histGal += h.good[k] * ml / ML_PER_GAL
+      pd.cartonGal += h.good[k] * ml / ML_PER_GAL
+      histCovered += h.good[k]
+    }
+  }
+  const histCoverage = histCovered / cartonsTotal
+
+  // 2b. Carton volume from the SKU on line 1 (NetSuite pallet completions).
+  let pallets = [], names = {}, vols = {}, bulkOf = {}, nsError = null
+  try {
+    pallets = await linePallets(fromDay, toDayExcl)
+    for (const p of pallets) names[p.item] = p.name
+    const skus = Object.keys(names)
+    ;[vols, bulkOf] = await Promise.all([cartonVolumes.getCartonVolumes(skus, names), bulkItems(skus, plantTime.addPlantDays(toDayExcl, -1))])
+  } catch (err) {
+    nsError = String(err.message).slice(0, 160)
+  }
   const join = { matchedCartons: 0, nearestCartons: 0, mixedCartons: 0, unmatchedCartons: 0, noVolumeCartons: 0 }
   const bySku = {}
-  const perDay = {}
+  const nsPerDay = {}
   for (const h of hours) {
     let cands = pallets.filter(p => p.at >= h.t && p.at < h.t + 2 * HOUR_MS)
     let how = 'matchedCartons'
@@ -224,104 +305,124 @@ async function compute({ from, start, end, fromDay, toDayExcl, historian, prices
       }
       if (best) { cands = [best.p]; how = 'nearestCartons' }
     }
-    const pd = (perDay[h.day] ||= { cartons: 0, cartonGal: 0 })
+    const pd = (nsPerDay[h.day] ||= { cartons: 0, cartonGal: 0 })
     pd.cartons += h.n
     if (!cands.length) { join.unmatchedCartons += h.n; continue }
     const caseBy = {}
     for (const p of cands) caseBy[p.item] = (caseBy[p.item] || 0) + p.cases
-    const items = Object.keys(caseBy)
-    const withVol = items.filter(i => vols[i] && vols[i].galPerCarton != null)
+    const withVol = Object.keys(caseBy).filter(i => vols[i] && vols[i].galPerCarton != null)
     if (!withVol.length) { join.noVolumeCartons += h.n; continue }
-    const mls = new Set(withVol.map(i => vols[i].mL))
-    if (mls.size > 1) how = 'mixedCartons'
+    if (new Set(withVol.map(i => vols[i].mL)).size > 1) how = 'mixedCartons'
     join[how] += h.n
     const totalCases = withVol.reduce((t, i) => t + caseBy[i], 0) || withVol.length
     for (const i of withVol) {
       const share = totalCases > 0 ? (caseBy[i] || 1) / totalCases : 1 / withVol.length
       const n = h.n * share
       const gal = n * vols[i].galPerCarton
-      const s = (bySku[i] ||= { item: i, name: names[i], mL: vols[i].mL, cartons: 0, cartonGal: 0 })
-      s.cartons += n; s.cartonGal += gal
+      const sk = (bySku[i] ||= { item: i, name: names[i], mL: vols[i].mL, cartons: 0, cartonGal: 0 })
+      sk.cartons += n; sk.cartonGal += gal
       pd.cartonGal += gal
     }
   }
-  const unassigned = join.unmatchedCartons + join.noVolumeCartons
-  const unassignedShare = cartonsTotal > 0 ? unassigned / cartonsTotal : 0
-  const joinOut = { ...Object.fromEntries(Object.entries(join).map(([k, v]) => [k, Math.round(v)])), unassignedPct: round2(unassignedShare * 100), maxUnassignedPct: JOIN_MAX_UNMATCHED * 100 }
-  if (cartonsTotal <= 0) {
-    return unavailable(`Filler 1 took in ${Math.round(inletGal).toLocaleString('en-US')} gal while running but its good-carton counters recorded nothing.`, { from: start.toISOString(), to: end.toISOString(), inletGal: round1(inletGal), join: joinOut })
-  }
-  if (unassignedShare > JOIN_MAX_UNMATCHED) {
-    return unavailable(`${round2(unassignedShare * 100)}% of Filler 1's good cartons could not be matched to a line-1 pallet completion with a known carton size, so their volume is unknown (limit ${JOIN_MAX_UNMATCHED * 100}%).`,
-      { from: start.toISOString(), to: end.toISOString(), inletGal: round1(inletGal), goodCartons: Math.round(cartonsTotal), join: joinOut })
-  }
+  const nsAssigned = cartonsTotal - join.unmatchedCartons - join.noVolumeCartons
+  const nsCoverage = nsAssigned / cartonsTotal
+  const nsRawGal = Object.values(bySku).reduce((t, x) => t + x.cartonGal, 0)
+  const nsScale = nsAssigned > 0 ? cartonsTotal / nsAssigned : 1
+  const nsGal = nsAssigned > 0 ? nsRawGal * nsScale : null
 
-  // Unassigned cartons (≤ limit) take the window's average carton volume.
-  let cartonGal = Object.values(bySku).reduce((t, s) => t + s.cartonGal, 0)
-  const assigned = cartonsTotal - unassigned
-  const avgGalPerCarton = assigned > 0 ? cartonGal / assigned : null
-  const scale = assigned > 0 ? cartonsTotal / assigned : 1
-  cartonGal *= scale
+  // 3. Pick the method.
+  let method
+  if (nsCoverage >= MIN_COVERAGE) method = 'netsuite-pallets'
+  else if (histCoverage >= MIN_COVERAGE) method = 'historian-carton-size'
+  else {
+    return unavailable(`Carton volume is unknown for too many of Filler 1's good cartons: the NetSuite pallet join covers ${round2(nsCoverage * 100)}%${nsError ? ` (${nsError})` : ''} and the filler's fill setting covers ${round2(histCoverage * 100)}% (need ${MIN_COVERAGE * 100}%).`,
+      { from: start.toISOString(), to: end.toISOString(), inletGal: round1(inletGal), goodCartons: Math.round(cartonsTotal) })
+  }
+  const useNs = method === 'netsuite-pallets'
+  const histScale = histCovered > 0 ? cartonsTotal / histCovered : 1
+  const cartonGal = useNs ? nsGal : histGal * histScale
 
   const lbsPerGal = itemConfig.LBS_PER_GAL
   const lossGal = inletGal - cartonGal
   const lossLbs = Math.max(0, lossGal) * lbsPerGal
 
-  // 3. Price: share the loss by carton gallons.
+  // 4. Price by the SKU mix NetSuite could see; with the historian method the
+  // share of cartons NetSuite could not place stays unpriced.
   let costUsd = 0, revenueUsd = 0, unpricedLbs = 0, unpricedRevenueLbs = 0, anyCost = false, anyRev = false
-  const skuRows = Object.values(bySku).map(s => {
-    const gal = s.cartonGal * scale
-    const share = cartonGal > 0 ? gal / cartonGal : 0
+  const pricedShareBase = useNs ? nsRawGal : (nsRawGal > 0 ? nsRawGal / Math.max(nsCoverage, 1e-9) : 0)
+  const skuRows = Object.values(bySku).map(x => {
+    const share = pricedShareBase > 0 ? x.cartonGal / pricedShareBase : 0
     const lbs = lossLbs * share
-    const bulk = bulkOf[s.item] || null
-    const family = (bulk && rawMilkPriceService.familyForBatch(null, bulk)) || familyFromName(s.name)
+    const bulk = bulkOf[x.item] || null
+    const family = (bulk && rawMilkPriceService.familyForBatch(null, bulk)) || familyFromName(x.name)
     const price = prices[family] ? prices[family].pricePerLb : null
     const rev = bulk ? fgRevenueRateService.rateForItem(bulk, rates) : null
     if (price != null) { costUsd += lbs * price; anyCost = true } else unpricedLbs += lbs
     if (rev != null) { revenueUsd += lbs * rev; anyRev = true } else unpricedRevenueLbs += lbs
-    return { item: s.item, name: s.name, bulkItem: bulk, family, mL: s.mL, goodCartons: Math.round(s.cartons * scale), goodCartonGal: round1(gal),
+    return { item: x.item, name: x.name, bulkItem: bulk, family, mL: x.mL, goodCartons: Math.round(x.cartons * (useNs ? nsScale : 1)), goodCartonGal: round1(x.cartonGal * (useNs ? nsScale : 1)),
       shareOfCartonGal: round2(share * 100), lossLbs: round2(lbs), costUsd: price != null ? round2(lbs * price) : null, revenueUsd: rev != null ? round2(lbs * rev) : null,
       pricePerLb: price, revenuePerLb: rev }
   }).sort((a, b) => b.goodCartonGal - a.goodCartonGal)
+  const skuLbs = skuRows.reduce((t, r) => t + r.lossLbs, 0)
+  if (lossLbs - skuLbs > 0.5) { unpricedLbs += lossLbs - skuLbs; unpricedRevenueLbs += lossLbs - skuLbs }
 
   const caveats = [
     'Line 1 only. Fillers 2–6 have no inlet meter, so their loss is still inside the surge-tank figure.',
-    'The lane "good" counters matched the master counters on the days checked, so rejected cartons may be counted as good — if so this loss is understated.',
-    'Carton volume is the labelled fill (e.g. 1893 mL, 59 oz); overfill is counted as loss.',
+    useNs
+      ? 'Carton volume is the labelled fill of the SKU on line 1 (e.g. 1893 mL, 59 oz); overfill is counted as loss.'
+      : 'Carton volume from the filler\'s size setting, not the SKU: the per-lane fill volume set on Filler 1 (mL per carton), so overfill above the label is not counted as loss.',
+    `${Math.round(rejectCartons).toLocaleString('en-US')} carton(s) were counted at the infeed but not as good (rejects); up to ${Math.round(rejectGal).toLocaleString('en-US')} gal of the loss is in them (less if they were rejected before filling).`,
     'Not added to the report totals: the surge-tank figure already contains milk lost at the fillers.',
   ]
+  if (!useNs) caveats.push(`The NetSuite pallet join covered only ${round2(nsCoverage * 100)}% of cartons${nsError ? ` (${nsError})` : ''}; ${round2(Math.max(0, 1 - nsCoverage) * 100)}% of the loss has no product family and is unpriced.`)
   if (from < HISTORY_START) caveats.push(`Filler 1 inlet meter history starts ${HISTORY_START.toISOString().slice(0, 16)}Z; the window before it is not covered.`)
   if (lossGal < 0) caveats.push('Good-carton volume exceeds the metered inlet volume for this window; loss is shown as 0.')
-  if (unassigned > 0) caveats.push(`${Math.round(unassigned).toLocaleString('en-US')} carton(s) (${round2(unassignedShare * 100)}%) had no matching pallet completion and were given the window's average carton volume.`)
+  const uncovered = useNs ? cartonsTotal - nsAssigned : cartonsTotal - histCovered
+  if (uncovered > 0) caveats.push(`${Math.round(uncovered).toLocaleString('en-US')} carton(s) (${round2((uncovered / cartonsTotal) * 100)}%) had no carton volume and were given the window's average.`)
   const unknownGal = days.reduce((t, d) => t + (d.byState.unknown || 0), 0)
   if (unknownGal > 50) caveats.push(`${Math.round(unknownGal).toLocaleString('en-US')} gal flowed while Filler 1's state was unknown (historian gaps) and are not counted as milk in.`)
+  const histFull = histCovered > 0 ? histGal * histScale : null
 
   return {
     available: true, line: 1, from: start.toISOString(), to: end.toISOString(),
-    definition: 'Milk metered into Filler 1 (TR11_FT1140) while the filler was in RunMode, minus good cartons (lane 1 + lane 2 good counters) × the carton volume of the SKU on line 1 at that hour.',
+    definition: `Milk metered into Filler 1 (TR11_FT1140) while the filler was in RunMode, minus good cartons (lane 1 + lane 2 good counters) × ${useNs ? 'the labelled carton volume of the SKU on line 1 at that hour' : 'the fill volume set on each lane at that hour'}.`,
+    join: method,
     inletGal: round1(inletGal), inletLbs: round2(inletGal * lbsPerGal),
     goodCartons: Math.round(cartonsTotal), goodCartonGal: round1(cartonGal), goodCartonLbs: round2(cartonGal * lbsPerGal),
-    avgGalPerCarton: avgGalPerCarton != null ? Math.round(avgGalPerCarton * 10000) / 10000 : null,
+    avgGalPerCarton: Math.round((cartonGal / cartonsTotal) * 10000) / 10000,
+    avgFillMl: avgFillMl != null ? Math.round(avgFillMl * 10) / 10 : null,
     lossGal: round1(lossGal), lossLbs: round2(lossLbs), lossPct: inletGal > 0 ? round2((Math.max(0, lossGal) / inletGal) * 100) : null,
+    rejectCartons: Math.round(rejectCartons), rejectGal: round1(rejectGal),
     costUsd: anyCost ? round2(costUsd) : null, revenueUsd: anyRev ? round2(revenueUsd) : null,
     unpricedLbs: round2(unpricedLbs), unpricedRevenueLbs: round2(unpricedRevenueLbs),
     inletOutsideRunModeGal: { cip: round1(days.reduce((t, d) => t + (d.byState.cip || 0), 0)), idle: round1(days.reduce((t, d) => t + (d.byState.idle || 0), 0)), unknown: round1(unknownGal) },
     runs: days.reduce((t, d) => t + d.runs, 0), runtimeHours: round2(days.reduce((t, d) => t + d.runtimeMinutes, 0) / 60),
     counterResets: days.reduce((t, d) => t + d.counterResets, 0),
-    join: joinOut,
+    joinStats: {
+      ...Object.fromEntries(Object.entries(join).map(([k, v]) => [k, Math.round(v)])),
+      netsuiteCoveragePct: round2(nsCoverage * 100), historianCoveragePct: round2(histCoverage * 100), minCoveragePct: MIN_COVERAGE * 100,
+      netsuiteError: nsError,
+    },
+    cartonVolumeCheck: {
+      netsuiteGal: nsGal != null ? round1(nsGal) : null, netsuiteCoveragePct: round2(nsCoverage * 100),
+      historianGal: histFull != null ? round1(histFull) : null,
+      diffPct: nsGal != null && histFull != null && nsGal > 0 ? round2(((histFull - nsGal) / nsGal) * 100) : null,
+    },
     bySku: skuRows,
     byDay: days.map(d => {
-      const pd = perDay[d.day] || { cartons: 0, cartonGal: 0 }
-      const lg = d.runtimeGal - pd.cartonGal * scale
-      return { day: d.day, inletGal: round1(d.runtimeGal), goodCartons: Math.round(pd.cartons), goodCartonGal: round1(pd.cartonGal * scale), lossGal: round1(lg),
+      const pd = (useNs ? nsPerDay : histPerDay)[d.day] || { cartons: 0, cartonGal: 0 }
+      const g = pd.cartonGal * (useNs ? nsScale : histScale)
+      const lg = d.runtimeGal - g
+      return { day: d.day, inletGal: round1(d.runtimeGal), goodCartons: Math.round(pd.cartons), goodCartonGal: round1(g), lossGal: round1(lg),
         lossPct: d.runtimeGal > 0 ? round2((lg / d.runtimeGal) * 100) : null, historianHours: `${d.measuredHours}/${d.expectedHours}` }
     }),
     otherFillers: OTHER_FILLERS,
-    sources: { inlet: RestProvider.TAGS.FILLER1_INLET_FLOW, runMode: RestProvider.TAGS.FILLER1_RUN_MODE, cartons: LANE_TAGS, sku: 'NetSuite WOCompl, custbody_woc_line = 1 (pallet completion time)', cartonVolume: 'Packaging WorkOrd carton component (mL) × lb/gal' },
+    sources: { inlet: RestProvider.TAGS.FILLER1_INLET_FLOW, runMode: RestProvider.TAGS.FILLER1_RUN_MODE, cartons: LANE_TAGS, rejects: INFEED_TAGS, fillSetting: FILL_TAGS,
+      sku: 'NetSuite WOCompl, custbody_woc_line = 1 (pallet completion time)', cartonVolume: useNs ? 'Packaging WorkOrd carton component (mL)' : 'Filler1.L1/L2_Total_Fill_Volume (mL per carton)' },
     caveats,
   }
 }
 
 function clearCache() { _dayCache.clear(); _stepCache.clear() }
 
-module.exports = { getFillerStep, counterByHour, clearCache, HISTORY_START, OTHER_FILLERS }
+module.exports = { getFillerStep, counterByHour, fillByHour, clearCache, HISTORY_START, OTHER_FILLERS }
