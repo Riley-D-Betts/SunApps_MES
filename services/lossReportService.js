@@ -119,7 +119,7 @@ const RELIABILITY = {
   separation: { level: 'unreliable', sinceConfig: 'LOSS_SEPARATION_RELIABLE_FROM',
     reason: 'Volumes were computed from stale totalizer baselines before the SD-722 fix; batches closed before {since} are not trustworthy.' },
   blend: { level: 'partial',
-    reason: 'Partly real: issued minus load-cell arrival is a measurement, but tanks a UHT pulled from while filling are upper bounds.' },
+    reason: 'Partly real: issued minus load-cell arrival. Tanks a UHT pulled from while filling are upper bounds; fills from an empty tank carry a 1.5–4.5k lb load-cell start gap that is probably measurement, not milk; phantom issues from stale line latches (fixed in SD-722) inflated batches before the fix.' },
   uht: { level: 'unreliable',
     reason: 'Inside the surge-tank figure, which surge-tank level readings under-count; matched runs show finished goods at 95 % or more of milk into the UHT.' },
   surge: { level: 'unreliable',
