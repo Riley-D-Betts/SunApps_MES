@@ -14,6 +14,7 @@ const statusStore = require('./statusStore')
 const itemConfig = require('./mesItemConfig')
 const milkMesService = require('./milkMesService')
 const batchStartFinder = require('./batchStartFinder')
+const { newTotalizerState, advanceTotalizer, RESET_MIN_DROP } = require('./separatorTotalizer')
 const clock = require('../sim/clock')
 
 const STATE_IDLE = 'idle'
@@ -56,11 +57,16 @@ let prevSnapshot = null
 let rpmLowTicks = 0
 let feedPermitZeroTicks = 0
 let runningWhileIdleTicks = 0
-// Totalizer readings at the moment the open batch started. Batch volumes are
-// (current − baseline) since the separator totalizers don't reset between
-// transfers. Persisted to the row (feed/cream/skimStartLbs) and restored on
-// hydrate so a resumed batch keeps subtracting the right baseline.
-let openBaselines = null
+// Per-totalizer state for the open batch: { feed, cream, skim } each
+// { baseline, last, first, zeroSince, resetSeen } (services/separatorTotalizer).
+// Batch volume = reading − baseline. The separator totalizers are PER-TRANSFER
+// counters that SCADA zeroes shortly AFTER the feed-permit edge (SD-722), so
+// the baseline moves when a reset is observed: 0 for the transfer's own start
+// reset, −(volume so far) for a later one. The baseline is persisted to the row
+// (feed/cream/skimStartLbs, may be ≤ 0) and the state rebuilt on hydrate.
+let openTot = null
+// MES open time of the open batch (ms) — start of the reset grace window.
+let openedAtMs = null
 
 function reset() {
   machineState = STATE_IDLE
@@ -69,17 +75,70 @@ function reset() {
   rpmLowTicks = 0
   feedPermitZeroTicks = 0
   runningWhileIdleTicks = 0
-  openBaselines = null
+  openTot = null
+  openedAtMs = null
 }
 
-// A batch's volume is the totalizer's RISE over its own window. The totalizer
-// is a monotonic odometer, so subtract the baseline captured at open. If it
-// went backwards (CIP / shift reset zeroed the totalizer), the baseline is
-// stale — fall back to the raw current reading (delta from 0).
-function deltaVol(current, baseline) {
-  const c = Number(current) || 0
-  const b = Number(baseline) || 0
-  return c >= b ? c - b : c
+// [state key, snapshot reading, baseline column, volume column]
+const TOTALIZERS = [
+  ['feed', 'feedTotalLbs', 'feedStartLbs', 'inputVolume'],
+  ['cream', 'creamTotalLbs', 'creamStartLbs', 'creamVolume'],
+  ['skim', 'skimTotalLbs', 'skimStartLbs', 'skimVolume'],
+]
+
+// Columns are DECIMAL(·,2). Round before writing: Sequelize types a JS float
+// as NUMERIC(30, <digits in its binary tail>), and an accumulated value like
+// 1916067.1199999999 gets scale 10, overflowing tedious's 64-bit encoding
+// ("Input parameter 'N' could not be validated" — seen in the SD-722 mock run).
+const round2 = v => Math.round((Number(v) || 0) * 100) / 100
+
+// Open-batch MES open time: batchId is `XFR-<pollTime ms>` (survives hydrate
+// and replay, unlike createdAt which is wall time).
+function openTimeMsFromRow(row) {
+  const ms = Number(String(row.batchId || '').split('-')[1])
+  if (isFinite(ms) && ms > 0) return ms
+  return row.batchStart ? new Date(row.batchStart).getTime() : null
+}
+
+// Rebuild totalizer state from a persisted row (hydrate / close without
+// in-memory state). last = baseline + volume is the invariant advanceTotalizer
+// keeps; first = baseline so the persisted volume counts as observed rise; a
+// baseline ≤ 0 means this batch already handled its start reset.
+function totStateFromRow(row) {
+  const st = {}
+  for (const [k, , col, volCol] of TOTALIZERS) {
+    const baseline = Number(row[col]) || 0
+    const last = baseline + (Number(row[volCol]) || 0)
+    st[k] = { baseline, last: last || null, first: baseline || null, zeroSince: null, resetSeen: baseline <= 0, hydrated: true }
+  }
+  return st
+}
+
+/**
+ * Advance the open batch's three totalizers by this tick's readings with
+ * reset detection (SD-722). Replaces the old `current − baseline` (with a
+ * `current < baseline → current` fallback) which could not see a reset once
+ * the new transfer's total out-ran the previous transfer's: batch 61 posted
+ * cream 9,710 / skim 82,545 lb against a real 28,503 / 318,367.
+ *
+ * Mutates openTot. Returns { volumes: {feed,cream,skim}, baselineUpdate }
+ * where baselineUpdate carries only baseline columns moved by a reset.
+ */
+function advanceVolumes(snap) {
+  const now = snap.pollTime instanceof Date ? snap.pollTime.getTime() : Date.now()
+  const volumes = {}
+  const baselineUpdate = {}
+  for (const [k, snapKey, col] of TOTALIZERS) {
+    const prev = openTot[k]
+    const { volume, reset, inGrace, ...next } = advanceTotalizer(prev, snap[snapKey], now, openedAtMs)
+    openTot[k] = next
+    volumes[k] = round2(volume)
+    if (reset) {
+      baselineUpdate[col] = round2(next.baseline)
+      console.warn(`[SeparatorSM] ${k} totalizer reset on batch ${openBatchId}: ${prev.last} → ${snap[snapKey]} (${next.baseline === 0 ? 'transfer start, counting from 0' : 'later transfer, keeping volume so far'}${inGrace ? ', in start grace' : ''})`)
+    }
+  }
+  return { volumes, baselineUpdate }
 }
 
 /**
@@ -178,20 +237,23 @@ async function openBatch(snap, historian, { backfill = true } = {}) {
   // Baseline the totalizers at open. Volumes start at 0 and grow as
   // (current − baseline); without this a re-opened batch re-counts the whole
   // cumulative total and posts a duplicate unbuild.
-  openBaselines = {
-    feed: snap.feedTotalLbs || 0,
-    cream: snap.creamTotalLbs || 0,
-    skim: snap.skimTotalLbs || 0,
+  // SD-722: these open readings are usually the PREVIOUS transfer's held
+  // totals — the per-tick reset detection re-baselines when SCADA zeroes them.
+  openTot = {
+    feed: newTotalizerState(snap.feedTotalLbs, snap.feedTotalLbs),
+    cream: newTotalizerState(snap.creamTotalLbs, snap.creamTotalLbs),
+    skim: newTotalizerState(snap.skimTotalLbs, snap.skimTotalLbs),
   }
+  openedAtMs = snap.pollTime.getTime()
   const row = await db.MesSeparationBatch.create({
     batchId,
     sourceSilo,
     inputVolume: 0,
     creamVolume: 0,
     skimVolume: 0,
-    feedStartLbs: openBaselines.feed,
-    creamStartLbs: openBaselines.cream,
-    skimStartLbs: openBaselines.skim,
+    feedStartLbs: round2(openTot.feed.baseline),
+    creamStartLbs: round2(openTot.cream.baseline),
+    skimStartLbs: round2(openTot.skim.baseline),
     batchStart: snap.pollTime,
     batchEnd: null,
     transferName: snap.xfrTransferName || null,
@@ -229,23 +291,44 @@ async function openBatch(snap, historian, { backfill = true } = {}) {
       if (!result) return
       // Guard against the batch closing before the backfinder returned
       if (openBatchId !== _rowId) return
-      const update = { batchStart: result.estimatedStartAt, feedStartLbs: result.feedStart }
-      openBaselines.feed = result.feedStart
-      if (result.creamStart != null) { openBaselines.cream = result.creamStart; update.creamStartLbs = result.creamStart }
-      if (result.skimStart != null) { openBaselines.skim = result.skimStart; update.skimStartLbs = result.skimStart }
+      const update = { batchStart: result.estimatedStartAt }
+      const applied = {}
+      const found = { feed: result.feedStart, cream: result.creamStart, skim: result.skimStart }
+      for (const [k, , col] of TOTALIZERS) {
+        const fv = found[k]
+        if (fv == null || !isFinite(fv)) continue
+        // SD-722: a tick already saw this totalizer reset → its baseline is
+        // authoritative; the finder's edge reading is from before the reset.
+        const st = openTot[k]
+        if (st.resetSeen) continue
+        let b = fv
+        // The finder saw a reset between edge and open, or its (lagging)
+        // history shows a value ABOVE the latest live reading (null = only
+        // zeros seen so far, i.e. already reset) — impossible for a counter
+        // unless it reset in between — so count from the reset.
+        if (result.resetSeen?.[k] || fv > (st.last ?? 0) + RESET_MIN_DROP) {
+          b = 0
+          st.resetSeen = true
+        }
+        st.baseline = b
+        update[col] = round2(b)
+        applied[k] = b
+      }
       await db.MesSeparationBatch.update(update, { where: { id: _rowId } })
-      console.log(`[SeparatorSM] Back-projected ${batchId} start: ${result.estimatedStartAt.toISOString()}, feedStart: ${result.feedStart.toFixed(1)} lb (was ${_openFeed.toFixed(1)}), creamStart: ${result.creamStart != null ? result.creamStart.toFixed(1) : '—'}, skimStart: ${result.skimStart != null ? result.skimStart.toFixed(1) : '—'}`)
+      const f = v => (v != null ? v.toFixed(1) : '—')
+      console.log(`[SeparatorSM] Back-projected ${batchId} start: ${result.estimatedStartAt.toISOString()}, feedStart: ${f(applied.feed)} lb (was ${_openFeed.toFixed(1)}), creamStart: ${f(applied.cream)}, skimStart: ${f(applied.skim)}`)
     })
     .catch(err => console.warn(`[SeparatorSM] actualStart finder failed for ${batchId}: ${err.message}`))
 }
 
 async function persistTick(snap) {
   if (!openBatchId) return
-  const base = openBaselines || { feed: 0, cream: 0, skim: 0 }
+  const { volumes, baselineUpdate } = advanceVolumes(snap)
   await db.MesSeparationBatch.update({
-    inputVolume: deltaVol(snap.feedTotalLbs, base.feed),
-    creamVolume: deltaVol(snap.creamTotalLbs, base.cream),
-    skimVolume: deltaVol(snap.skimTotalLbs, base.skim),
+    inputVolume: volumes.feed,
+    creamVolume: volumes.cream,
+    skimVolume: volumes.skim,
+    ...baselineUpdate,
     destinations: JSON.stringify(buildResolvedDestinations(snap)),
     prevSourceSilo: snap.xfrSource,
     prevDestinationsJson: JSON.stringify(snap.xfrDestinations),
@@ -277,18 +360,24 @@ async function closeBatch(snap, endReason) {
   const prevDests = row.prevDestinationsJson ? JSON.parse(row.prevDestinationsJson) : snap.xfrDestinations
   const prevIndexCodes = row.prevIndexCodesJson ? JSON.parse(row.prevIndexCodesJson) : snap.siloProductConfig
 
-  // Baseline-corrected volumes (current totalizer − reading at open). Fall back
-  // to the last persisted delta if the close-tick totalizer reads falsy (sensor
-  // dropout) so we don't zero out a real batch.
-  const base = openBaselines || { feed: row.feedStartLbs, cream: row.creamStartLbs, skim: row.skimStartLbs }
-  const closeInput = snap.feedTotalLbs ? deltaVol(snap.feedTotalLbs, base.feed) : (Number(row.inputVolume) || 0)
-  const closeCream = snap.creamTotalLbs ? deltaVol(snap.creamTotalLbs, base.cream) : (Number(row.creamVolume) || 0)
-  const closeSkim = snap.skimTotalLbs ? deltaVol(snap.skimTotalLbs, base.skim) : (Number(row.skimVolume) || 0)
+  // Reset-aware volumes (SD-722): same per-tick step as persistTick, so a reset
+  // on the close tick is detected rather than subtracted. A falsy close reading
+  // (dropout, or a reset still at 0) holds the last volume so we don't zero out
+  // a real batch.
+  if (!openTot) {
+    openTot = totStateFromRow(row)
+    openedAtMs = openTimeMsFromRow(row)
+  }
+  const { volumes, baselineUpdate } = advanceVolumes(snap)
+  const closeInput = volumes.feed
+  const closeCream = volumes.cream
+  const closeSkim = volumes.skim
 
   await db.MesSeparationBatch.update({
     inputVolume: closeInput,
     creamVolume: closeCream,
     skimVolume: closeSkim,
+    ...baselineUpdate,
     batchEnd: snap.pollTime,
     endReason,
     lastTickAt: snap.pollTime,
@@ -298,7 +387,8 @@ async function closeBatch(snap, endReason) {
 
   const closedBatchId = openBatchId
   openBatchId = null
-  openBaselines = null
+  openTot = null
+  openedAtMs = null
   machineState = STATE_IDLE
   rpmLowTicks = 0
   feedPermitZeroTicks = 0
@@ -544,14 +634,12 @@ async function hydrateFromDb() {
     }
     openBatchId = row.id
     machineState = STATE_RUNNING
-    // Restore the totalizer baselines so the resumed batch keeps computing
-    // volume as (current − open reading). Null on pre-baseline rows → treated
-    // as 0 (legacy raw-totalizer behavior for that one in-flight batch).
-    openBaselines = {
-      feed: Number(row.feedStartLbs) || 0,
-      cream: Number(row.creamStartLbs) || 0,
-      skim: Number(row.skimStartLbs) || 0,
-    }
+    // Restore the totalizer baselines + reset-detection state (SD-722) so the
+    // resumed batch keeps computing volume as (reading − baseline). Null
+    // baselines on pre-baseline rows → 0. Resets during downtime are still
+    // caught on the first tick as a drop below baseline + persisted volume.
+    openTot = totStateFromRow(row)
+    openedAtMs = openTimeMsFromRow(row)
     // Seed prevSnapshot from the stored snapshot fields so boundary detection
     // has a baseline. The first tick after hydrate will repopulate it fully.
     const prevDests = row.prevDestinationsJson ? JSON.parse(row.prevDestinationsJson) : ['', '', '', '']

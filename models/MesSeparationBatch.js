@@ -40,9 +40,11 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DECIMAL(8, 2),
         allowNull: true,
       },
-      // Totalizer readings captured at batch open. Batch volumes are computed
-      // as (current totalizer − this baseline) because the separator totalizers
-      // are cumulative odometers that don't reset between transfers. Null on
+      // Per-totalizer baselines: batch volume = reading − baseline. The
+      // separator totalizers are per-transfer counters that SCADA zeroes just
+      // after the batch opens, so the state machine moves the baseline on a
+      // reset (0 at the transfer's own start, −volume-so-far on a later one —
+      // values ≤ 0 are normal). SD-722, services/separatorTotalizer.js. Null on
       // pre-baseline rows (treated as baseline 0). See ensureRuntimeSchema.
       feedStartLbs: {
         type: DataTypes.DECIMAL(14, 2),

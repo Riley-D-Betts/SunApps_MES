@@ -25,8 +25,11 @@ const SURGE_MIN_RISE_GAL = 100   // gal net rise required to call a surge start 
 const BLEND_MIN_RISE_LBS = 200   // lbs rise required for the weight fallback
 
 // Separator totalizer tags + densities (mirror historian/providers/restProvider).
-// Feed is a continuous LBS odometer; cream/skim are per-batch GAL totalizers
-// converted to lbs by density so all three baselines are in the same unit.
+// Feed is LBS; cream/skim are GAL converted to lbs by density so all three
+// baselines are in the same unit. ALL THREE are per-transfer counters that
+// SCADA zeroes a few seconds to ~9 min AFTER the FEEDPERMIT edge (SD-722, see
+// services/separatorTotalizer.js) — a reading at the edge is usually the
+// PREVIOUS transfer's final total, not a baseline for this one.
 const SEP_FEED_TOTAL_TAG  = 'Product.SepFeedTotal'
 const SEP_CREAM_TOTAL_TAG = 'Ing_Sep_CMSep1_HIST.Cream_Flow_Totalized'
 const SEP_SKIM_TOTAL_TAG  = 'Ing_Sep_CMSep1_HIST.Skim_Flow_Totalized'
@@ -35,6 +38,8 @@ const SKIM_DENSITY_PPG  = 8.63
 // Feed-permit off-gaps shorter than this are treated as flicker (a brief drop at
 // a source/destination change), not a true end of the feed-on run.
 const FEEDPERMIT_FLICKER_MS = 90 * 1000
+
+const { isReset } = require('./separatorTotalizer')
 
 /**
  * For a blend tank, find when milk actually started flowing into it.
@@ -225,24 +230,75 @@ async function integrateFt1102BackfillGal(uhtId, since, until, historian) {
   }
 }
 
+const SEP_SUMMARY_RESOLUTION_MS = 30 * 1000
+
 /**
- * Read a totalizer tag's value at (or just after) a timestamp. Queries a window
- * around ts and takes the first sample at/after ts, falling back to the last
- * sample before it. Returns null when no data.
+ * Time-ordered readings for one analog tag from AnalogSummary buckets
+ * (First, Minimum@MinDateTime, Maximum@MaxDateTime, Last) — Min/Max keep their
+ * own timestamps so a reset inside one bucket stays visible and in order.
+ * Placeholder buckets (Count 0, "NaN") contribute nothing. Sequential paging.
+ *
+ * AnalogSummary, NOT ProcessValues, for the separator totalizers: ProcessValues
+ * is swinging-door compressed and DST-lagged, and its window-boundary values
+ * are wrong for these tags (batch 169: it returned 1,851 / 868 lb around the
+ * edge while AnalogSummary shows the counter holding 250,651 lb), which faked
+ * a reset. Reads bypass HistoricalProvider's semaphore (like fillerFlowService),
+ * so callers must keep them sequential. Returns null when the provider can't
+ * do raw OData (mock).
  */
-async function _readTotalizerAt(tag, ts, historian, windowMs = 10 * 60 * 1000) {
+async function analogSummaryPoints(historian, tag, start, end, resolutionMs = SEP_SUMMARY_RESOLUTION_MS) {
+  if (!historian?._get || !historian.baseUrl) return null
+  const filter = `FQN eq '${tag}' and StartDateTime ge ${start.toISOString()} and EndDateTime le ${end.toISOString()}`
+  let url = `${historian.baseUrl}/AnalogSummary?$filter=${encodeURIComponent(filter)}&Resolution=${resolutionMs}`
+  const rows = []
+  while (url) {
+    const d = await historian._get(url, { verbose: false })
+    rows.push(...(d?.value || []))
+    url = d?.['@odata.nextLink'] || null
+  }
+  const pts = []
+  const add = (t, v) => {
+    const n = v != null ? Number(v) : NaN
+    if (isFinite(n) && isFinite(t)) pts.push({ t, v: n })
+  }
+  for (const x of rows) {
+    if ((x.Count ?? 1) === 0) continue
+    const st = new Date(x.StartDateTime).getTime()
+    const en = x.EndDateTime ? new Date(x.EndDateTime).getTime() : st + resolutionMs
+    add(st, x.First)
+    if (x.MinDateTime) { const t = new Date(x.MinDateTime).getTime(); if (t >= st && t <= en) add(t, x.Minimum) }
+    if (x.MaxDateTime) { const t = new Date(x.MaxDateTime).getTime(); if (t >= st && t <= en) add(t, x.Maximum) }
+    add(en, x.Last)
+  }
+  return pts.sort((a, b) => a.t - b.t)
+}
+
+/**
+ * Reset-aware baseline for one separator totalizer at a back-projected start.
+ *
+ * Reads the tag over [edge, until] (until = the MES open time, i.e. only data
+ * that existed when the batch opened — replay must not see the future). The
+ * value at the edge is the first reading at/after it. If any later reading is
+ * a reset (SCADA zeroing the counter for this transfer) the baseline is 0: the
+ * batch counts from the reset. SD-722: the old code returned the edge reading,
+ * which is the previous transfer's final total (batch 175: feed 172,066 lb,
+ * reset 12 s after the edge). Resets after the open are caught per tick by
+ * separatorStateMachine. Returns { value, resetSeen } (tag units) or null.
+ */
+async function _resetAwareBaselineAt(tag, edge, until, historian) {
   try {
-    const rows = await historian._queryProcessValues(
-      tag, new Date(ts.getTime() - windowMs), new Date(ts.getTime() + windowMs), { verbose: false }
-    )
-    if (!rows || !rows.length) return null
-    const series = rows
-      .map(r => ({ t: new Date(r.DateTime), v: parseFloat(r.Value) }))
-      .filter(p => !isNaN(p.v))
-      .sort((a, b) => a.t - b.t)
-    if (!series.length) return null
-    const atOrAfter = series.find(p => p.t >= ts)
-    return (atOrAfter || series[series.length - 1]).v
+    const startMs = Math.floor(edge.getTime() / SEP_SUMMARY_RESOLUTION_MS) * SEP_SUMMARY_RESOLUTION_MS
+    const endMs = Math.max(until ? until.getTime() : 0, startMs) + SEP_SUMMARY_RESOLUTION_MS
+    const pts = await analogSummaryPoints(historian, tag, new Date(startMs), new Date(endMs))
+    if (!pts || !pts.length) return null
+    const inWin = pts.filter(p => p.t <= endMs)
+    if (!inWin.length) return null
+    let prev = inWin[0].v
+    for (const p of inWin.slice(1)) {
+      if (isReset(prev, p.v)) return { value: 0, resetSeen: true }
+      prev = p.v
+    }
+    return { value: inWin[0].v, resetSeen: false }
   } catch {
     return null
   }
@@ -279,16 +335,16 @@ function _sustainedFeedStart(series, flickerMs) {
  * the feed/cream/skim totalizer baselines at that moment.
  *
  * The true start is the beginning of the sustained FEEDPERMIT-on run (flicker
- * at source/destination boundaries debounced), which is the window the per-batch
- * cream/skim totalizers key off — so reading ALL THREE totalizers there gives
- * baselines whose deltas measure the same physical run (fixing input vs
- * cream+skim mismatch). Feed is lbs; cream/skim are gal × density → lbs.
+ * at source/destination boundaries debounced). All three baselines are taken
+ * reset-aware over [edge, openTime] so their deltas measure the same physical
+ * run: a reset seen in that span means baseline 0 (SD-722). Feed is lbs;
+ * cream/skim are gal × density → lbs.
  *
  * @param {Date}   openTime  when MES opened the batch (snap.pollTime)
  * @param {object} historian restProvider / historicalProvider
  * @param {object} [opts]    { lookbackMs }
  * @returns {{ estimatedStartAt: Date, feedStart: number, creamStart: number|null,
- *            skimStart: number|null, method: string } | null}
+ *            skimStart: number|null, resetSeen: {feed,cream,skim}, method: string } | null}
  */
 async function findSeparationActualStart(openTime, historian, opts = {}) {
   if (!historian?._queryProcessValues) return null
@@ -308,20 +364,25 @@ async function findSeparationActualStart(openTime, historian, opts = {}) {
 
   if (!estimatedStartAt) return null
 
-  // Read all three totalizers at the true start. Feed is required (it's the
-  // input measure); cream/skim are best-effort (null leaves the open baseline).
-  const [feedStart, creamGal, skimGal] = await Promise.all([
-    _readTotalizerAt(SEP_FEED_TOTAL_TAG, estimatedStartAt, historian),
-    _readTotalizerAt(SEP_CREAM_TOTAL_TAG, estimatedStartAt, historian),
-    _readTotalizerAt(SEP_SKIM_TOTAL_TAG, estimatedStartAt, historian),
-  ])
-  if (feedStart == null || !isFinite(feedStart)) return null
+  // Reset-aware baselines for all three totalizers at the true start (SD-722).
+  // Feed is required (it's the input measure); cream/skim are best-effort
+  // (null leaves the open baseline).
+  // Sequential: AnalogSummary reads bypass the replay semaphore (AVEVA 500s at
+  // 5–8 concurrent requests).
+  const feed = await _resetAwareBaselineAt(SEP_FEED_TOTAL_TAG, estimatedStartAt, openTime, historian)
+  const cream = await _resetAwareBaselineAt(SEP_CREAM_TOTAL_TAG, estimatedStartAt, openTime, historian)
+  const skim = await _resetAwareBaselineAt(SEP_SKIM_TOTAL_TAG, estimatedStartAt, openTime, historian)
+  if (feed == null || !isFinite(feed.value)) return null
+  const lbs = (r, ppg) => (r != null && isFinite(r.value) ? r.value * ppg : null)
 
   return {
     estimatedStartAt,
-    feedStart,
-    creamStart: creamGal != null && isFinite(creamGal) ? creamGal * CREAM_DENSITY_PPG : null,
-    skimStart: skimGal != null && isFinite(skimGal) ? skimGal * SKIM_DENSITY_PPG : null,
+    feedStart: feed.value,
+    creamStart: lbs(cream, CREAM_DENSITY_PPG),
+    skimStart: lbs(skim, SKIM_DENSITY_PPG),
+    // Which totalizers were seen resetting between the edge and the open
+    // (baseline forced to 0 for those).
+    resetSeen: { feed: !!feed.resetSeen, cream: !!cream?.resetSeen, skim: !!skim?.resetSeen },
     method: 'feedpermit-sustained-edge',
   }
 }
@@ -331,4 +392,7 @@ module.exports = {
   findSurgeTankActualStart,
   integrateFt1102BackfillGal,
   findSeparationActualStart,
+  // exported for scripts/recomputeSeparationVolumes.js (same baseline logic)
+  _resetAwareBaselineAt,
+  analogSummaryPoints,
 }
