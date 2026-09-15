@@ -110,6 +110,11 @@ module.exports = {
   // Shipped-vs-produced is a production-date cohort whose loss keeps landing for
   // weeks after the product was made, so its history rows are re-rolled wider.
   LOSS_SHIPPING_LOOKBACK_DAYS: parseInt(process.env.LOSS_SHIPPING_LOOKBACK_DAYS || '60', 10) || 60,
+  // Separation volumes before the SD-722 stale-baseline fix are not trustworthy.
+  // Set to the plant date (YYYY-MM-DD) or ISO instant the fix went live: batches
+  // closed on/after it are marked reliable in the loss report. Unset = every
+  // window's separation figure is marked unreliable.
+  LOSS_SEPARATION_RELIABLE_FROM: process.env.LOSS_SEPARATION_RELIABLE_FROM || null,
   // Weekly executive digest — Monday 06:00 plant time, last ISO week, Teams
   // card via the Gateway. Posts ONLY when ENVIRONMENT=prod AND
   // LOSS_DIGEST_ENABLED=true AND MES_DRY_RUN is off; otherwise it logs the
@@ -129,6 +134,18 @@ module.exports = {
   // this we just defer to the next tick so we don't spam NS with sub-pound noise.
   MES_MIN_ISSUE_LBS: parseFloat(process.env.MES_MIN_ISSUE_LBS || '10'),
   MES_MIN_COMPLETION_LBS: parseFloat(process.env.MES_MIN_COMPLETION_LBS || '1'),
+  // Surge issue circuit breaker (SD-722). After this many consecutive surge
+  // issue failures with the same error signature (12 ≈ 1 h at the 5-min tick)
+  // the batch is flagged issueBlocked and the shortfall auto-adjust stops
+  // fabricating inventory for it. The issue itself keeps retrying (cursor held)
+  // and the block clears on the first success. 0 disables the breaker.
+  MES_SURGE_ISSUE_BREAKER_FAILURES: Math.max(0, parseInt(process.env.MES_SURGE_ISSUE_BREAKER_FAILURES || '12', 10) || 0),
+  // How far back the surge Layer-3 resolver looks for a COMPLETED blend batch on
+  // the feeding tank when none is active (SD-722). Kept at 72 h: prod pins that
+  // were canonical-and-correct occurred 55–70 h after the blend batch finished
+  // (slow-draining tanks), so 48 h would drop real pins. Mis-pins are stopped by
+  // the FG cross-check (canonical raw or approved pairing), not by the window.
+  MES_SURGE_RECENT_BLEND_WINDOW_HOURS: parseFloat(process.env.MES_SURGE_RECENT_BLEND_WINDOW_HOURS || '72') || 72,
   // Waste-tracking noise floors (lbs). Completion is driven by measured arrival
   // into the destination vessel; issued − arrival = waste (NS shrinkage). These
   // floors keep load-cell / level sensor jitter from fabricating phantom

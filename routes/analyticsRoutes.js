@@ -552,6 +552,17 @@ router.post('/inventory-adjustments/:id/reject', controller.rejectInventoryAdjus
  *       (separation → blend → UHT → surge → fillers → packaging → shipped vs produced) with a measured / combined /
  *       not-measured status, so unmeasured steps show as warnings rather than zero. Priced at CURRENT raw-milk prices with no global
  *       fallback (unpriced families are reported in pounds).
+ *       Every `chain[]` step and `stages[]` entry carries `reliability: { level: reliable|partial|unreliable, reason, since }`
+ *       (separation unreliable until `LOSS_SEPARATION_RELIABLE_FROM`, surge/UHT unreliable, blend partial, shipping reliable);
+ *       `headline.reliableLossUsd` / `reliableLossLbs` / `reliableLostRevenueUsd` / `reliableLossSteps` sum only the reliable
+ *       and partial stages — a subset of the unchanged totals. The `filler` chain step (status `partial`) carries
+ *       `filler`: Filler 1 inlet gallons while in RunMode vs good cartons × carton volume of the SKU on line 1
+ *       (`inletGal`, `goodCartons`, `goodCartonGal`, `lossGal`, `lossLbs`, `lossPct`, `costUsd`, `revenueUsd`, `bySku[]`,
+ *       `byDay[]`, `join`, `otherFillers[]`), or `available:false` with `reason`; it is never added to the totals.
+ *       `plantBalance` is received → cased for the window's plant days from NetSuite: `received` (truck net lb),
+ *       `inventory` (tank drawdown from sweep memos), `cased` (physical lb), `bulkShipped`, `destroyedAfterCasing`,
+ *       `lostBeforeCasing` (= received + drawdown − cased − bulk shipped), `%ofReceived`, `receiptsComplete`, `caveats[]`
+ *       (or `available:false` with `error`).
  *     parameters:
  *       - in: query
  *         name: from
@@ -578,7 +589,7 @@ router.post('/inventory-adjustments/:id/reject', controller.rejectInventoryAdjus
  *           always returned in `excluded`.
  *     responses:
  *       200: { description: The report. }
- *       400: { description: Bad window (to <= from, > 400 days, unparseable dates). }
+ *       400: { description: 'Bad window (to <= from, > 400 days, unparseable dates).' }
  *       500: { description: Query failed. }
  */
 router.get('/loss-report',                   controller.getLossReport)

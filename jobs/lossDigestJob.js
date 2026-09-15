@@ -49,6 +49,22 @@ function buildCard(report, { fromDay, toDay }) {
     const n = v => Math.round(v || 0).toLocaleString('en-US')
     facts.push({ title: 'Produced → shipped (this week, to today)', value: `${n(sh.producedCases)} cases / ${n(sh.producedPallets)} pallets · shipped ${n(sh.shippedCases)} (${sh.shippedPctOfProduced != null ? sh.shippedPctOfProduced.toFixed(0) : '—'}%) · lost ${n(sh.loss.cases)} (${fmtUsd(sh.loss.costUsd)} cost / ${fmtUsd(sh.loss.revenueUsd)} revenue) · at risk ${n(sh.atRisk.cases)}` })
   }
+  if (h.reliableLossUsd != null) {
+    const steps = (h.reliableLossSteps || []).map(x => (report.stages.find(s => s.key === x.key) || {}).label || x.key).join(', ')
+    facts.push({ title: 'Loss · reliable steps only', value: `${fmtUsd(h.reliableLossUsd)} · ${fmtLbs(h.reliableLossLbs)}${steps ? ` (${steps})` : ''}` })
+  }
+  const fill = (report.chain || []).find(c => c.key === 'filler')
+  if (fill && fill.filler) {
+    const f = fill.filler
+    const gal = v => `${Math.round(Number(v) || 0).toLocaleString('en-US')} gal`
+    facts.push({ title: 'Filler 1 (line 1 only)', value: f.available
+      ? `${gal(f.inletGal)} in · ${Math.round(f.goodCartons).toLocaleString('en-US')} good cartons (${gal(f.goodCartonGal)}) · lost ${gal(Math.max(0, f.lossGal))} (${f.lossPct != null ? f.lossPct.toFixed(1) : '—'}%)${f.costUsd != null ? ` · ${fmtUsd(f.costUsd)} cost` : ''}`
+      : `unavailable — ${f.reason}` })
+  }
+  const pb = report.plantBalance
+  if (pb && pb.available) {
+    facts.push({ title: 'Plant balance (received → cased)', value: `received ${fmtLbs(pb.received.lbs)} · cased ${fmtLbs(pb.cased.lbs)} (${pb.cased.pctOfReceived != null ? pb.cased.pctOfReceived.toFixed(1) : '—'}%) · lost before casing ${fmtLbs(pb.lostBeforeCasing.lbs)} (${pb.lostBeforeCasing.pctOfReceived != null ? pb.lostBeforeCasing.pctOfReceived.toFixed(1) : '—'}%)${pb.receiptsComplete ? '' : ' · receipts incomplete'}` })
+  }
   const blind = (report.chain || []).filter(c => c.status === 'not-measured').map(c => c.label)
   if (blind.length) facts.push({ title: 'Not measured yet', value: blind.join(' · ') })
   return {

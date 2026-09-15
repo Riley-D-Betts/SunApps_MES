@@ -54,17 +54,45 @@ const tankState = {
 }
 
 const lineState = {
-  ML1: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
-  ML2: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
-  ML3: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
-  ML4: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
-  CL1: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
-  CL2: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 },
+  ML1: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: null, prevValueAt: null },
+  ML2: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: null, prevValueAt: null },
+  ML3: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: null, prevValueAt: null },
+  ML4: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: null, prevValueAt: null },
+  CL1: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: null, prevValueAt: null },
+  CL2: { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: null, prevValueAt: null },
 }
 
 // A source product-type code is "real" (issuable) only when present and non-zero
 // — 0 = None and the idle/reset default. Used to pick the live vs latched code.
 const validCode = c => c != null && String(c).trim() !== '' && String(c).trim() !== '0'
+
+// Stale-MEM guard tolerances (see the tail-catcher pass in run()). A real latch
+// of the fill that just ended can sit a hair under the last live reading (float
+// / rounding) and above it only by what flowed between polls. Lines run
+// ~1,400 lb/min; 3,000 lb/min + 500 lb is generous without admitting an old
+// full-tank latch against a stub or an aborted fill.
+const MEM_LATCH_BELOW_TOL_LBS = 50
+const MEM_LATCH_MAX_RATE_LBS_PER_MIN = 3000
+const MEM_LATCH_ABOVE_TOL_LBS = 500
+
+/**
+ * True when the MEM totalizer reading plausibly latched the fill that just
+ * reset: it changed since the previous poll (an unchanged latch belongs to an
+ * earlier completed fill) and it is within [livePeak − tol, livePeak + what the
+ * line could have flowed since that reading]. When this returns false the
+ * caller books the live peak and live routing instead — which is also correct
+ * for a real latch that happened a poll before the reset, so the guard can
+ * only cost the ≤ one-poll sliver between the last live reading and the peak.
+ */
+function isMemLatchFresh(prev, memTotalizerLbs, now) {
+  if (!(memTotalizerLbs > 0)) return false
+  if (prev.prevMemTotalizer != null && Math.abs(memTotalizerLbs - prev.prevMemTotalizer) < 0.001) return false
+  const livePeak = prev.prevValue || 0
+  const elapsedMin = prev.prevValueAt ? Math.max(0, (now - prev.prevValueAt) / 60000) : 0
+  if (memTotalizerLbs < livePeak - MEM_LATCH_BELOW_TOL_LBS) return false
+  if (memTotalizerLbs > livePeak + MEM_LATCH_ABOVE_TOL_LBS + MEM_LATCH_MAX_RATE_LBS_PER_MIN * elapsedMin) return false
+  return true
+}
 
 let lastPollTime = new Date()
 
@@ -188,14 +216,34 @@ async function run(historian) {
       // threshold again.
 
       if ((totalizerReset || productCleared) && (hadProduct || validStr(memProductName))) {
-        const flowProduct = validStr(memProductName) || prev.productName
+        // SD-722 stale-MEM guard. The PLC re-latches the MEM* tags only when a
+        // fill COMPLETES; an aborted or cancelled fill resets BATCHTOTALIZER
+        // without touching them, so MEM* still describes an older fill (often
+        // hours old, different destination). Trusting them unconditionally
+        // booked that old total and routing again at every aborted reset:
+        // prod batch 174 (8/8) issued ML1's 10:01 latch of 73,100 lb twice
+        // (14:49 unmatched→backfill, 14:57 tail) for flows that were really a
+        // 71,192 lb BT1A fill already ticked to batch 171 and a 708 lb stub;
+        // batch 238 (8/27) was a WO built entirely from a stale 77,400 lb latch.
+        // MEM* is used only when it looks like THIS fill's latch: it changed
+        // since the last poll, and it is consistent with the live peak we saw
+        // (not below it; not above it by more than the line could flow since).
+        // Otherwise fall back to the live values captured during the flow —
+        // prev.* is updated only by the state-update pass below, so it still
+        // holds this flow's last live totalizer / product / silo / destination.
+        const memFresh = isMemLatchFresh(prev, memTotalizerLbs, now)
+        if (!memFresh && memTotalizerLbs > 0 && Math.abs(memTotalizerLbs - prev.prevValue) > 1) {
+          console.warn(`[BlendTankJob] Line ${line} reset: ignoring stale MEM latch ${memTotalizerLbs.toFixed(1)} lb → "${memRequestedBy}" (live peak ${prev.prevValue.toFixed(1)} lb → "${prev.requestedBy}")`)
+          statusStore.pushEvent('line.staleMemLatch', `${line}: stale MEM latch ${memTotalizerLbs.toFixed(0)} lb ignored; booking live peak ${prev.prevValue.toFixed(0)} lb`, { line, memTotalizerLbs, memRequestedBy, livePeakLbs: prev.prevValue, liveRequestedBy: prev.requestedBy })
+        }
+        const flowProduct = (memFresh && validStr(memProductName)) || prev.productName || validStr(memProductName)
         // Live code reset to 0 on flow-end → prefer the latched MEM code, else
         // the code captured during flow. Lets processLineFlow resolve the
         // component by exact product-type code instead of the free-text name.
-        const flowProductCode = validCode(memProductCode) ? memProductCode : prev.productCode
-        const flowSilo = validStr(memSiloName) || prev.siloName || ''
-        const flowDest = validStr(memRequestedBy) || prev.requestedBy || ''
-        const batchTotalLbs = memTotalizerLbs > 0
+        const flowProductCode = memFresh && validCode(memProductCode) ? memProductCode : prev.productCode
+        const flowSilo = (memFresh && validStr(memSiloName)) || prev.siloName || ''
+        const flowDest = (memFresh && validStr(memRequestedBy)) || prev.requestedBy || ''
+        const batchTotalLbs = memFresh
           ? memTotalizerLbs
           : (totalizerReset ? prev.prevValue : (totalizerLbs > 10 ? totalizerLbs : prev.prevValue))
 
@@ -312,6 +360,7 @@ async function run(historian) {
 
       if (prev.prevValue === null) {
         prev.prevValue = totalizerLbs
+        prev.prevValueAt = now
         if (validStr(productName)) prev.productName = productName
         if (validCode(productCode)) prev.productCode = productCode
         if (validStr(siloName)) prev.siloName = siloName
@@ -326,7 +375,11 @@ async function run(historian) {
       if (validStr(requestedBy)) prev.requestedBy = requestedBy
       if (requestedTargetLbs) prev.requestedTargetLbs = requestedTargetLbs
       prev.prevValue = totalizerLbs
-      prev.prevMemTotalizer = memTotalizerLbs || 0
+      prev.prevValueAt = now
+      // Remember the last NON-ZERO MEM latch: a transient empty read (the
+      // provider maps a missing value to 0) must not make the old latch look
+      // "changed" — and fresh — on the next poll (stale-MEM guard above).
+      if (memTotalizerLbs > 0) prev.prevMemTotalizer = memTotalizerLbs
     }
 
     logStatusSummary(statuses, lineReadings)
@@ -425,7 +478,7 @@ function reset() {
     tankState[k] = { productName: null, currentWOState: null, batchActive: false, seeded: false, batchStartedAt: null, lastFlowAt: null, hasSeenFlow: false }
   }
   for (const k of Object.keys(lineState)) {
-    lineState[k] = { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: 0 }
+    lineState[k] = { prevValue: null, productName: '', productCode: '', siloName: '', requestedBy: '', prevMemTotalizer: null, prevValueAt: null }
   }
 }
 

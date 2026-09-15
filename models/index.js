@@ -205,6 +205,26 @@ db.ensureRuntimeSchema = async function () {
     IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'lastIssueErrorAt' AND Object_ID = Object_ID(N'${P}MesSurgeTankBatches'))
       ALTER TABLE ${P}MesSurgeTankBatches ADD lastIssueErrorAt DATETIME2 NULL;
   `)
+  // Issue circuit breaker (SD-722): same-signature failure streak + blocked
+  // flag. While blocked, the surge tick stops fabricating inventory through the
+  // shortfall auto-adjust (the 5-min bump ↔ sweep loop) and the review/loss
+  // surfaces show why the batch isn't issuing.
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'sameIssueErrorStreak' AND Object_ID = Object_ID(N'${P}MesSurgeTankBatches'))
+      ALTER TABLE ${P}MesSurgeTankBatches ADD sameIssueErrorStreak INT NOT NULL CONSTRAINT DF_${P}MesSurgeTankBatches_sameIssueErrorStreak DEFAULT 0;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'issueBlocked' AND Object_ID = Object_ID(N'${P}MesSurgeTankBatches'))
+      ALTER TABLE ${P}MesSurgeTankBatches ADD issueBlocked BIT NOT NULL CONSTRAINT DF_${P}MesSurgeTankBatches_issueBlocked DEFAULT 0;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'issueBlockedReason' AND Object_ID = Object_ID(N'${P}MesSurgeTankBatches'))
+      ALTER TABLE ${P}MesSurgeTankBatches ADD issueBlockedReason NVARCHAR(500) NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'issueBlockedAt' AND Object_ID = Object_ID(N'${P}MesSurgeTankBatches'))
+      ALTER TABLE ${P}MesSurgeTankBatches ADD issueBlockedAt DATETIME2 NULL;
+  `)
   // Actual-start backfill: historian-derived timestamp of when milk actually
   // started flowing, as opposed to when MES detected the batch (detectedAt).
   await sequelize.query(`

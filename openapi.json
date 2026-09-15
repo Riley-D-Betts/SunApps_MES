@@ -3940,6 +3940,75 @@
         }
       }
     },
+    "/api/mes/analytics/loss-report": {
+      "get": {
+        "tags": [
+          "Loss Report"
+        ],
+        "summary": "Milk Loss executive report",
+        "description": "Where milk (and money) was lost over a window, by stage (separation, blend tanks, surge tanks), equipment, product family and product, with the ten worst batches, a trend, and an honest \"what we can't measure\" block. Every figure is split into a MEASURED part and an UPPER-BOUND part (`wasteLbs = wasteLbsMeasured + wasteLbsUpperBoundOnly`). Dollars come in TWO bases as peers — raw-milk cost (`wasteUsd*`) and forgone FG revenue (`lostRevenueUsd*`), never added. Pounds are canonical; `units.lbsPerGal` converts for display. Never reads inventory adjustments. Batches that closed with under 100 lb issued are listed under `unaccounted`, not counted as loss. `chain[]` always carries all seven product-path steps (separation → blend → UHT → surge → fillers → packaging → shipped vs produced) with a measured / combined / not-measured status, so unmeasured steps show as warnings rather than zero. Priced at CURRENT raw-milk prices with no global fallback (unpriced families are reported in pounds). Every `chain[]` step and `stages[]` entry carries `reliability: { level: reliable|partial|unreliable, reason, since }` (separation unreliable until `LOSS_SEPARATION_RELIABLE_FROM`, surge/UHT unreliable, blend partial, shipping reliable); `headline.reliableLossUsd` / `reliableLossLbs` / `reliableLostRevenueUsd` / `reliableLossSteps` sum only the reliable and partial stages — a subset of the unchanged totals. The `filler` chain step (status `partial`) carries `filler`: Filler 1 inlet gallons while in RunMode vs good cartons × carton volume of the SKU on line 1 (`inletGal`, `goodCartons`, `goodCartonGal`, `lossGal`, `lossLbs`, `lossPct`, `costUsd`, `revenueUsd`, `bySku[]`, `byDay[]`, `join`, `otherFillers[]`), or `available:false` with `reason`; it is never added to the totals. `plantBalance` is received → cased for the window's plant days from NetSuite: `received` (truck net lb), `inventory` (tank drawdown from sweep memos), `cased` (physical lb), `bulkShipped`, `destroyedAfterCasing`, `lostBeforeCasing` (= received + drawdown − cased − bulk shipped), `%ofReceived`, `receiptsComplete`, `caveats[]` (or `available:false` with `error`).\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Window start — ISO 8601 instant, or a plant-local date `YYYY-MM-DD`. Default = 7 whole plant days ending yesterday."
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Window end (exclusive instant; a bare date is INCLUSIVE of that plant day)."
+          },
+          {
+            "in": "query",
+            "name": "groupBy",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "day",
+                "week"
+              ],
+              "default": "week"
+            },
+            "description": "Trend bucket. Weeks start Monday, plant time."
+          },
+          {
+            "in": "query",
+            "name": "compare",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Also compute the equal-length prior window (`prior` + `headline.delta`)."
+          },
+          {
+            "in": "query",
+            "name": "ignoreUpperBounds",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Leave out every batch whose loss is only an upper bound (its input pounds AND its loss), so every figure — headline, chain, rankings, top events, trend, prior compare — is measured. What was left out is always returned in `excluded`.\n"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The report."
+          },
+          "400": {
+            "description": "Bad window (to <= from, > 400 days, unparseable dates)."
+          },
+          "500": {
+            "description": "Query failed."
+          }
+        }
+      }
+    },
     "/api/mes/analytics/loss-report/digest-preview": {
       "get": {
         "tags": [

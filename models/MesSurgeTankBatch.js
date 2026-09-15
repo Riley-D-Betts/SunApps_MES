@@ -203,6 +203,33 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATE,
         allowNull: true,
       },
+      // ── Issue circuit breaker (SD-722) ──
+      // Consecutive failures with the SAME normalized error signature (numbers
+      // stripped), so a frozen delta retried every tick is told apart from a
+      // run of unrelated transient errors. Reset on success or a new signature.
+      sameIssueErrorStreak: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        defaultValue: 0,
+      },
+      // Set once sameIssueErrorStreak reaches MES_SURGE_ISSUE_BREAKER_FAILURES.
+      // While true the tick still retries the issue (so it self-heals when real
+      // stock lands) but NEVER fabricates inventory via the shortfall
+      // auto-adjust / lot top-up. Cleared on the next successful issue.
+      // Read by the Surge Tank Review payload and the loss report.
+      issueBlocked: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+      },
+      issueBlockedReason: {
+        type: DataTypes.STRING(500),
+        allowNull: true,
+      },
+      issueBlockedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
       lastIssueAt: {
         type: DataTypes.DATE,
         allowNull: true,
