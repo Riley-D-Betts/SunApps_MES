@@ -32,6 +32,17 @@ db.ensureRuntimeSchema = async function () {
   // unprefixed DF_... would collide between the two environments' table sets.
   const P = config.TABLE_PREFIX
 
+  // ${P}MesBlendTankBatches (SD-722): blend fill-while-draining flag from the
+  // outlet-valve history (services/blendDrainCheckService.js). Nullable, no defaults.
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'drainedWhileFilling' AND Object_ID = Object_ID(N'${P}MesBlendTankBatches'))
+      ALTER TABLE ${P}MesBlendTankBatches ADD drainedWhileFilling BIT NULL;
+  `)
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'drainOverlapMinutes' AND Object_ID = Object_ID(N'${P}MesBlendTankBatches'))
+      ALTER TABLE ${P}MesBlendTankBatches ADD drainOverlapMinutes DECIMAL(8,1) NULL;
+  `)
+
   // ${P}MesLossDaily (SD-729): lostRevenueMeasuredUsd was added the same day
   // the table was born, but dev's table had already been created by sync().
   // Guarded on the table existing so a fresh DB (sync creates it complete)

@@ -139,7 +139,7 @@ async function startBatch(tankId, prev, status, reason, historian) {
   }
 }
 
-async function endBatch(tankId, prev, reason) {
+async function endBatch(tankId, prev, reason, historian) {
   console.log(`[BlendTankJob] BATCH END (${reason}) on ${tankId}: "${prev.productName}"`)
   statusStore.pushEvent('blendTank.batchEnd', `${tankId}: batch ended (${reason})`, { tankId, productName: prev.productName, reason })
   const productName = prev.productName
@@ -148,7 +148,7 @@ async function endBatch(tankId, prev, reason) {
   prev.lastFlowAt = null
   prev.hasSeenFlow = false
   try {
-    await blendTankMesService.processWOEnd({ tankId, productName, detectedAt: new Date(clock.now()).toISOString() })
+    await blendTankMesService.processWOEnd({ tankId, productName, detectedAt: new Date(clock.now()).toISOString() }, historian)
   } catch (err) {
     console.error(`[BlendTankJob] processWOEnd failed for ${tankId}:`, err.message)
   }
@@ -262,7 +262,7 @@ async function run(historian) {
         }
       }
       if (endReason) {
-        await endBatch(tankId, prev, endReason)
+        await endBatch(tankId, prev, endReason, historian)
       }
 
       // ── START pass ────────────────────────────────────────────────────
