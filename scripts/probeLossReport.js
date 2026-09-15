@@ -76,6 +76,9 @@ async function main() {
     surgeUnmeasured: await one('surgeUnmeasured', `SELECT COUNT(*) v FROM [${P}MesSurgeTankBatches] WHERE ${surgeWhere} AND concurrentFillDrain=1 AND NOT (concurrentTickCount>0 AND meteredDrainTickCount=concurrentTickCount AND drainFillerLines='1')`),
     blendN: await one('blendN', `SELECT COUNT(*) v FROM [${P}MesBlendTankBatches] WHERE ${blendWhere}`),
     blendWaste: await one('blendWaste', `SELECT SUM(CASE WHEN cumulativeIssuedLbs-cumulativeOutputLbs<0 THEN 0 ELSE cumulativeIssuedLbs-cumulativeOutputLbs END) v FROM [${P}MesBlendTankBatches] WHERE ${blendWhere}`),
+    blendConcurrent: await one('blendConcurrent', (await config.sequelize.query(`SELECT COUNT(*) n FROM sys.columns WHERE Name = N'drainedWhileFilling' AND Object_ID = Object_ID(N'${P}MesBlendTankBatches')`, { type: QueryTypes.SELECT }))[0].n > 0
+      ? `SELECT COUNT(*) v FROM [${P}MesBlendTankBatches] WHERE ${blendWhere} AND drainedWhileFilling = 1`
+      : `SELECT 0 v`),
     sepN: await one('sepN', `SELECT COUNT(*) v FROM [${P}MesSeparationBatches] WHERE status IN ('completed','error') AND ${sepWhere}`),
     sepWaste: await one('sepWaste', `SELECT SUM(CASE WHEN wasteVolume<0 THEN 0 ELSE wasteVolume END) v FROM [${P}MesSeparationBatches] WHERE status IN ('completed','error') AND ${sepWhere}`),
     sepHeld: await one('sepHeld', `SELECT COUNT(*) v FROM [${P}MesSeparationBatches] WHERE status='pending_ns' AND ${sepWhere}`),
@@ -89,6 +92,8 @@ async function main() {
     ['surge measured+upper = waste', Math.round(S.wasteLbsMeasured + S.wasteLbsUpperBoundOnly), Math.round(S.wasteLbs)],
     ['blend batches', B.batches, n(x.blendN)],
     ['blend waste', Math.round(B.wasteLbs), Math.round(n(x.blendWaste))],
+    ['blend batches drained while filling', B.unmeasuredBatches, n(x.blendConcurrent)],
+    ['blend measured+upper = waste', Math.round(B.wasteLbsMeasured + B.wasteLbsUpperBoundOnly), Math.round(B.wasteLbs)],
     ['separation batches', E.batches, n(x.sepN)],
     ['separation waste', Math.round(E.wasteLbs), Math.round(n(x.sepWaste))],
     ['separation held', rep.unaccounted.separationHeld.count, n(x.sepHeld)],

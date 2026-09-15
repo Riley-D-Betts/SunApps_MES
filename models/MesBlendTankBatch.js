@@ -95,6 +95,18 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DECIMAL(8, 2),
         allowNull: true,
       },
+      // SD-722: was a UHT pulling from this tank (outlet valve open) while it
+      // filled? true → the load-cell arrival under-counts and waste is an upper
+      // bound. null = not checked (no historian / predates the check).
+      // Set by services/blendDrainCheckService.js at close or by backfill.
+      drainedWhileFilling: {
+        type: DataTypes.BOOLEAN,
+        allowNull: true,
+      },
+      drainOverlapMinutes: {
+        type: DataTypes.DECIMAL(8, 1),
+        allowNull: true,
+      },
       lastIssueAt: {
         type: DataTypes.DATE,
         allowNull: true,

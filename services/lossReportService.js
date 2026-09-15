@@ -64,6 +64,7 @@ const T = {
   sep:   `[${P}MesSeparationBatches]`,
   issue: `[${P}MesSurgeTankIssueStates]`,
   daily: `[${P}MesLossDaily]`,
+  inflow: `[${P}MesBlendTankInflows]`,
 }
 
 // Windows tz id for America/Boise; DST-correct via AT TIME ZONE (SQL 2016+).
@@ -86,7 +87,7 @@ const CHAIN = [
   { key: 'separation', label: 'Separation', stage: 'separation', status: 'measured',
     what: 'Raw milk fed to the separator minus the cream and skim that came out.' },
   { key: 'blend', label: 'Blend tanks', stage: 'blend', status: 'measured',
-    what: 'Milk issued into a blend tank minus what its load cells show arriving.' },
+    what: 'Milk issued into a blend tank minus what its load cells show arriving. Upper bound when a UHT was pulling from the tank while it filled.' },
   { key: 'uht', label: 'UHT', stage: null, status: 'combined', combinedWith: 'surge',
     what: 'Loss inside the UHT (start-up, divert, product changeover).',
     howToMeasure: 'Measured together with the surge tanks today: we meter milk into the UHT and see it arrive in the surge tank, but nothing meters what leaves the UHT. A UHT outlet meter would split the two.' },
@@ -220,17 +221,41 @@ async function querySurge({ from, to, groupBy }, ctx) {
   return rows.map(r => ({ stage: 'surge', ...r }))
 }
 
+/**
+ * Blend fill-while-draining (SD-722): a blend batch is upper bound when a UHT
+ * pulled from the tank while it filled — stored per batch as
+ * drainedWhileFilling by services/blendDrainCheckService.js from the outlet
+ * valve history (null = not checked → treated as measured). Guarded by a
+ * one-time column check so the report still runs against a table set that
+ * has not booted this version yet.
+ */
+let _blendDrainColumn = null
+async function hasBlendDrainColumn() {
+  if (_blendDrainColumn !== null) return _blendDrainColumn
+  const [r] = await query(`SELECT COUNT(*) AS n FROM sys.columns WHERE Name = N'drainedWhileFilling' AND Object_ID = Object_ID(N'${P}MesBlendTankBatches')`)
+  _blendDrainColumn = num(r && r.n) > 0
+  return _blendDrainColumn
+}
+function blendConcurrencySql(alias, hasColumn) {
+  return {
+    concurrent: hasColumn ? `CASE WHEN ${alias}.[drainedWhileFilling] = 1 THEN 1 ELSE 0 END` : '0',
+    drainMinutes: hasColumn ? `${alias}.[drainOverlapMinutes]` : 'NULL',
+  }
+}
+
 async function queryBlend({ from, to, groupBy }, ctx) {
   const cols = ['mesItem']
+  const cc = blendConcurrencySql('bt', await hasBlendDrainColumn())
   const sql = `
     WITH b AS (
-      SELECT ${localDate('COALESCE([completedAt],[createdAt])')} AS localDt,
-             [tankId], [productName], [mesItem],
-             CAST([cumulativeIssuedLbs] AS float) AS issued,
-             CAST([cumulativeOutputLbs] AS float) AS output
-      FROM ${T.blend}
-      WHERE [status] = 'completed' AND [cumulativeIssuedLbs] >= ${ZERO_ISSUED_LBS}
-        AND COALESCE([completedAt],[createdAt]) >= :from AND COALESCE([completedAt],[createdAt]) < :to
+      SELECT ${localDate('COALESCE(bt.[completedAt],bt.[createdAt])')} AS localDt,
+             bt.[tankId], bt.[productName], bt.[mesItem],
+             CAST(bt.[cumulativeIssuedLbs] AS float) AS issued,
+             CAST(bt.[cumulativeOutputLbs] AS float) AS output,
+             1 - ${cc.concurrent} AS measurable
+      FROM ${T.blend} bt
+      WHERE bt.[status] = 'completed' AND bt.[cumulativeIssuedLbs] >= ${ZERO_ISSUED_LBS}
+        AND COALESCE(bt.[completedAt],bt.[createdAt]) >= :from AND COALESCE(bt.[completedAt],bt.[createdAt]) < :to
     ), c AS (
       SELECT *, ${max0('issued - output')} AS waste,
              ${ctx.familyCase(cols)} AS family,
@@ -238,17 +263,21 @@ async function queryBlend({ from, to, groupBy }, ctx) {
              ${ctx.revCase('mesItem')} AS revRate
       FROM b
     )
-    SELECT ${bucketStr(bucketExpr(groupBy, 'localDt'))} AS bucket, [tankId] AS equipment, NULL AS grp, family, [productName], [mesItem], 1 AS measurable,
+    SELECT ${bucketStr(bucketExpr(groupBy, 'localDt'))} AS bucket, [tankId] AS equipment, NULL AS grp, family, [productName], [mesItem], measurable,
            COUNT(*) AS batches, SUM(issued) AS lbsIn,
-           SUM(waste) AS wasteLbs, SUM(waste) AS wasteMeasuredLbs, 0 AS wasteUpperBoundLbs, 0 AS unmeasuredBatches,
-           SUM(waste * price) AS wasteUsd, SUM(waste * price) AS wasteMeasuredUsd,
+           SUM(waste) AS wasteLbs,
+           SUM(CASE WHEN measurable = 1 THEN waste ELSE 0 END) AS wasteMeasuredLbs,
+           SUM(CASE WHEN measurable = 0 THEN waste ELSE 0 END) AS wasteUpperBoundLbs,
+           SUM(CASE WHEN measurable = 0 THEN 1 ELSE 0 END) AS unmeasuredBatches,
+           SUM(waste * price) AS wasteUsd,
+           SUM(CASE WHEN measurable = 1 THEN waste * price ELSE 0 END) AS wasteMeasuredUsd,
            SUM(CASE WHEN price IS NULL THEN waste ELSE 0 END) AS unpricedLbs,
            SUM(waste * revRate) AS lostRevenueUsd,
-           SUM(waste * revRate) AS lostRevenueMeasuredUsd,
+           SUM(CASE WHEN measurable = 1 THEN waste * revRate ELSE 0 END) AS lostRevenueMeasuredUsd,
            SUM(CASE WHEN revRate IS NULL THEN waste ELSE 0 END) AS unpricedRevenueLbs,
            MAX(price) AS pricePerLb, MAX(revRate) AS revenuePerLb
     FROM c
-    GROUP BY ${bucketExpr(groupBy, 'localDt')}, [tankId], family, [productName], [mesItem]
+    GROUP BY ${bucketExpr(groupBy, 'localDt')}, [tankId], family, [productName], [mesItem], measurable
   `
   const rows = await query(sql, { from, to })
   return rows.map(r => ({ stage: 'blend', ...r }))
@@ -610,6 +639,7 @@ function buildTrend(rows) {
 // ── Top events + unaccounted (per-batch queries) ────────────────────────────
 
 async function queryTopEvents({ from, to }, ctx, { limit = 10, measuredOnly = false } = {}) {
+  const bcc = blendConcurrencySql('bt', await hasBlendDrainColumn())
   const surgeCols = ['componentItemId', 'mesItem']
   const sql = `
     SELECT TOP ${limit} * FROM (
@@ -627,14 +657,14 @@ async function queryTopEvents({ from, to }, ctx, { limit = 10, measuredOnly = fa
       WHERE [status] = 'completed' AND [cumulativeIssuedLbs] >= ${ZERO_ISSUED_LBS}
         AND COALESCE([completedAt],[createdAt]) >= :from AND COALESCE([completedAt],[createdAt]) < :to
       UNION ALL
-      SELECT 'blend', [id], COALESCE([completedAt],[createdAt]), [productName], [tankId], NULL, [nsWorkOrderNumber], NULL, NULL, NULL,
-             ${ctx.familyCase(['mesItem'])}, 1, CAST([cumulativeIssuedLbs] AS float),
-             ${max0('CAST([cumulativeIssuedLbs] AS float) - CAST([cumulativeOutputLbs] AS float)')},
-             ${ctx.priceCase(['mesItem'])},
-             ${ctx.revCase('mesItem')}
-      FROM ${T.blend}
-      WHERE [status] = 'completed' AND [cumulativeIssuedLbs] >= ${ZERO_ISSUED_LBS}
-        AND COALESCE([completedAt],[createdAt]) >= :from AND COALESCE([completedAt],[createdAt]) < :to
+      SELECT 'blend', bt.[id], COALESCE(bt.[completedAt],bt.[createdAt]), bt.[productName], bt.[tankId], NULL, bt.[nsWorkOrderNumber], NULL, ${bcc.drainMinutes}, NULL,
+             ${ctx.familyCase(['mesItem']).replace(/\[mesItem\]/g, 'bt.[mesItem]')}, 1 - ${bcc.concurrent}, CAST(bt.[cumulativeIssuedLbs] AS float),
+             ${max0('CAST(bt.[cumulativeIssuedLbs] AS float) - CAST(bt.[cumulativeOutputLbs] AS float)')},
+             ${ctx.priceCase(['mesItem']).replace(/\[mesItem\]/g, 'bt.[mesItem]')},
+             ${ctx.revCase('mesItem').replace(/\[mesItem\]/g, 'bt.[mesItem]')}
+      FROM ${T.blend} bt
+      WHERE bt.[status] = 'completed' AND bt.[cumulativeIssuedLbs] >= ${ZERO_ISSUED_LBS}
+        AND COALESCE(bt.[completedAt],bt.[createdAt]) >= :from AND COALESCE(bt.[completedAt],bt.[createdAt]) < :to
       UNION ALL
       SELECT 'separation', [id], COALESCE([batchEnd],[createdAt]), CAST([itemId] AS nvarchar(32)), [sourceSilo], NULL, CAST([nsTransactionId] AS nvarchar(64)), NULL, NULL, NULL,
              ${ctx.familyCaseIdx(['itemId'])}, 1, CAST([inputVolume] AS float),
@@ -672,7 +702,11 @@ async function queryTopEvents({ from, to }, ctx, { limit = 10, measuredOnly = fa
 
 function eventNote(r, measured) {
   if (r.kind === 'separation') return measured ? 'Measured: feed − cream − skim over the batch' : ''
-  if (r.kind === 'blend') return 'Measured: issued − load-cell arrival'
+  if (r.kind === 'blend') {
+    return measured
+      ? 'Measured: issued − load-cell arrival'
+      : `Upper bound: a UHT outlet valve was open${r.mTicks != null ? ` for ${Math.round(Number(r.mTicks))} min` : ''} while this blend tank filled, so the load cell under-counts arrival`
+  }
   if (measured) {
     return Number(r.cTicks) > 0
       ? `Measured: Filler 1 drain metered on all ${r.cTicks} concurrent tick(s)`
@@ -681,6 +715,15 @@ function eventNote(r, measured) {
   const lines = r.lines ? String(r.lines).split(',').map(s => s.trim()).filter(Boolean) : []
   const which = lines.length ? `line${lines.length > 1 ? 's' : ''} ${lines.join(', ')}` : 'an unmetered line'
   return `Upper bound: tank drained to ${which} while filling (${num(r.mTicks)} of ${num(r.cTicks)} tick(s) metered)`
+}
+
+async function countNoFlowBlendBatches({ from, to }) {
+  const [r] = await query(`
+    SELECT COUNT(*) AS n FROM ${T.blend} b
+    WHERE b.[status] = 'completed' AND b.[cumulativeIssuedLbs] < ${ZERO_ISSUED_LBS}
+      AND COALESCE(b.[completedAt], b.[createdAt]) >= :from AND COALESCE(b.[completedAt], b.[createdAt]) < :to
+      AND (SELECT COALESCE(SUM(fi.[totalLbs]), 0) FROM ${T.inflow} fi WHERE fi.[blendTankBatchId] = b.[id]) < ${ZERO_ISSUED_LBS}`, { from, to })
+  return num(r && r.n)
 }
 
 async function queryUnaccounted({ from, to }, ctx) {
@@ -699,6 +742,8 @@ async function queryUnaccounted({ from, to }, ctx) {
     FROM ${T.blend} b
     WHERE b.[status] = 'completed' AND b.[cumulativeIssuedLbs] < ${ZERO_ISSUED_LBS}
       AND COALESCE(b.[completedAt], b.[createdAt]) >= :from AND COALESCE(b.[completedAt], b.[createdAt]) < :to
+      -- A product named on the HMI that never flowed is not missing production (SD-722).
+      AND (SELECT COALESCE(SUM(fi.[totalLbs]), 0) FROM ${T.inflow} fi WHERE fi.[blendTankBatchId] = b.[id]) >= ${ZERO_ISSUED_LBS}
     ORDER BY closeAt DESC
   `
   const rows = await query(sql, { from, to })
@@ -794,14 +839,17 @@ async function getLossReport(params = {}) {
   const byProduct = buildByProduct(rows)
   const trend = buildTrend(rows)
 
-  const [topEvents, zeroIssued] = await Promise.all([
+  const [topEvents, zeroIssued, noFlowBlendBatches] = await Promise.all([
     queryTopEvents(win, ctx, { measuredOnly: ignoreUpperBounds }),
     queryUnaccounted(win, ctx),
+    countNoFlowBlendBatches(win),
   ])
   const sepAgg = rows.filter(r => r.stage === 'separation').reduce((a, r) => addInto(a, r), emptyAgg())
   const unaccounted = {
     zeroIssuedBatches: zeroIssued,
     zeroIssuedCount: zeroIssued.length,
+    // HMI-named blend batches that never received milk — not missing production, just noise.
+    noFlowBlendBatches,
     zeroIssuedEstimatedLbs: round2(zeroIssued.reduce((s, z) => s + num(z.estimatedLbs), 0)),
     separationHeld: { count: sepAgg.heldCount, lbs: round2(sepAgg.heldLbs) },
     separationNegativeBalance: { count: sepAgg.negativeBalanceCount },
@@ -809,6 +857,7 @@ async function getLossReport(params = {}) {
     // Products with no FG revenue rate (their lb are in the cost figure but not the revenue one).
     unpricedRevenueProducts: byProduct.filter(p => p.stage !== 'separation' && p.wasteLbs > 0 && p.lostRevenueUsd == null).map(p => ({ product: p.productName, stage: p.stage, lbs: p.wasteLbs })),
     unmeteredSurgeTanks: [...new Set(allRows.filter(r => r.stage === 'surge' && !r.measurable).map(r => r.equipment))],
+    blendTanksDrainedWhileFilling: [...new Set(allRows.filter(r => r.stage === 'blend' && !r.measurable).map(r => r.equipment))],
   }
 
   let prior = null

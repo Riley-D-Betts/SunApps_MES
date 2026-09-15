@@ -616,7 +616,7 @@ async function processWOStart(data, historian) {
  * cumulativeCompleted are already populated. We just need to flush any final
  * delta (one last completion) and close the batch.
  */
-async function processWOEnd(data) {
+async function processWOEnd(data, historian) {
   const { tankId, productName, detectedAt } = data
 
   if (!tankId) throw new Error('tankId is required')
@@ -683,6 +683,13 @@ async function processWOEnd(data) {
   })
   statusStore.recordClosedBlendBatch(record)
   if (record.nsWorkOrderId) clearBomCache(record.nsWorkOrderId)
+  // SD-722: did a UHT pull from this tank while it filled? Two historian reads,
+  // fire-and-forget — reporting only, never blocks or changes the NS close.
+  if (historian) {
+    require('./blendDrainCheckService').checkBatch(record, historian)
+      .then(r => { if (r.checked && r.drained) console.log(`[BlendTankMesService] ${tankId}: outlet valve open ${r.minutes} min during the fill — waste is an upper bound`) })
+      .catch(err => console.warn(`[BlendTankMesService] drain check failed for batch ${record.id}: ${err.message}`))
+  }
   await db.MesProcessingLog.create({
     eventType: 'blend_tank_wo_complete',
     sourceId: `${tankId}:${record.productName}`,
