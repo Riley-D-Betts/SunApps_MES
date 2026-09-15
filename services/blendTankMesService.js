@@ -800,7 +800,21 @@ async function backfillUnmatchedInflows(batch) {
   // each. Rows we can't route are still attached to the batch so they leave
   // the unmatched pool, but parked at pending_ns instead of being issued.
   const routed = []
+  const seenReadings = []
   for (const o of matched) {
+    // SD-722 duplicate-reading guard: two unmatched rows on one line carrying
+    // the identical totalizer reading are one PLC latch captured twice (see
+    // findDuplicatePeakReading). Park the later copy outside the batch so it
+    // leaves the pool without being issued or counted against the batch.
+    const reading = parseFloat(o.totalLbs) || 0
+    const twin = seenReadings.find(r => r.line === o.line && Math.abs(r.lbs - reading) < 0.01)
+    if (twin) {
+      console.warn(`[BlendTankMesService] backfill skip inflow ${o.id} (${o.line}, ${reading.toFixed(2)} lb): duplicate reading of inflow ${twin.id}`)
+      await o.update({ status: 'duplicate_reading', errorMessage: `backfill: duplicate totalizer reading of inflow ${twin.id} (batch ${batch.id})` })
+      continue
+    }
+    seenReadings.push({ id: o.id, line: o.line, lbs: reading })
+
     const component = resolveLineComponent({ line: o.line, productName: o.ingredientType })
     const binId = itemConfig.getBinId(o.siloName)
     const lbs = parseFloat(o.totalLbs) || 0
@@ -924,6 +938,86 @@ async function backfillUnmatchedInflows(batch) {
 }
 
 /**
+ * SD-722 duplicate-reading guard (belt-and-braces behind blendTankJob's
+ * stale-MEM check). A "full-peak" booking — an unmatched row, or a tail with no
+ * tick cursor (lastIssued = 0) — carries the line's whole batch totalizer. If
+ * the same line already has a row with that exact reading (±0.01 lb; readings
+ * are floats like 73100.03125) within the backfill lookback, in the same batch
+ * or still in the unmatched pool, it is the same PLC latch consumed twice
+ * (prod batch 174: inflow 1237 backfilled 73,100.03, then a tail at 14:57 issued
+ * 73,100.03 again). Scoped to full-peak bookings on the same batch/pool so it
+ * cannot swallow legitimate consecutive fills: tick and cursor-based tail rows
+ * store deltas, and fills that stop at the same setpoint (73,100 / 77,400 lb)
+ * still differ in the hundredths — and a fill that size always has a tick cursor.
+ * Returns the earlier row, or null.
+ */
+async function findDuplicatePeakReading({ line, totalLbs, batchId }) {
+  const Op = db.Sequelize.Op
+  const x = Number(totalLbs)
+  if (!(x >= config.MES_MIN_ISSUE_LBS)) return null
+  const since = new Date(clock.now() - config.MES_INFLOW_BACKFILL_LOOKBACK_HOURS * 60 * 60 * 1000)
+  return db.MesBlendTankInflow.findOne({
+    where: {
+      line,
+      blendTankBatchId: batchId == null ? null : batchId,
+      totalLbs: { [Op.between]: [Math.round((x - 0.01) * 1000) / 1000, Math.round((x + 0.01) * 1000) / 1000] },
+      createdAt: { [Op.gte]: since },
+      status: { [Op.ne]: 'duplicate_reading' },
+    },
+    order: [['createdAt', 'ASC']],
+  })
+}
+
+/**
+ * SD-722: the fill that just reset may already have been ticked into a batch
+ * that CLOSED before the reset (all_lines_stopped fires 5 min after flow stops,
+ * but the PLC can hold BATCHTOTALIZER for longer — prod batch 171 closed 14:36,
+ * ML1 held 71,192 lb until 14:49). Booking that reset as a full-peak unmatched
+ * row lets the tank's named-late path backfill milk the closed batch already
+ * issued. Returns { batch, lastIssued } when the most recent cursor on this line
+ * belongs to a closed batch on the same tank, sits at or below this reading, and
+ * no other flow on the line was booked since that cursor last saw it (so it is
+ * the same fill); otherwise null.
+ */
+async function findClosedBatchCursorForFill({ line, totalLbs, destination }) {
+  const Op = db.Sequelize.Op
+  const since = new Date(clock.now() - config.MES_INFLOW_BACKFILL_LOOKBACK_HOURS * 60 * 60 * 1000)
+  const ps = await db.MesPipeIssueState.findOne({
+    where: { line, lastObservedAt: { [Op.gte]: since }, lastIssuedTotalizerLbs: { [Op.gte]: config.MES_MIN_ISSUE_LBS } },
+    order: [['lastObservedAt', 'DESC']],
+  })
+  if (!ps) return null
+  const lastIssued = parseFloat(ps.lastIssuedTotalizerLbs) || 0
+  if (lastIssued > totalLbs + 1) return null
+  const batch = await db.MesBlendTankBatch.findByPk(ps.blendTankBatchId)
+  if (!batch || batch.status === 'active') return null
+  const destCanon = normalizeTankRef(destination)
+  if (destCanon && normalizeTankRef(batch.tankId) !== destCanon) return null
+  // Any reset booked on this line after the cursor last observed it (tick rows
+  // carry resetTime = their observedAt, so the batch's own ticks don't count).
+  const bookedSince = await db.MesBlendTankInflow.count({
+    where: { line, resetTime: { [Op.gt]: ps.lastObservedAt } },
+  })
+  if (bookedSince > 0) return null
+  return { batch, lastIssued }
+}
+
+async function logDuplicatePeakReading({ line, totalLbs, original, targetBatch, data }) {
+  console.warn(`[BlendTankMesService] processLineFlow ${line}: ${Number(totalLbs).toFixed(2)} lb is the same totalizer reading as inflow ${original.id} (${original.status}, batch ${original.blendTankBatchId ?? 'unmatched'}) — not booked again`)
+  statusStore.pushEvent(
+    'blendTail.duplicateReading',
+    `${line}: duplicate totalizer reading ${Number(totalLbs).toFixed(0)} lb ignored (already inflow #${original.id})`,
+    { line, totalLbs, originalInflowId: original.id, tankId: targetBatch?.tankId || null }
+  )
+  await db.MesProcessingLog.create({
+    eventType: 'blend_tank_duplicate_reading', sourceId: targetBatch?.nsWorkOrderId || null,
+    nsTransactionType: null, payload: JSON.stringify(data),
+    result: JSON.stringify({ skipped: 'duplicate_reading', originalInflowId: original.id, batchId: targetBatch?.id || null }),
+    success: true,
+  })
+}
+
+/**
  * Tail-catcher: fired by blendTankJob the moment the line totalizer resets
  * (or the line's product clears). The reset value is the totalizer's peak
  * for this batch on this line. The 5-min tick may have already issued part
@@ -984,11 +1078,31 @@ async function processLineFlow(data) {
   }
 
   if (!targetBatch) {
+    const dup = await findDuplicatePeakReading({ line, totalLbs, batchId: null })
+    if (dup) {
+      await logDuplicatePeakReading({ line, totalLbs, original: dup, targetBatch: null, data })
+      return { success: true, duplicate: true, inflowId: dup.id, status: 'duplicate_reading' }
+    }
+    const closed = await findClosedBatchCursorForFill({ line, totalLbs, destination })
+    if (closed && totalLbs - closed.lastIssued < config.MES_MIN_ISSUE_LBS) {
+      const record = await db.MesBlendTankInflow.create({
+        blendTankBatchId: closed.batch.id, line,
+        ingredientType: lineProductName || ingredientType || 'unknown',
+        totalLbs, nsItemId: null, status: 'tick_already_issued', resetTime,
+        destination: destination || null, siloName: siloName || null,
+      })
+      console.log(`[BlendTankMesService] processLineFlow ${line} reset (${totalLbs.toFixed(1)} lb): already ticked into closed batch ${closed.batch.id} (${closed.lastIssued.toFixed(1)}) — not unmatched`)
+      return { success: true, inflowId: record.id, status: 'tick_already_issued' }
+    }
+    // A closed batch ticked part of this fill: only the untracked remainder is
+    // left for a later batch on the tank to backfill.
+    const unmatchedLbs = closed ? totalLbs - closed.lastIssued : totalLbs
     const record = await db.MesBlendTankInflow.create({
       blendTankBatchId: null, line,
       ingredientType: lineProductName || ingredientType || 'unknown',
-      totalLbs, nsItemId: null, status: 'unmatched', resetTime,
+      totalLbs: unmatchedLbs, nsItemId: null, status: 'unmatched', resetTime,
       destination: destination || null, siloName: siloName || null,
+      errorMessage: closed ? `remainder after closed batch ${closed.batch.id} ticked ${closed.lastIssued.toFixed(2)} of ${Number(totalLbs).toFixed(2)} lb` : null,
     })
     console.log(`[BlendTankMesService] processLineFlow ${line} reset (${totalLbs.toFixed(1)} lb) — no active batch matched destination "${destination}"`)
     return { success: true, inflowId: record.id, status: 'unmatched' }
@@ -1000,6 +1114,14 @@ async function processLineFlow(data) {
   })
   const lastIssued = pipeState ? (parseFloat(pipeState.lastIssuedTotalizerLbs) || 0) : 0
   const delta = totalLbs - lastIssued
+
+  if (lastIssued === 0) {
+    const dup = await findDuplicatePeakReading({ line, totalLbs, batchId: targetBatch.id })
+    if (dup) {
+      await logDuplicatePeakReading({ line, totalLbs, original: dup, targetBatch, data })
+      return { success: true, duplicate: true, inflowId: dup.id, status: 'duplicate_reading' }
+    }
+  }
 
   if (delta < config.MES_MIN_ISSUE_LBS) {
     const record = await db.MesBlendTankInflow.create({
