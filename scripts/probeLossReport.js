@@ -54,6 +54,18 @@ async function main() {
   console.table(rep.trend.map(t => ({ bucket: t.bucket, usd: usd(t.wasteUsd), measUsd: usd(t.wasteUsdMeasured), lbs: lbs(t.wasteLbs), pct: t.pct, batches: t.batches })))
   console.log('UNACCOUNTED:', JSON.stringify({ ...rep.unaccounted, zeroIssuedBatches: rep.unaccounted.zeroIssuedBatches.map(z => `${z.kind}#${z.id} ${z.tank} ${z.product} ~${lbs(z.estimatedLbs)} lb`) }, null, 1))
   console.log('INSIGHTS:'); for (const i of rep.insights) console.log(` - [${i.kind}] ${i.text}`)
+  console.log('RELIABILITY:'); console.table(rep.chain.map(c => ({ step: c.key, status: c.status, level: c.reliability && c.reliability.level, since: c.reliability && c.reliability.since, waste: lbs(c.wasteLbs), usd: usd(c.wasteUsd) })))
+  console.log(`RELIABLE LOSS: ${usd(rep.headline.reliableLossUsd)} · ${lbs(rep.headline.reliableLossLbs)} lb (${(rep.headline.reliableLossSteps || []).map(s => `${s.key}:${s.level}`).join(', ')})`)
+  const F = (rep.chain.find(c => c.key === 'filler') || {}).filler
+  if (F && F.available) {
+    console.log(`FILLER 1: in ${lbs(F.inletGal)} gal · ${lbs(F.goodCartons)} good cartons = ${lbs(F.goodCartonGal)} gal · loss ${lbs(F.lossGal)} gal (${F.lossPct}%) = ${lbs(F.lossLbs)} lb · cost ${usd(F.costUsd)} · revenue ${usd(F.revenueUsd)} · join ${JSON.stringify(F.join)}`)
+    console.table(F.byDay)
+  } else console.log(`FILLER 1: unavailable — ${F ? F.reason : 'no step'}`)
+  const PB = rep.plantBalance
+  if (PB && PB.available) {
+    console.log(`PLANT BALANCE ${PB.fromDay}..${PB.toDay}: received ${lbs(PB.received.lbs)} (${PB.received.trucks} trucks, receiptsComplete=${PB.receiptsComplete}, linked receipts ${lbs(PB.received.linkedItemReceiptLbs)}) + drawdown ${lbs(PB.inventory.drawdownLbs)} − cased ${lbs(PB.cased.lbs)} − bulk shipped ${lbs(PB.bulkShipped.lbs)} = lost before casing ${lbs(PB.lostBeforeCasing.lbs)} (${PB.lostBeforeCasing.pctOfReceived}%) · destroyed after casing ${lbs(PB.destroyedAfterCasing.lbs)}`)
+    for (const c of PB.caveats) console.log(`   caveat: ${c}`)
+  } else console.log(`PLANT BALANCE: unavailable — ${PB ? PB.error : 'none'}`)
 
   // Independent cross-check, written without the service's helpers. One
   // query per figure so a failure names itself.
@@ -97,6 +109,9 @@ async function main() {
     ['separation batches', E.batches, n(x.sepN)],
     ['separation waste', Math.round(E.wasteLbs), Math.round(n(x.sepWaste))],
     ['separation held', rep.unaccounted.separationHeld.count, n(x.sepHeld)],
+    ['reliable loss ≤ total loss', rep.headline.reliableLossLbs <= rep.headline.lossLbs + 1 ? 'ok' : 'VIOLATED', 'ok'],
+    ['every chain step + stage has reliability', [...rep.chain, ...rep.stages].every(c => c.reliability && ['reliable', 'partial', 'unreliable'].includes(c.reliability.level)) ? 'ok' : 'MISSING', 'ok'],
+    ...(rep.plantBalance && rep.plantBalance.available ? [['plant balance adds up', Math.round(rep.plantBalance.received.lbs + rep.plantBalance.inventory.drawdownLbs - rep.plantBalance.cased.lbs - rep.plantBalance.bulkShipped.lbs), Math.round(rep.plantBalance.lostBeforeCasing.lbs)]] : []),
   ]
   let bad = 0
   console.log('\nCROSS-CHECK')

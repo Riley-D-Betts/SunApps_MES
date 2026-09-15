@@ -99,6 +99,11 @@ module.exports = {
   // Shipped-vs-produced is a production-date cohort whose loss keeps landing for
   // weeks after the product was made, so its history rows are re-rolled wider.
   LOSS_SHIPPING_LOOKBACK_DAYS: parseInt(process.env.LOSS_SHIPPING_LOOKBACK_DAYS || '60', 10) || 60,
+  // Separation volumes before the SD-722 stale-baseline fix are not trustworthy.
+  // Set to the plant date (YYYY-MM-DD) or ISO instant the fix went live: batches
+  // closed on/after it are marked reliable in the loss report. Unset = every
+  // window's separation figure is marked unreliable.
+  LOSS_SEPARATION_RELIABLE_FROM: process.env.LOSS_SEPARATION_RELIABLE_FROM || null,
   // Weekly executive digest — Monday 06:00 plant time, last ISO week, Teams
   // card via the Gateway. Posts ONLY when ENVIRONMENT=prod AND
   // LOSS_DIGEST_ENABLED=true AND MES_DRY_RUN is off; otherwise it logs the

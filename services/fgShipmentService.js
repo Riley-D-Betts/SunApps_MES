@@ -348,4 +348,4 @@ async function compute({ fromDay, toDay, prices }) {
 
 function clearCache() { _cache.clear() }
 
-module.exports = { getShippingStep, reasonGroup, classifyAdjustment, packSizeLbPerCase, familyFromName, placeOf, clearCache, LOSS_KINDS }
+module.exports = { getShippingStep, suiteql, nsDate, reasonGroup, classifyAdjustment, packSizeLbPerCase, familyFromName, placeOf, clearCache, LOSS_KINDS }
