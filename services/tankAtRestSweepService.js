@@ -21,6 +21,9 @@
  * running. Surge tanks are out of scope — UHT/surge production is
  * continuous and doesn't have meaningful at-rest windows.
  *
+ * Active surge batches are guarded too (SD-722): the silo / blend tank bin an
+ * open surge WO is pinned to is skipped until that batch closes.
+ *
  * Separations are guarded too: a silo that is the source or a destination of a
  * RUNNING separation batch is skipped (separator flow isn't on the milk lines,
  * and the unbuild posts at close — sweeping mid-run would double-count).
@@ -127,6 +130,50 @@ async function collectActiveSeparationSilos() {
 }
 
 /**
+ * Source bins pinned by ACTIVE surge batches (SD-722). A surge WO issues its
+ * pinned component from componentBinId every tick for as long as the batch is
+ * open — but the UHT only shows up as a live route while it is in PROCESS with
+ * a fromEntName, and the silo→TSTAT→UHT bypass has NO fromEntName at all, so
+ * between line reads the source silo looked "at rest". The sweep then drove the
+ * bin to the level reading while the surge shortfall bump drove it back up:
+ * 1,018 sweep legs (−41.9M lb) vs 1,353 shortfall bumps (+84.7M lb) in 30 days.
+ * Skip any silo / blend tank whose bin (or feeding entity) an active surge
+ * batch holds until that batch closes. Mirrors collectActiveSeparationSilos.
+ */
+async function collectActiveSurgeSourceTanks() {
+  const set = new Set()
+  const add = (name) => {
+    const n = normName(name)
+    if (!n) return
+    set.add(n)
+    const canonical = itemConfig.normalizeSiloName(n)
+    if (canonical) set.add(canonical)
+  }
+  const binToTank = {}
+  for (const [tank, bin] of Object.entries({ ...itemConfig.SILO_BIN_MAP, ...itemConfig.TANK_BIN_MAP })) {
+    binToTank[String(bin)] = tank
+  }
+  let active = []
+  try {
+    active = await db.MesSurgeTankBatch.findAll({
+      where: { status: 'active' },
+      attributes: ['id', 'componentBinId', 'feedingFromEntName'],
+      raw: true,
+    })
+  } catch (err) {
+    // Fail CLOSED would stop every sweep on a DB blip; fail open matches the
+    // separation guard. The shortfall breaker bounds any resulting churn.
+    console.warn(`[TankAtRestSweep] active-surge lookup failed: ${err.message.slice(0, 200)}`)
+    return set
+  }
+  for (const b of active) {
+    if (b.componentBinId != null && binToTank[String(b.componentBinId)]) add(binToTank[String(b.componentBinId)])
+    add(b.feedingFromEntName)
+  }
+  return set
+}
+
+/**
  * Average lbs over the 5-min window via the historian's time-series query.
  * Falls back to liveLbs when the window is empty (e.g. ProcessValues
  * caching delay) so we still have a value to compare against NS.
@@ -161,10 +208,14 @@ async function readAvgLbs(historian, fqn, windowStart, windowEnd, liveLbs) {
   return null
 }
 
-async function sweepSilo({ silo, activeRoutes, activeSeparationSilos, historian, windowStart, windowEnd }) {
+async function sweepSilo({ silo, activeRoutes, activeSeparationSilos, activeSurgeSources, historian, windowStart, windowEnd }) {
   const tankName = silo.siloId
   if (activeRoutes.has(tankName)) {
     return { tankName, skipped: 'active-route' }
+  }
+  // Source bin of an open surge WO — its issues draw from here every tick.
+  if (activeSurgeSources && activeSurgeSources.has(tankName)) {
+    return { tankName, skipped: 'active-surge-source' }
   }
   // Source/destination of a running separation — its unbuild posts at close, so
   // sweeping now would double-count against it.
@@ -219,10 +270,13 @@ async function sweepSilo({ silo, activeRoutes, activeSeparationSilos, historian,
   }
 }
 
-async function sweepBlendTank({ tank, activeRoutes, historian, windowStart, windowEnd }) {
+async function sweepBlendTank({ tank, activeRoutes, activeSurgeSources, historian, windowStart, windowEnd }) {
   const tankName = tank.tankId
   if (activeRoutes.has(tankName)) {
     return { tankName, skipped: 'active-route' }
+  }
+  if (activeSurgeSources && activeSurgeSources.has(tankName)) {
+    return { tankName, skipped: 'active-surge-source' }
   }
 
   const binId = itemConfig.TANK_BIN_MAP[tankName]
@@ -324,11 +378,13 @@ async function tick(historian) {
 
   // Silos feeding or receiving a running separation — skip until its unbuild posts.
   const activeSeparationSilos = await collectActiveSeparationSilos()
+  // Silos / blend tanks an open surge WO is issuing from (SD-722).
+  const activeSurgeSources = await collectActiveSurgeSourceTanks()
 
   const siloResults = []
   for (const silo of siloStatus) {
     try {
-      const r = await sweepSilo({ silo, activeRoutes, activeSeparationSilos, historian, windowStart, windowEnd })
+      const r = await sweepSilo({ silo, activeRoutes, activeSeparationSilos, activeSurgeSources, historian, windowStart, windowEnd })
       siloResults.push(r)
     } catch (err) {
       console.error(`[TankAtRestSweep] sweepSilo ${silo.siloId} threw: ${err.message}`)
@@ -339,7 +395,7 @@ async function tick(historian) {
   const blendResults = []
   for (const tank of blendTankStatus) {
     try {
-      const r = await sweepBlendTank({ tank, activeRoutes, historian, windowStart, windowEnd })
+      const r = await sweepBlendTank({ tank, activeRoutes, activeSurgeSources, historian, windowStart, windowEnd })
       blendResults.push(r)
     } catch (err) {
       console.error(`[TankAtRestSweep] sweepBlendTank ${tank.tankId} threw: ${err.message}`)
@@ -372,6 +428,7 @@ function getLastPollTime() {
 
 module.exports = {
   tick,
+  collectActiveSurgeSourceTanks,
   getLastPollTime,
   AT_REST_WINDOW_MS,
   MIN_DELTA_LBS,
