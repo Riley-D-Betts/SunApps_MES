@@ -102,6 +102,26 @@ function withCompletionLock(woId, fn) {
 // tick. Mirrors the surge-side TOTALIZER_RESET_DROP_GAL guard.
 const TOTALIZER_RESET_DROP_LBS = 100
 
+// ── SD-722 cream-line correction ────────────────────────────────────────────
+// Two quantities per issued line delta (see config.CREAM_LINE_LB_FACTOR):
+//   nsIssueLbs   — what goes on the NS workOrderIssue and into
+//                  cumulativeIssuedLbs. Raw line lb unless
+//                  MES_CREAM_LINE_CORRECTION=true, in which case CL* lines are
+//                  corrected. Flag off ⇒ the exact same number as before.
+//   correctedLbs — what goes into cumulativeIssuedLbsCorrected (blend waste /
+//                  loss): CL* lines × factor, milk lines as-is, in both modes.
+// Pipe cursors (MesPipeIssueState.lastIssuedTotalizerLbs) and inflow rows stay
+// in raw line-totalizer lb — the factor never touches cursor math.
+function isCreamLine(line) {
+  return typeof line === 'string' && /^CL\d/i.test(line)
+}
+function correctedLineLbs(line, lbs) {
+  return isCreamLine(line) ? lbs * config.CREAM_LINE_LB_FACTOR : lbs
+}
+function nsIssueLbs(line, lbs) {
+  return config.MES_CREAM_LINE_CORRECTION ? correctedLineLbs(line, lbs) : lbs
+}
+
 // A load-cell reading (lbs) is implausible when it reads ~empty but we just saw
 // a substantial level — the replay-overrun signature (future timestamps return
 // 0/null). Trusting it would zero arrival and collapse waste to zero, so defer.
@@ -642,7 +662,7 @@ async function processWOEnd(data, historian) {
     }) || 0
     if (legacyIssued > 0) {
       console.log(`[BlendTankMesService] Backfilling cumulativeIssuedLbs from legacy inflows for batch ${record.id}: ${legacyIssued.toFixed(1)} lb`)
-      await record.update({ cumulativeIssuedLbs: legacyIssued })
+      await record.update({ cumulativeIssuedLbs: legacyIssued, cumulativeIssuedLbsCorrected: legacyIssued })
       await record.reload()
     }
   }
@@ -668,7 +688,13 @@ async function processWOEnd(data, historian) {
 
   // Waste = issued (line-totalizer inflow) − output (measured weight arrival).
   // The gap is the leg loss into this tank, left as implicit NS shrinkage.
-  const issuedLbs = parseFloat(record.cumulativeIssuedLbs) || 0
+  // SD-722: waste uses the cream-line-corrected issued lb when the batch has it
+  // (NULL on batches opened before the column existed). NS is unaffected —
+  // completions are driven by output, and cumulativeIssuedLbs is untouched.
+  const nsIssuedLbs = parseFloat(record.cumulativeIssuedLbs) || 0
+  const issuedLbs = record.cumulativeIssuedLbsCorrected != null
+    ? (parseFloat(record.cumulativeIssuedLbsCorrected) || 0)
+    : nsIssuedLbs
   const outputLbs = parseFloat(record.cumulativeOutputLbs) || 0
   const wasteLbs = Math.max(0, issuedLbs - outputLbs)
   const wastePercent = issuedLbs >= 10
@@ -698,7 +724,8 @@ async function processWOEnd(data, historian) {
     payload: JSON.stringify(data),
     result: JSON.stringify({
       completed: true,
-      cumulativeIssuedLbs: issuedLbs,
+      cumulativeIssuedLbs: nsIssuedLbs,
+      cumulativeIssuedLbsCorrected: issuedLbs,
       cumulativeOutputLbs: outputLbs,
       cumulativeCompletedLbs: parseFloat(record.cumulativeCompletedLbs) || 0,
       wasteLbs,
@@ -722,7 +749,8 @@ async function processWOEnd(data, historian) {
     tankId,
     productName: record.productName,
     status: 'completed',
-    cumulativeIssuedLbs: issuedLbs,
+    cumulativeIssuedLbs: nsIssuedLbs,
+    cumulativeIssuedLbsCorrected: issuedLbs,
     cumulativeOutputLbs: outputLbs,
     cumulativeCompletedLbs: parseFloat(record.cumulativeCompletedLbs) || 0,
     wasteLbs,
@@ -800,7 +828,21 @@ async function backfillUnmatchedInflows(batch) {
   // each. Rows we can't route are still attached to the batch so they leave
   // the unmatched pool, but parked at pending_ns instead of being issued.
   const routed = []
+  const seenReadings = []
   for (const o of matched) {
+    // SD-722 duplicate-reading guard: two unmatched rows on one line carrying
+    // the identical totalizer reading are one PLC latch captured twice (see
+    // findDuplicatePeakReading). Park the later copy outside the batch so it
+    // leaves the pool without being issued or counted against the batch.
+    const reading = parseFloat(o.totalLbs) || 0
+    const twin = seenReadings.find(r => r.line === o.line && Math.abs(r.lbs - reading) < 0.01)
+    if (twin) {
+      console.warn(`[BlendTankMesService] backfill skip inflow ${o.id} (${o.line}, ${reading.toFixed(2)} lb): duplicate reading of inflow ${twin.id}`)
+      await o.update({ status: 'duplicate_reading', errorMessage: `backfill: duplicate totalizer reading of inflow ${twin.id} (batch ${batch.id})` })
+      continue
+    }
+    seenReadings.push({ id: o.id, line: o.line, lbs: reading })
+
     const component = resolveLineComponent({ line: o.line, productName: o.ingredientType })
     const binId = itemConfig.getBinId(o.siloName)
     const lbs = parseFloat(o.totalLbs) || 0
@@ -812,7 +854,7 @@ async function backfillUnmatchedInflows(batch) {
       await o.update({ blendTankBatchId: batch.id, status: 'pending_ns', errorMessage: `backfill: ${reason}` })
       continue
     }
-    routed.push({ inflow: o, component, binId, lbs })
+    routed.push({ inflow: o, component, binId, lbs, nsLbs: nsIssueLbs(o.line, lbs) })
   }
   if (routed.length === 0) return { attached: matched.length, issued: 0 }
 
@@ -820,12 +862,14 @@ async function backfillUnmatchedInflows(batch) {
     let total = 0
     for (const r of routed) {
       await r.inflow.update({ blendTankBatchId: batch.id, nsItemId: String(r.component.id), status: 'dry_run' })
-      total += r.lbs
+      total += r.nsLbs
     }
     // Backfilled inflows physically reached the tank before it was named, so the
     // tick never saw their weight rise. Mirror into cumulativeOutputLbs so they
     // complete 1:1 and don't surface as phantom waste (no loss to claim here).
-    await batch.increment({ cumulativeIssuedLbs: total, cumulativeOutputLbs: total })
+    // Corrected == NS qty here: the mirrored output is the same number, so a
+    // backfilled fill nets to zero waste in both columns.
+    await batch.increment({ cumulativeIssuedLbs: total, cumulativeIssuedLbsCorrected: total, cumulativeOutputLbs: total })
     console.log(`[BlendTankMesService] DRY RUN backfill ${batch.tankId}: ${total.toFixed(1)} lb across ${routed.length} inflow(s)`)
     return { attached: matched.length, issued: 0 }
   }
@@ -837,7 +881,7 @@ async function backfillUnmatchedInflows(batch) {
     const key = `${r.binId}:${r.component.id}`
     if (!groups.has(key)) groups.set(key, { binId: r.binId, component: r.component, totalLbs: 0, members: [] })
     const g = groups.get(key)
-    g.totalLbs += r.lbs
+    g.totalLbs += r.nsLbs
     g.members.push(r)
   }
 
@@ -885,7 +929,7 @@ async function backfillUnmatchedInflows(batch) {
       // Mirror into cumulativeOutputLbs: backfilled pre-batch mass already
       // reached the tank (arrival untrackable via the tick), so complete it 1:1
       // without claiming phantom waste.
-      await batch.increment({ cumulativeIssuedLbs: g.totalLbs, cumulativeOutputLbs: g.totalLbs })
+      await batch.increment({ cumulativeIssuedLbs: g.totalLbs, cumulativeIssuedLbsCorrected: g.totalLbs, cumulativeOutputLbs: g.totalLbs })
       await batch.update({ lastIssueAt: new Date(clock.now()) })
       await db.MesProcessingLog.create({
         eventType: 'blend_tank_backfill_issue', sourceId: batch.nsWorkOrderId,
@@ -921,6 +965,86 @@ async function backfillUnmatchedInflows(batch) {
   })
 
   return { attached: matched.length, issued }
+}
+
+/**
+ * SD-722 duplicate-reading guard (belt-and-braces behind blendTankJob's
+ * stale-MEM check). A "full-peak" booking — an unmatched row, or a tail with no
+ * tick cursor (lastIssued = 0) — carries the line's whole batch totalizer. If
+ * the same line already has a row with that exact reading (±0.01 lb; readings
+ * are floats like 73100.03125) within the backfill lookback, in the same batch
+ * or still in the unmatched pool, it is the same PLC latch consumed twice
+ * (prod batch 174: inflow 1237 backfilled 73,100.03, then a tail at 14:57 issued
+ * 73,100.03 again). Scoped to full-peak bookings on the same batch/pool so it
+ * cannot swallow legitimate consecutive fills: tick and cursor-based tail rows
+ * store deltas, and fills that stop at the same setpoint (73,100 / 77,400 lb)
+ * still differ in the hundredths — and a fill that size always has a tick cursor.
+ * Returns the earlier row, or null.
+ */
+async function findDuplicatePeakReading({ line, totalLbs, batchId }) {
+  const Op = db.Sequelize.Op
+  const x = Number(totalLbs)
+  if (!(x >= config.MES_MIN_ISSUE_LBS)) return null
+  const since = new Date(clock.now() - config.MES_INFLOW_BACKFILL_LOOKBACK_HOURS * 60 * 60 * 1000)
+  return db.MesBlendTankInflow.findOne({
+    where: {
+      line,
+      blendTankBatchId: batchId == null ? null : batchId,
+      totalLbs: { [Op.between]: [Math.round((x - 0.01) * 1000) / 1000, Math.round((x + 0.01) * 1000) / 1000] },
+      createdAt: { [Op.gte]: since },
+      status: { [Op.ne]: 'duplicate_reading' },
+    },
+    order: [['createdAt', 'ASC']],
+  })
+}
+
+/**
+ * SD-722: the fill that just reset may already have been ticked into a batch
+ * that CLOSED before the reset (all_lines_stopped fires 5 min after flow stops,
+ * but the PLC can hold BATCHTOTALIZER for longer — prod batch 171 closed 14:36,
+ * ML1 held 71,192 lb until 14:49). Booking that reset as a full-peak unmatched
+ * row lets the tank's named-late path backfill milk the closed batch already
+ * issued. Returns { batch, lastIssued } when the most recent cursor on this line
+ * belongs to a closed batch on the same tank, sits at or below this reading, and
+ * no other flow on the line was booked since that cursor last saw it (so it is
+ * the same fill); otherwise null.
+ */
+async function findClosedBatchCursorForFill({ line, totalLbs, destination }) {
+  const Op = db.Sequelize.Op
+  const since = new Date(clock.now() - config.MES_INFLOW_BACKFILL_LOOKBACK_HOURS * 60 * 60 * 1000)
+  const ps = await db.MesPipeIssueState.findOne({
+    where: { line, lastObservedAt: { [Op.gte]: since }, lastIssuedTotalizerLbs: { [Op.gte]: config.MES_MIN_ISSUE_LBS } },
+    order: [['lastObservedAt', 'DESC']],
+  })
+  if (!ps) return null
+  const lastIssued = parseFloat(ps.lastIssuedTotalizerLbs) || 0
+  if (lastIssued > totalLbs + 1) return null
+  const batch = await db.MesBlendTankBatch.findByPk(ps.blendTankBatchId)
+  if (!batch || batch.status === 'active') return null
+  const destCanon = normalizeTankRef(destination)
+  if (destCanon && normalizeTankRef(batch.tankId) !== destCanon) return null
+  // Any reset booked on this line after the cursor last observed it (tick rows
+  // carry resetTime = their observedAt, so the batch's own ticks don't count).
+  const bookedSince = await db.MesBlendTankInflow.count({
+    where: { line, resetTime: { [Op.gt]: ps.lastObservedAt } },
+  })
+  if (bookedSince > 0) return null
+  return { batch, lastIssued }
+}
+
+async function logDuplicatePeakReading({ line, totalLbs, original, targetBatch, data }) {
+  console.warn(`[BlendTankMesService] processLineFlow ${line}: ${Number(totalLbs).toFixed(2)} lb is the same totalizer reading as inflow ${original.id} (${original.status}, batch ${original.blendTankBatchId ?? 'unmatched'}) — not booked again`)
+  statusStore.pushEvent(
+    'blendTail.duplicateReading',
+    `${line}: duplicate totalizer reading ${Number(totalLbs).toFixed(0)} lb ignored (already inflow #${original.id})`,
+    { line, totalLbs, originalInflowId: original.id, tankId: targetBatch?.tankId || null }
+  )
+  await db.MesProcessingLog.create({
+    eventType: 'blend_tank_duplicate_reading', sourceId: targetBatch?.nsWorkOrderId || null,
+    nsTransactionType: null, payload: JSON.stringify(data),
+    result: JSON.stringify({ skipped: 'duplicate_reading', originalInflowId: original.id, batchId: targetBatch?.id || null }),
+    success: true,
+  })
 }
 
 /**
@@ -984,11 +1108,31 @@ async function processLineFlow(data) {
   }
 
   if (!targetBatch) {
+    const dup = await findDuplicatePeakReading({ line, totalLbs, batchId: null })
+    if (dup) {
+      await logDuplicatePeakReading({ line, totalLbs, original: dup, targetBatch: null, data })
+      return { success: true, duplicate: true, inflowId: dup.id, status: 'duplicate_reading' }
+    }
+    const closed = await findClosedBatchCursorForFill({ line, totalLbs, destination })
+    if (closed && totalLbs - closed.lastIssued < config.MES_MIN_ISSUE_LBS) {
+      const record = await db.MesBlendTankInflow.create({
+        blendTankBatchId: closed.batch.id, line,
+        ingredientType: lineProductName || ingredientType || 'unknown',
+        totalLbs, nsItemId: null, status: 'tick_already_issued', resetTime,
+        destination: destination || null, siloName: siloName || null,
+      })
+      console.log(`[BlendTankMesService] processLineFlow ${line} reset (${totalLbs.toFixed(1)} lb): already ticked into closed batch ${closed.batch.id} (${closed.lastIssued.toFixed(1)}) — not unmatched`)
+      return { success: true, inflowId: record.id, status: 'tick_already_issued' }
+    }
+    // A closed batch ticked part of this fill: only the untracked remainder is
+    // left for a later batch on the tank to backfill.
+    const unmatchedLbs = closed ? totalLbs - closed.lastIssued : totalLbs
     const record = await db.MesBlendTankInflow.create({
       blendTankBatchId: null, line,
       ingredientType: lineProductName || ingredientType || 'unknown',
-      totalLbs, nsItemId: null, status: 'unmatched', resetTime,
+      totalLbs: unmatchedLbs, nsItemId: null, status: 'unmatched', resetTime,
       destination: destination || null, siloName: siloName || null,
+      errorMessage: closed ? `remainder after closed batch ${closed.batch.id} ticked ${closed.lastIssued.toFixed(2)} of ${Number(totalLbs).toFixed(2)} lb` : null,
     })
     console.log(`[BlendTankMesService] processLineFlow ${line} reset (${totalLbs.toFixed(1)} lb) — no active batch matched destination "${destination}"`)
     return { success: true, inflowId: record.id, status: 'unmatched' }
@@ -1000,6 +1144,14 @@ async function processLineFlow(data) {
   })
   const lastIssued = pipeState ? (parseFloat(pipeState.lastIssuedTotalizerLbs) || 0) : 0
   const delta = totalLbs - lastIssued
+
+  if (lastIssued === 0) {
+    const dup = await findDuplicatePeakReading({ line, totalLbs, batchId: targetBatch.id })
+    if (dup) {
+      await logDuplicatePeakReading({ line, totalLbs, original: dup, targetBatch, data })
+      return { success: true, duplicate: true, inflowId: dup.id, status: 'duplicate_reading' }
+    }
+  }
 
   if (delta < config.MES_MIN_ISSUE_LBS) {
     const record = await db.MesBlendTankInflow.create({
@@ -1044,10 +1196,11 @@ async function processLineFlow(data) {
     return { success: true, inflowId: inflowRecord.id, status: 'pending_ns' }
   }
 
+  const nsQty = nsIssueLbs(line, delta)
   const bomLines = await fetchWoBomLines(targetBatch.nsWorkOrderId)
   let body, allocations, tracking, woHasLotLines
   try {
-    const built = await buildWoIssueBody(targetBatch.nsWorkOrderId, component.id, delta, binId, bomLines)
+    const built = await buildWoIssueBody(targetBatch.nsWorkOrderId, component.id, nsQty, binId, bomLines)
     body = built.body
     allocations = built.allocations
     tracking = built.tracking
@@ -1085,7 +1238,7 @@ async function processLineFlow(data) {
     console.log(`[BlendTankMesService] tail-catcher ${line} → WO ${targetBatch.nsWorkOrderId} (${targetBatch.tankId}): ${delta.toFixed(1)} lb (peak ${totalLbs.toFixed(1)}, tick had issued ${lastIssued.toFixed(1)})${allocSummary}`)
     const issued = await postWoIssueWithWrapperRetry({
       nsWorkOrderId: targetBatch.nsWorkOrderId, targetItemId: component.id,
-      quantity: delta, binId, bomLines, body, woHasLotLines, tracking,
+      quantity: nsQty, binId, bomLines, body, woHasLotLines, tracking,
     })
     body = issued.body
     const nsResult = issued.nsResult
@@ -1102,13 +1255,13 @@ async function processLineFlow(data) {
         lastTotalizerLbs: totalLbs, lastObservedAt: new Date(clock.now()),
       })
     }
-    await targetBatch.increment({ cumulativeIssuedLbs: delta })
+    await targetBatch.increment({ cumulativeIssuedLbs: nsQty, cumulativeIssuedLbsCorrected: correctedLineLbs(line, delta) })
     await targetBatch.update({ lastIssueAt: new Date(clock.now()) })
 
     await db.MesProcessingLog.create({
       eventType: 'blend_tank_tail_issue', sourceId: targetBatch.nsWorkOrderId,
       nsTransactionType: 'workOrderIssue', nsTransactionId: nsIssueId,
-      payload: JSON.stringify({ ...data, delta, lastIssued }),
+      payload: JSON.stringify({ ...data, delta, lastIssued, ...(nsQty !== delta ? { nsQty } : {}) }),
       result: JSON.stringify({ nsIssueId }),
       success: true,
     })
@@ -1613,7 +1766,7 @@ async function tickIssuesForBatch(batch, lineReadings) {
   if (config.MES_DRY_RUN) {
     for (const c of candidates) {
       await c.pipeState.update({ lastIssuedTotalizerLbs: c.newBaseline, lastIssueAt: observedAt })
-      await batch.increment({ cumulativeIssuedLbs: c.delta })
+      await batch.increment({ cumulativeIssuedLbs: nsIssueLbs(c.line, c.delta), cumulativeIssuedLbsCorrected: correctedLineLbs(c.line, c.delta) })
       await batch.update({ lastIssueAt: observedAt })
       console.log(`[BlendTankMesService] DRY RUN tick issue ${c.line} → ${batch.tankId}: ${c.delta.toFixed(1)} lb${c.kind === 'catchup' ? ' (catch-up)' : ''}`)
     }
@@ -1639,7 +1792,8 @@ async function tickIssuesForBatch(batch, lineReadings) {
       groups.set(key, { binId: c.binId, component: c.component, totalDelta: 0, members: [] })
     }
     const g = groups.get(key)
-    g.totalDelta += c.delta
+    // SD-722: the NS quantity (== c.delta unless MES_CREAM_LINE_CORRECTION on a CL line)
+    g.totalDelta += nsIssueLbs(c.line, c.delta)
     g.members.push(c)
   }
 
@@ -1705,7 +1859,7 @@ async function tickIssuesForBatch(batch, lineReadings) {
 
       for (const m of g.members) {
         await m.pipeState.update({ lastIssuedTotalizerLbs: m.newBaseline, lastIssueAt: observedAt })
-        await batch.increment({ cumulativeIssuedLbs: m.delta })
+        await batch.increment({ cumulativeIssuedLbs: nsIssueLbs(m.line, m.delta), cumulativeIssuedLbsCorrected: correctedLineLbs(m.line, m.delta) })
         await db.MesBlendTankInflow.create({
           blendTankBatchId: batch.id,
           line: m.line,

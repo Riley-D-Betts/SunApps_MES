@@ -205,6 +205,8 @@ All config funnels through `config/index.js` (dotenv). Everything below is what 
 | `LOSS_REPORT_URL` | `''` | Link placed on the digest card (the SunApps `/mes-loss-report` page) |
 | `PLANT_TZ` | `America/Boise` | Timezone for the two reporting crons and for plant-day bucketing in the loss report |
 | `MES_INFLOW_BACKFILL_LOOKBACK_HOURS` | `18` | How far back a freshly-named blend batch sweeps for `unmatched` inflows |
+| `CREAM_LINE_LB_FACTOR` | `1` | SD-722: CL1/CL2 line lb × this = `cumulativeIssuedLbsCorrected` (blend waste/loss). 1.00 is what the historian supports — see §10. Values outside 0.5–1.5 fall back to 1 |
+| `MES_CREAM_LINE_CORRECTION` | `false` (strict `=== 'true'`) | When true, CL* workOrderIssue quantities (and backfill's mirrored output) use the corrected lb too. Off = NS issue quantities identical to pre-SD-722 |
 | `MES_PARSER_STRICT_MODE` | `false` | Disables fuzzy product parsing (blend + surge); unmatched product strings go to `pending_ns`. Turn on once AVEVA's standardized/constrained inputs are fully rolled out |
 | `BLEND_TANK_OVERRIDES` | `{}` | JSON `{tankId: rawNsItemId}` — bypasses the blend product parser (sandbox scaffolding) |
 | `SURGE_TANK_OVERRIDES` | `{}` | JSON `{tankId: fgNsItemId}` — same for surge |
@@ -281,6 +283,11 @@ On start, **`blendTankMesService.processWOStart()`**: duplicate guard + 5-min co
 
 **Line tail-catcher:** each milk line's totalizer is watched; on a reset (>100 lb → <100 lb) or source clear, `processLineFlow()` captures the final `peak − lastIssued` delta the 5-min tick hadn't seen. The MEM* latch tags exist because `REQUESTEDBY` clears to "None" the instant flow ends.
 
+**Stale MEM latches (SD-722).** The PLC re-latches `MEMBATCHTOTALIZER` / `MEMREQUESTEDBY` / `MEMSILO*` **only when a fill completes**. An aborted or cancelled fill resets `BATCHTOTALIZER` and leaves MEM* describing an older fill, often hours old and bound for a different tank. The tail-catcher used to trust MEM* unconditionally, so every aborted reset re-booked the old total to the old destination. Prod batch 174 (8/8, WO1920) issued ML1's 10:01 latch of 73,100 lb twice, at 14:49 through unmatched→backfill and at 14:57 as a tail. The real flows were a 71,192 lb BT1A fill already ticked to batch 171 and a 708 lb stub. Batch 238 (8/27, WO2081) was a whole WO built from a stale 77,400 lb latch. Across 6/24–9/15 there were 20 such NS-posted issues on 18 batches. Backfills mirror output, so most of them showed zero waste. Three guards now apply:
+- `blendTankJob` uses MEM* only when the latch changed since the previous poll and sits within [live peak − 50 lb, live peak + 500 lb + 3,000 lb/min × time since that reading]. Otherwise it books the live peak and the live product, silo and destination (`isMemLatchFresh`).
+- `processLineFlow` refuses a full-peak booking (an unmatched row, or a tail with no tick cursor) whose exact reading (±0.01 lb) already exists on that line in the same batch or the unmatched pool within the lookback. It logs `blend_tank_duplicate_reading` instead. Backfill parks within-sweep twins as `duplicate_reading`. Fills that stop at the same setpoint still differ in the hundredths, and cursor-based rows store deltas, so real consecutive fills are not swallowed.
+- A reset whose fill was already ticked into a batch that **closed** before the PLC reset the totalizer is booked `tick_already_issued` on that batch, or only its remainder goes unmatched. It never goes to the named-late backfill as a full peak.
+
 ### 9.3 The 5-minute tick — issues & completions
 
 `jobs/issueCompletionJob.js` is the accounting heartbeat. NetSuite ends up with **hundreds of small incremental WO issues/completions that sum to the batch total** — this matches SunTado's existing NS practice and keeps NS in sync within minutes of physical flow.
@@ -323,6 +330,7 @@ The core idea (SD-597 → SD-636): **WO completion is driven by measured arrival
 
 - Blend: arrival = destination tank load-cell rise (rise floor 20 lb; residual floor 200 lb at close).
 - Surge: arrival = level rise, plus metered Filler 1 drain (TR11_FT1140, SD-708) when `MES_METERED_DRAIN` is on; the always-on shadow column `outputWithDrainLbs` records what output would be with the credit applied (the dev-soak comparator). Unmetered concurrent drain (ST83/84's Sel3/4 legs; a Filler 2 draw on the shared Sel1 latch) → `concurrentFillDrain=true` and waste is an upper bound; when every concurrent tick was metered on line 1 only, the close note reports waste as measured. `meteredDrainLbs` (raw pre-floor credit), `meteredDrainTickCount`, `concurrentTickCount`, `drainFillerLines` are recorded per batch.
+- Blend issued for waste (SD-722): `cumulativeIssuedLbsCorrected` = CL* line lb × `CREAM_LINE_LB_FACTOR` + milk-line lb, with backfilled inflows at their NS quantity because they are mirrored into output. `cumulativeIssuedLbs` stays what NS was issued. Batch close and the loss report use the corrected column and COALESCE to `cumulativeIssuedLbs` on older rows. The factor defaults to **1.00** because the historian does not show a cream density error. The CL PLC density tag is a fixed 8.40 lb/gal. Over 17 clean single-CL-line windows on prod 7/05–9/15 (only that CL line moving, UHT outlet valves closed, tank already > 5,000 lb), tank load-cell rise / CL lb had median 0.997, p25 0.994, p75 1.002 and lb-weighted 1.003 over 346k lb. The ~0.96 seen on fills 259/281 is the **low-level tank heel**: below ~5,000 lb every line start reads ~0.67 of line lb (11 cream windows), and milk lines lose 3–7k lb filling from empty. That is a load-cell / hold-up effect common to all lines, not cream density. Re-derive before changing the factor, and flip `MES_CREAM_LINE_CORRECTION` only if NS should follow.
 - Separation: waste = feed − cream − skim over the batch window (baselined totalizers). Waste % > 5 (`WASTE_ALERT_THRESHOLD`) logs an alert event (console + statusStore only — Teams is off).
 - `wastePercent` is only computed when input/issued ≥ 10 lb and is clamped to ±999999.99 (sensor-glitch overflow protection — this literally overflowed a DECIMAL(5,2) once).
 
@@ -446,6 +454,8 @@ Things that will bite you, in rough order of likelihood:
 13. **A2 separation:** the SCADA HMI offers A2 in only 4 fat levels (indices 22–25). BOMs 426/427 exist in NS but are unreachable until SCADA gains A2 3.5 %/4 % indices.
 14. **PLMS/filler OEE data (SD-649)** is on a segmented network — the Tetra Pak PLMS web UI at `10.5.1.13` is unreachable from the 10.4.x MES network except via the "Jumo Connected" jump host. `fillerHoursService` currently has real machine-level tags for **Filler 1 only**; fillers 2–6 return all-unknown.
 15. **The BOM-editor RESTlet path is abandoned** (SD-636): NetSuite's blend addon blocks programmatic BOM edits. The `/api/mes/bom-admin` endpoints that remain go through the record API and honor `MES_DRY_RUN`; `POST /bulk/surge-twins` is dry-run unless `{commit:true}`.
+16. **MEM* line latches go stale on aborted fills** (SD-722, §9.2). Never read `MEMBATCHTOTALIZER`/`MEMREQUESTEDBY` without checking the latch changed with this reset and agrees with the live peak. Historical phantom issues from this (20 on 18 batches, 6/24–9/15) are still in NS and have not been remediated.
+17. **Blend load cells under-read below ~5,000 lb** (≈0.6–0.7 of line lb). Every blend batch that starts from an empty tank carries a few thousand lb of apparent waste from this heel. Don't read it as line-meter or density error (§10).
 
 ## 17. HTTP API reference
 

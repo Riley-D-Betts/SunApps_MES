@@ -43,6 +43,13 @@ db.ensureRuntimeSchema = async function () {
       ALTER TABLE ${P}MesBlendTankBatches ADD drainOverlapMinutes DECIMAL(8,1) NULL;
   `)
 
+  // ${P}MesBlendTankBatches (SD-722): cream-line corrected issued lb for waste/loss.
+  // Nullable, no default — existing rows stay NULL (readers fall back to cumulativeIssuedLbs).
+  await sequelize.query(`
+    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE Name = N'cumulativeIssuedLbsCorrected' AND Object_ID = Object_ID(N'${P}MesBlendTankBatches'))
+      ALTER TABLE ${P}MesBlendTankBatches ADD cumulativeIssuedLbsCorrected DECIMAL(14,2) NULL;
+  `)
+
   // ${P}MesLossDaily (SD-729): lostRevenueMeasuredUsd was added the same day
   // the table was born, but dev's table had already been created by sync().
   // Guarded on the table existing so a fresh DB (sync creates it complete)

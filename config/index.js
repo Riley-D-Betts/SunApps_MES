@@ -134,6 +134,21 @@ module.exports = {
   // open we attach + issue + complete any within this window. Bounded so a new
   // batch doesn't vacuum up day-old orphans from an unrelated run.
   MES_INFLOW_BACKFILL_LOOKBACK_HOURS: parseFloat(process.env.MES_INFLOW_BACKFILL_LOOKBACK_HOURS || '18'),
+  // SD-722 cream-line mass correction. CL1/CL2 BATCHTOTALIZER lb is multiplied
+  // by CREAM_LINE_LB_FACTOR to get the MES "corrected" issued lb
+  // (MesBlendTankBatches.cumulativeIssuedLbsCorrected — what blend waste/loss
+  // uses). Default 1.00 is the factor the evidence supports: prod 7/05–9/15,
+  // 17 clean single-CL-line windows (only that CL line moving, UHT outlet
+  // valves closed, tank already > 5,000 lb) give tank load-cell rise / CL lb
+  // median 0.997, lb-weighted 1.003 over 346k lb. The ~0.96 seen on fills
+  // 259/281 comes from the tank's low-level heel (tank < 5,000 lb reads ~0.67
+  // of line lb on EVERY line, milk included), not cream density — the CL PLC
+  // density tag is a fixed 8.40 lb/gal. See README §10.
+  CREAM_LINE_LB_FACTOR: (() => { const f = parseFloat(process.env.CREAM_LINE_LB_FACTOR || '1'); return f > 0.5 && f <= 1.5 ? f : 1 })(),
+  // When true, the NetSuite workOrderIssue quantity for CL* lines is the
+  // corrected lb too (and backfill's mirrored output follows it). Default false
+  // → NS issue quantities are byte-identical to pre-SD-722.
+  MES_CREAM_LINE_CORRECTION: process.env.MES_CREAM_LINE_CORRECTION === 'true',
   // Test-input override for blend tank product selection. JSON object mapping
   // tankId → raw NS item ID (e.g. '{"BlendTank1A":8344,"BlendTank2A":8347}').
   // When set for a tank, processWOStart uses that item ID directly and skips
