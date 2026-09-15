@@ -118,8 +118,8 @@ const CHAIN = [
 const RELIABILITY = {
   separation: { level: 'unreliable', sinceConfig: 'LOSS_SEPARATION_RELIABLE_FROM',
     reason: 'Volumes were computed from stale totalizer baselines before the SD-722 fix; batches closed before {since} are not trustworthy.' },
-  blend: { level: 'partial',
-    reason: 'Partly real: issued minus load-cell arrival. Tanks a UHT pulled from while filling are upper bounds; fills from an empty tank carry a 1.5–4.5k lb load-cell start gap that is probably measurement, not milk; phantom issues from stale line latches (fixed in SD-722) inflated batches before the fix.' },
+  blend: { level: 'unreliable',
+    reason: 'Not trustworthy yet: most fills report 0 and the rest cluster around the tank start-of-fill gap (the load cell reads 0 for the first 1.5–4.5k lb of each fill from empty, ≈2–6 % of a batch). The tank reading is gallons × 8.3 while milk is ≈8.6 lb/gal, and plant engineering reports the tank instruments are set to 8.3 — until a physical check (known water into an empty tank) confirms the tank reading, treat blend loss as measurement, not milk.' },
   uht: { level: 'unreliable',
     reason: 'Inside the surge-tank figure, which surge-tank level readings under-count; matched runs show finished goods at 95 % or more of milk into the UHT.' },
   surge: { level: 'unreliable',
