@@ -102,26 +102,6 @@ function withCompletionLock(woId, fn) {
 // tick. Mirrors the surge-side TOTALIZER_RESET_DROP_GAL guard.
 const TOTALIZER_RESET_DROP_LBS = 100
 
-// ── SD-722 cream-line correction ────────────────────────────────────────────
-// Two quantities per issued line delta (see config.CREAM_LINE_LB_FACTOR):
-//   nsIssueLbs   — what goes on the NS workOrderIssue and into
-//                  cumulativeIssuedLbs. Raw line lb unless
-//                  MES_CREAM_LINE_CORRECTION=true, in which case CL* lines are
-//                  corrected. Flag off ⇒ the exact same number as before.
-//   correctedLbs — what goes into cumulativeIssuedLbsCorrected (blend waste /
-//                  loss): CL* lines × factor, milk lines as-is, in both modes.
-// Pipe cursors (MesPipeIssueState.lastIssuedTotalizerLbs) and inflow rows stay
-// in raw line-totalizer lb — the factor never touches cursor math.
-function isCreamLine(line) {
-  return typeof line === 'string' && /^CL\d/i.test(line)
-}
-function correctedLineLbs(line, lbs) {
-  return isCreamLine(line) ? lbs * config.CREAM_LINE_LB_FACTOR : lbs
-}
-function nsIssueLbs(line, lbs) {
-  return config.MES_CREAM_LINE_CORRECTION ? correctedLineLbs(line, lbs) : lbs
-}
-
 // A load-cell reading (lbs) is implausible when it reads ~empty but we just saw
 // a substantial level — the replay-overrun signature (future timestamps return
 // 0/null). Trusting it would zero arrival and collapse waste to zero, so defer.
@@ -662,7 +642,7 @@ async function processWOEnd(data, historian) {
     }) || 0
     if (legacyIssued > 0) {
       console.log(`[BlendTankMesService] Backfilling cumulativeIssuedLbs from legacy inflows for batch ${record.id}: ${legacyIssued.toFixed(1)} lb`)
-      await record.update({ cumulativeIssuedLbs: legacyIssued, cumulativeIssuedLbsCorrected: legacyIssued })
+      await record.update({ cumulativeIssuedLbs: legacyIssued })
       await record.reload()
     }
   }
@@ -688,13 +668,7 @@ async function processWOEnd(data, historian) {
 
   // Waste = issued (line-totalizer inflow) − output (measured weight arrival).
   // The gap is the leg loss into this tank, left as implicit NS shrinkage.
-  // SD-722: waste uses the cream-line-corrected issued lb when the batch has it
-  // (NULL on batches opened before the column existed). NS is unaffected —
-  // completions are driven by output, and cumulativeIssuedLbs is untouched.
-  const nsIssuedLbs = parseFloat(record.cumulativeIssuedLbs) || 0
-  const issuedLbs = record.cumulativeIssuedLbsCorrected != null
-    ? (parseFloat(record.cumulativeIssuedLbsCorrected) || 0)
-    : nsIssuedLbs
+  const issuedLbs = parseFloat(record.cumulativeIssuedLbs) || 0
   const outputLbs = parseFloat(record.cumulativeOutputLbs) || 0
   const wasteLbs = Math.max(0, issuedLbs - outputLbs)
   const wastePercent = issuedLbs >= 10
@@ -724,8 +698,7 @@ async function processWOEnd(data, historian) {
     payload: JSON.stringify(data),
     result: JSON.stringify({
       completed: true,
-      cumulativeIssuedLbs: nsIssuedLbs,
-      cumulativeIssuedLbsCorrected: issuedLbs,
+      cumulativeIssuedLbs: issuedLbs,
       cumulativeOutputLbs: outputLbs,
       cumulativeCompletedLbs: parseFloat(record.cumulativeCompletedLbs) || 0,
       wasteLbs,
@@ -749,8 +722,7 @@ async function processWOEnd(data, historian) {
     tankId,
     productName: record.productName,
     status: 'completed',
-    cumulativeIssuedLbs: nsIssuedLbs,
-    cumulativeIssuedLbsCorrected: issuedLbs,
+    cumulativeIssuedLbs: issuedLbs,
     cumulativeOutputLbs: outputLbs,
     cumulativeCompletedLbs: parseFloat(record.cumulativeCompletedLbs) || 0,
     wasteLbs,
@@ -854,7 +826,7 @@ async function backfillUnmatchedInflows(batch) {
       await o.update({ blendTankBatchId: batch.id, status: 'pending_ns', errorMessage: `backfill: ${reason}` })
       continue
     }
-    routed.push({ inflow: o, component, binId, lbs, nsLbs: nsIssueLbs(o.line, lbs) })
+    routed.push({ inflow: o, component, binId, lbs })
   }
   if (routed.length === 0) return { attached: matched.length, issued: 0 }
 
@@ -862,14 +834,12 @@ async function backfillUnmatchedInflows(batch) {
     let total = 0
     for (const r of routed) {
       await r.inflow.update({ blendTankBatchId: batch.id, nsItemId: String(r.component.id), status: 'dry_run' })
-      total += r.nsLbs
+      total += r.lbs
     }
     // Backfilled inflows physically reached the tank before it was named, so the
     // tick never saw their weight rise. Mirror into cumulativeOutputLbs so they
     // complete 1:1 and don't surface as phantom waste (no loss to claim here).
-    // Corrected == NS qty here: the mirrored output is the same number, so a
-    // backfilled fill nets to zero waste in both columns.
-    await batch.increment({ cumulativeIssuedLbs: total, cumulativeIssuedLbsCorrected: total, cumulativeOutputLbs: total })
+    await batch.increment({ cumulativeIssuedLbs: total, cumulativeOutputLbs: total })
     console.log(`[BlendTankMesService] DRY RUN backfill ${batch.tankId}: ${total.toFixed(1)} lb across ${routed.length} inflow(s)`)
     return { attached: matched.length, issued: 0 }
   }
@@ -881,7 +851,7 @@ async function backfillUnmatchedInflows(batch) {
     const key = `${r.binId}:${r.component.id}`
     if (!groups.has(key)) groups.set(key, { binId: r.binId, component: r.component, totalLbs: 0, members: [] })
     const g = groups.get(key)
-    g.totalLbs += r.nsLbs
+    g.totalLbs += r.lbs
     g.members.push(r)
   }
 
@@ -929,7 +899,7 @@ async function backfillUnmatchedInflows(batch) {
       // Mirror into cumulativeOutputLbs: backfilled pre-batch mass already
       // reached the tank (arrival untrackable via the tick), so complete it 1:1
       // without claiming phantom waste.
-      await batch.increment({ cumulativeIssuedLbs: g.totalLbs, cumulativeIssuedLbsCorrected: g.totalLbs, cumulativeOutputLbs: g.totalLbs })
+      await batch.increment({ cumulativeIssuedLbs: g.totalLbs, cumulativeOutputLbs: g.totalLbs })
       await batch.update({ lastIssueAt: new Date(clock.now()) })
       await db.MesProcessingLog.create({
         eventType: 'blend_tank_backfill_issue', sourceId: batch.nsWorkOrderId,
@@ -1196,11 +1166,10 @@ async function processLineFlow(data) {
     return { success: true, inflowId: inflowRecord.id, status: 'pending_ns' }
   }
 
-  const nsQty = nsIssueLbs(line, delta)
   const bomLines = await fetchWoBomLines(targetBatch.nsWorkOrderId)
   let body, allocations, tracking, woHasLotLines
   try {
-    const built = await buildWoIssueBody(targetBatch.nsWorkOrderId, component.id, nsQty, binId, bomLines)
+    const built = await buildWoIssueBody(targetBatch.nsWorkOrderId, component.id, delta, binId, bomLines)
     body = built.body
     allocations = built.allocations
     tracking = built.tracking
@@ -1238,7 +1207,7 @@ async function processLineFlow(data) {
     console.log(`[BlendTankMesService] tail-catcher ${line} → WO ${targetBatch.nsWorkOrderId} (${targetBatch.tankId}): ${delta.toFixed(1)} lb (peak ${totalLbs.toFixed(1)}, tick had issued ${lastIssued.toFixed(1)})${allocSummary}`)
     const issued = await postWoIssueWithWrapperRetry({
       nsWorkOrderId: targetBatch.nsWorkOrderId, targetItemId: component.id,
-      quantity: nsQty, binId, bomLines, body, woHasLotLines, tracking,
+      quantity: delta, binId, bomLines, body, woHasLotLines, tracking,
     })
     body = issued.body
     const nsResult = issued.nsResult
@@ -1255,13 +1224,13 @@ async function processLineFlow(data) {
         lastTotalizerLbs: totalLbs, lastObservedAt: new Date(clock.now()),
       })
     }
-    await targetBatch.increment({ cumulativeIssuedLbs: nsQty, cumulativeIssuedLbsCorrected: correctedLineLbs(line, delta) })
+    await targetBatch.increment({ cumulativeIssuedLbs: delta })
     await targetBatch.update({ lastIssueAt: new Date(clock.now()) })
 
     await db.MesProcessingLog.create({
       eventType: 'blend_tank_tail_issue', sourceId: targetBatch.nsWorkOrderId,
       nsTransactionType: 'workOrderIssue', nsTransactionId: nsIssueId,
-      payload: JSON.stringify({ ...data, delta, lastIssued, ...(nsQty !== delta ? { nsQty } : {}) }),
+      payload: JSON.stringify({ ...data, delta, lastIssued }),
       result: JSON.stringify({ nsIssueId }),
       success: true,
     })
@@ -1766,7 +1735,7 @@ async function tickIssuesForBatch(batch, lineReadings) {
   if (config.MES_DRY_RUN) {
     for (const c of candidates) {
       await c.pipeState.update({ lastIssuedTotalizerLbs: c.newBaseline, lastIssueAt: observedAt })
-      await batch.increment({ cumulativeIssuedLbs: nsIssueLbs(c.line, c.delta), cumulativeIssuedLbsCorrected: correctedLineLbs(c.line, c.delta) })
+      await batch.increment({ cumulativeIssuedLbs: c.delta })
       await batch.update({ lastIssueAt: observedAt })
       console.log(`[BlendTankMesService] DRY RUN tick issue ${c.line} → ${batch.tankId}: ${c.delta.toFixed(1)} lb${c.kind === 'catchup' ? ' (catch-up)' : ''}`)
     }
@@ -1792,8 +1761,7 @@ async function tickIssuesForBatch(batch, lineReadings) {
       groups.set(key, { binId: c.binId, component: c.component, totalDelta: 0, members: [] })
     }
     const g = groups.get(key)
-    // SD-722: the NS quantity (== c.delta unless MES_CREAM_LINE_CORRECTION on a CL line)
-    g.totalDelta += nsIssueLbs(c.line, c.delta)
+    g.totalDelta += c.delta
     g.members.push(c)
   }
 
@@ -1859,7 +1827,7 @@ async function tickIssuesForBatch(batch, lineReadings) {
 
       for (const m of g.members) {
         await m.pipeState.update({ lastIssuedTotalizerLbs: m.newBaseline, lastIssueAt: observedAt })
-        await batch.increment({ cumulativeIssuedLbs: nsIssueLbs(m.line, m.delta), cumulativeIssuedLbsCorrected: correctedLineLbs(m.line, m.delta) })
+        await batch.increment({ cumulativeIssuedLbs: m.delta })
         await db.MesBlendTankInflow.create({
           blendTankBatchId: batch.id,
           line: m.line,

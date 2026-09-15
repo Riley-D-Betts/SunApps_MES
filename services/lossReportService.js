@@ -243,32 +243,14 @@ function blendConcurrencySql(alias, hasColumn) {
   }
 }
 
-/**
- * SD-722 cream-line correction: blend issued lb for loss math is
- * cumulativeIssuedLbsCorrected when present (NULL on older batches / column not
- * yet added), else cumulativeIssuedLbs. The ZERO_ISSUED_LBS filters keep using
- * cumulativeIssuedLbs (what NS was issued).
- */
-let _blendCorrectedColumn = null
-async function blendIssuedSql(alias) {
-  if (_blendCorrectedColumn === null) {
-    const [r] = await query(`SELECT COUNT(*) AS n FROM sys.columns WHERE Name = N'cumulativeIssuedLbsCorrected' AND Object_ID = Object_ID(N'${P}MesBlendTankBatches')`)
-    _blendCorrectedColumn = num(r && r.n) > 0
-  }
-  return _blendCorrectedColumn
-    ? `CAST(COALESCE(${alias}.[cumulativeIssuedLbsCorrected], ${alias}.[cumulativeIssuedLbs]) AS float)`
-    : `CAST(${alias}.[cumulativeIssuedLbs] AS float)`
-}
-
 async function queryBlend({ from, to, groupBy }, ctx) {
   const cols = ['mesItem']
   const cc = blendConcurrencySql('bt', await hasBlendDrainColumn())
-  const issuedSql = await blendIssuedSql('bt')
   const sql = `
     WITH b AS (
       SELECT ${localDate('COALESCE(bt.[completedAt],bt.[createdAt])')} AS localDt,
              bt.[tankId], bt.[productName], bt.[mesItem],
-             ${issuedSql} AS issued,
+             CAST(bt.[cumulativeIssuedLbs] AS float) AS issued,
              CAST(bt.[cumulativeOutputLbs] AS float) AS output,
              1 - ${cc.concurrent} AS measurable
       FROM ${T.blend} bt
@@ -658,7 +640,6 @@ function buildTrend(rows) {
 
 async function queryTopEvents({ from, to }, ctx, { limit = 10, measuredOnly = false } = {}) {
   const bcc = blendConcurrencySql('bt', await hasBlendDrainColumn())
-  const blendIssued = await blendIssuedSql('bt')
   const surgeCols = ['componentItemId', 'mesItem']
   const sql = `
     SELECT TOP ${limit} * FROM (
@@ -677,8 +658,8 @@ async function queryTopEvents({ from, to }, ctx, { limit = 10, measuredOnly = fa
         AND COALESCE([completedAt],[createdAt]) >= :from AND COALESCE([completedAt],[createdAt]) < :to
       UNION ALL
       SELECT 'blend', bt.[id], COALESCE(bt.[completedAt],bt.[createdAt]), bt.[productName], bt.[tankId], NULL, bt.[nsWorkOrderNumber], NULL, ${bcc.drainMinutes}, NULL,
-             ${ctx.familyCase(['mesItem']).replace(/\[mesItem\]/g, 'bt.[mesItem]')}, 1 - ${bcc.concurrent}, ${blendIssued},
-             ${max0(`${blendIssued} - CAST(bt.[cumulativeOutputLbs] AS float)`)},
+             ${ctx.familyCase(['mesItem']).replace(/\[mesItem\]/g, 'bt.[mesItem]')}, 1 - ${bcc.concurrent}, CAST(bt.[cumulativeIssuedLbs] AS float),
+             ${max0('CAST(bt.[cumulativeIssuedLbs] AS float) - CAST(bt.[cumulativeOutputLbs] AS float)')},
              ${ctx.priceCase(['mesItem']).replace(/\[mesItem\]/g, 'bt.[mesItem]')},
              ${ctx.revCase('mesItem').replace(/\[mesItem\]/g, 'bt.[mesItem]')}
       FROM ${T.blend} bt

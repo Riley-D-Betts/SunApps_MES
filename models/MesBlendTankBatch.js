@@ -69,15 +69,6 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: 0,
       },
-      // SD-722: issued lb for MES waste/loss math — CL* line lb × CREAM_LINE_LB_FACTOR,
-      // milk lines as-is, backfilled inflows at the NS quantity (they are
-      // mirrored 1:1 into output). cumulativeIssuedLbs stays = what NetSuite was
-      // issued. NULL on batches that predate the column (readers COALESCE).
-      cumulativeIssuedLbsCorrected: {
-        type: DataTypes.DECIMAL(14, 2),
-        allowNull: true,
-        defaultValue: 0,
-      },
       cumulativeCompletedLbs: {
         type: DataTypes.DECIMAL(14, 2),
         allowNull: false,
